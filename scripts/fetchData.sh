@@ -37,12 +37,14 @@ fi
 parse_dh() {
   local s="$1"
   local d h
-  d=$(echo "$s" | cut -fd -d | awk '{print $1}')
-  h=$(echo "$s" | cut -fd -d | awk '{print $2}')
+
+  IFS='d' read -r d h <<< "$s"
+
   if [[ -z "$d" || -z "$h" ]]; then
-    d=$(echo "$s" | cut -f1 -dd)
-    h=$(echo "$s" | cut -f2 -dd)
+    echo "ERROR: Bad time spec '$s'. Expected something like '0d0' or '1d12'." >&2
+    exit 2
   fi
+
   echo "$d" "$h"
 }
 
