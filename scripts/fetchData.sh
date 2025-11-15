@@ -85,8 +85,17 @@ if [[ "$USE_ARIA2" -eq 1 ]]; then
     done
   done
 
+   if [[ ! -s "$TMP_LIST" ]]; then
+    echo "No URLs were generated for this range; nothing to download." >&2
+    exit 0
+  fi
+
   echo ">>> Using aria2c to download…"
-  aria2c -i "$TMP_LIST" -c -m 0 -x16 -s16 -k1M --retry-wait=3 --timeout=60
+  aria2c -i "$TMP_LIST" \
+    -c -m 0 -x16 -s16 -k1M \
+    --retry-wait=3 --timeout=60 \
+    --console-log-level=notice \
+    -l "${DATA_ROOT}/aria2.log"
 
 else
   for i in 0 1; do
