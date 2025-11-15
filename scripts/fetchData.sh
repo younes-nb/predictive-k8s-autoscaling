@@ -16,6 +16,8 @@ set -euo pipefail
 #   /dataset/raw/alibaba_v2022/MSRTMCR/MSRTMCR           MCRRTUpdate/MCRRTUpdate
 
 DATA_ROOT="/dataset/raw/alibaba_v2022"
+MSRES_DIR="${DATA_ROOT}/MSResource"
+MSRTMCR_DIR="${DATA_ROOT}/MSRTMCR"
 
 USE_ARIA2=0
 for ARGUMENT in "$@"; do
@@ -117,6 +119,23 @@ fi
 
 echo "All requested files downloaded (MSResource + MSRTMCR)."
 echo
-echo "Next (extract all downloaded archives in-place):"
-echo "  for f in ${DATA_ROOT}/MSResource/*.tar.gz; do tar -xzf \"\$f\" -C ${DATA_ROOT}/MSResource; done"
-echo "  for f in ${DATA_ROOT}/MSRTMCR/*.tar.gz; do tar -xzf \"\$f\" -C ${DATA_ROOT}/MSRTMCR; done"
+echo "Extracting archives in-place and deleting .tar.gz to save space..."
+
+for dir in "$MSRES_DIR" "$MSRTMCR_DIR"; do
+  echo "Processing directory: $dir"
+  if compgen -G "${dir}/*.tar.gz" > /dev/null; then
+    for f in "${dir}"/*.tar.gz; do
+      [ -e "$f" ] || continue
+      echo "  Extracting $(basename "$f") ..."
+      if tar -xzf "$f" -C "$dir"; then
+        rm "$f"
+      else
+        echo "  [WARN] Extraction failed for $f, keeping archive." >&2
+      fi
+    done
+  else
+    echo "  No .tar.gz files found in $dir"
+  fi
+done
+
+echo "Done. All archives extracted and .tar.gz files removed."
