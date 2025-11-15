@@ -15,7 +15,6 @@ set -euo pipefail
 #   /dataset/raw/alibaba_v2022/MSResource/MSResource     MSMetricsUpdate/MSMetricsUpdate
 #   /dataset/raw/alibaba_v2022/MSRTMCR/MSRTMCR           MCRRTUpdate/MCRRTUpdate
 
-# >>> NEW: where to store things on this node
 DATA_ROOT="/dataset/raw/alibaba_v2022"
 
 USE_ARIA2=0
@@ -67,36 +66,40 @@ declare -a ratio=(30 3)
 BASE_URL="https://aliopentrace.oss-cn-beijing.aliyuncs.com/v2022MicroservicesTraces"
 
 if [[ "$USE_ARIA2" -eq 1 ]]; then
-  TMP_LIST=$(mktemp)
-  trap 'rm -f "$TMP_LIST"' EXIT
+  echo ">>> Using aria2c to download…"
 
-  for i in 0 1; do
-    r=${ratio[$i]}
-    start_idx=$(( START_MIN / r ))
-    end_idx=$(( END_MIN / r - 1 ))
+  TMP_LIST_MSRES=$(mktemp)
+  trap 'rm -f "$TMP_LIST_MSRES" "$TMP_LIST_MSRTMCR"' EXIT
 
-    for idx in $(seq "$start_idx" "$end_idx"); do
-      dst="${local_prefix[$i]}_${idx}.tar.gz"
-      url="${BASE_URL}/${remote_prefix[$i]}_${idx}.tar.gz"
-      {
-        echo "$url"
-        echo "  out=$dst"
-      } >> "$TMP_LIST"
-    done
+  r=${ratio[0]}
+  start_idx=$(( START_MIN / r ))
+  end_idx=$(( END_MIN / r - 1 ))
+  for idx in $(seq "$start_idx" "$end_idx"); do
+    url="${BASE_URL}/${remote_prefix[0]}_${idx}.tar.gz"
+    echo "$url" >> "$TMP_LIST_MSRES"
   done
 
-   if [[ ! -s "$TMP_LIST" ]]; then
-    echo "No URLs were generated for this range; nothing to download." >&2
-    exit 0
-  fi
-
-  echo ">>> Using aria2c to download…"
-  aria2c -i "$TMP_LIST" \
+  aria2c -i "$TMP_LIST_MSRES" \
     -c -m 0 -x16 -s16 -k1M \
     --retry-wait=3 --timeout=60 \
     --console-log-level=notice \
-    -l "${DATA_ROOT}/aria2.log"
+    --dir="${DATA_ROOT}/MSResource"
 
+  TMP_LIST_MSRTMCR=$(mktemp)
+
+  r=${ratio[1]}
+  start_idx=$(( START_MIN / r ))
+  end_idx=$(( END_MIN / r - 1 ))
+  for idx in $(seq "$start_idx" "$end_idx"); do
+    url="${BASE_URL}/${remote_prefix[1]}_${idx}.tar.gz"
+    echo "$url" >> "$TMP_LIST_MSRTMCR"
+  done
+
+  aria2c -i "$TMP_LIST_MSRTMCR" \
+    -c -m 0 -x16 -s16 -k1M \
+    --retry-wait=3 --timeout=60 \
+    --console-log-level=notice \
+    --dir="${DATA_ROOT}/MSRTMCR"
 else
   for i in 0 1; do
     r=${ratio[$i]}
