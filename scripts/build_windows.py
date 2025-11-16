@@ -24,9 +24,15 @@ def moving_average(a, window):
     return np.convolve(a, kernel, mode="same")
 
 
+def windows_from_array(arr1d, input_len, pred_horizon, stride):
+    if len(arr1d) < input_len + pred_horizon + 5:
+        return None, None
+    return windowize(arr1d, input_len, pred_horizon, stride)
+
+
 def main():
     p = argparse.ArgumentParser(
-        description="Build windows with smoothing and normalization."
+        description="Build windows with smoothing and normalization (sharded per Parquet)."
     )
     p.add_argument("--parquet_dir", required=True)
     p.add_argument("--out_dir", required=True)
@@ -53,12 +59,8 @@ def main():
     if not parts:
         raise SystemExit("No parquet found")
 
-    all_train_X, all_train_y = [], []
-    all_val_X, all_val_y = [], []
-    all_test_X, all_test_y = [], []
-
-    for pq in parts:
-        print("Processing parquet:", pq)
+    for shard_idx, pq in enumerate(parts):
+        print(f"=== Processing parquet shard {shard_idx}: {pq}")
         df = pl.read_parquet(pq)
 
         if df[args.time_col].dtype != pl.Datetime:
@@ -86,6 +88,10 @@ def main():
         val_end = max(val_end, train_end + 1)
         val_end = min(val_end, max_minute + 1)
 
+        shard_train_X, shard_train_y = [], []
+        shard_val_X, shard_val_y = [], []
+        shard_test_X, shard_test_y = [], []
+
         for _, g in df.group_by(args.id_cols, maintain_order=True):
             g = g.sort("_minute")
 
@@ -101,55 +107,56 @@ def main():
             a_norm = (a_smooth - a_min) / (a_max - a_min + 1e-8)
 
             if len(minutes) != len(a_norm):
-                print(f"[WARN] length mismatch in group, skipping: len(minutes)={len(minutes)}, len(a_norm)={len(a_norm)}")
+                print(f"[WARN] mismatch len(minutes)={len(minutes)}, len(a_norm)={len(a_norm)}; skipping group")
                 continue
 
             train_mask = minutes < train_end
             val_mask = (minutes >= train_end) & (minutes < val_end)
             test_mask = minutes >= val_end
 
-            def windows_from_array(arr1d):
-                if len(arr1d) < args.input_len + args.pred_horizon + 5:
-                    return None, None
-                return windowize(arr1d, args.input_len, args.pred_horizon, args.stride)
-
-            trX, trY = windows_from_array(a_norm[train_mask])
-            vlX, vlY = windows_from_array(a_norm[val_mask])
-            teX, teY = windows_from_array(a_norm[test_mask])
+            trX, trY = windows_from_array(a_norm[train_mask],
+                                          args.input_len, args.pred_horizon, args.stride)
+            vlX, vlY = windows_from_array(a_norm[val_mask],
+                                          args.input_len, args.pred_horizon, args.stride)
+            teX, teY = windows_from_array(a_norm[test_mask],
+                                          args.input_len, args.pred_horizon, args.stride)
 
             if trX is not None:
-                all_train_X.append(trX)
-                all_train_y.append(trY)
+                shard_train_X.append(trX); shard_train_y.append(trY)
             if vlX is not None:
-                all_val_X.append(vlX)
-                all_val_y.append(vlY)
+                shard_val_X.append(vlX); shard_val_y.append(vlY)
             if teX is not None:
-                all_test_X.append(teX)
-                all_test_y.append(teY)
+                shard_test_X.append(teX); shard_test_y.append(teY)
 
-    def cat_or_empty(chunks, shape):
-        if not chunks:
-            return np.empty(shape, dtype="float32")
-        return np.concatenate(chunks, axis=0)
+        def cat_or_empty(chunks, shape_tail):
+            if not chunks:
+                return np.empty((0, *shape_tail), dtype="float32")
+            return np.concatenate(chunks, axis=0).astype("float32")
 
-    Xtr = cat_or_empty(all_train_X, (0, args.input_len))
-    ytr = cat_or_empty(all_train_y, (0, args.pred_horizon))
-    Xv = cat_or_empty(all_val_X, (0, args.input_len))
-    yv = cat_or_empty(all_val_y, (0, args.pred_horizon))
-    Xte = cat_or_empty(all_test_X, (0, args.input_len))
-    yte = cat_or_empty(all_test_y, (0, args.pred_horizon))
+        if shard_train_X or shard_val_X or shard_test_X:
+            Xtr = cat_or_empty(shard_train_X, (args.input_len,))
+            ytr = cat_or_empty(shard_train_y, (args.pred_horizon,))
+            Xv  = cat_or_empty(shard_val_X, (args.input_len,))
+            yv  = cat_or_empty(shard_val_y, (args.pred_horizon,))
+            Xte = cat_or_empty(shard_test_X, (args.input_len,))
+            yte = cat_or_empty(shard_test_y, (args.pred_horizon,))
 
-    np.save(os.path.join(args.out_dir, "X_train.npy"), Xtr)
-    np.save(os.path.join(args.out_dir, "y_train.npy"), ytr)
-    np.save(os.path.join(args.out_dir, "X_val.npy"), Xv)
-    np.save(os.path.join(args.out_dir, "y_val.npy"), yv)
-    np.save(os.path.join(args.out_dir, "X_test.npy"), Xte)
-    np.save(os.path.join(args.out_dir, "y_test.npy"), yte)
+            base = os.path.join(args.out_dir, f"part-{shard_idx:04d}")
+            np.save(base + "_X_train.npy", Xtr)
+            np.save(base + "_y_train.npy", ytr)
+            np.save(base + "_X_val.npy",   Xv)
+            np.save(base + "_y_val.npy",   yv)
+            np.save(base + "_X_test.npy",  Xte)
+            np.save(base + "_y_test.npy",  yte)
 
-    print("Saved shapes:")
-    print("  train:", Xtr.shape, ytr.shape)
-    print("  val:  ", Xv.shape, yv.shape)
-    print("  test: ", Xte.shape, yte.shape)
+            print(f"  Saved shard {shard_idx}:")
+            print(f"    train: {Xtr.shape}, {ytr.shape}")
+            print(f"    val:   {Xv.shape}, {yv.shape}")
+            print(f"    test:  {Xte.shape}, {yte.shape}")
+        else:
+            print(f"  No windows produced for shard {shard_idx}, skipping saves")
+
+    print("All shards processed.")
 
 
 if __name__ == "__main__":
