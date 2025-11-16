@@ -1,18 +1,24 @@
-
-
 import argparse
 import os
 import sys
 import urllib.request
 import tarfile
 
+THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, os.pardir))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+
+from config import PATHS, DATASET_TABLES  # noqa: E402
+
+
 BASE_URL = "https://aliopentrace.oss-cn-beijing.aliyuncs.com/v2022MicroservicesTraces"
 
 TABLE_CONFIG = {
     "msresource": {
-        "prefix": "MSMetricsUpdate/MSMetricsUpdate",
-        "ratio_min": 30,
-        "default_raw_dir": "/dataset1/alibaba_v2022/raw/msresource",
+        "prefix": DATASET_TABLES["msresource"]["prefix"],
+        "ratio_min": DATASET_TABLES["msresource"]["ratio_min"],
+        "default_raw_dir": PATHS.RAW_MSRESOURCE,
     },
 }
 
@@ -82,10 +88,12 @@ def main():
     ap.add_argument(
         "--table",
         default="msresource",
+        help="Table name (currently only 'msresource' is configured).",
     )
     ap.add_argument(
         "--raw_dir",
         default=None,
+        help="Override default raw directory (otherwise use config.PATHS).",
     )
     args = ap.parse_args()
 

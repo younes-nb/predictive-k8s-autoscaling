@@ -1,7 +1,16 @@
-import polars as pl
 import glob
 import os
+import sys
 import argparse
+
+import polars as pl
+
+THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, os.pardir))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+
+from config import PREPROCESSING
 
 
 def main():
@@ -9,8 +18,17 @@ def main():
         description="Ingest CSV trace files into Parquet (CPU-only baseline)."
     )
     p.add_argument("--raw_dir", required=True, help="Directory with CSV files.")
-    p.add_argument("--out_dir", required=True, help="Output directory for Parquet files.")
-    p.add_argument("--repartition", type=int, default=4, help="Number of Parquet parts.")
+    p.add_argument(
+        "--out_dir",
+        required=True,
+        help="Output directory for Parquet files.",
+    )
+    p.add_argument(
+        "--repartition",
+        type=int,
+        default=PREPROCESSING.REPARTITION,
+        help=f"Number of Parquet parts (default {PREPROCESSING.REPARTITION}).",
+    )
     p.add_argument(
         "--keep_raw",
         action="store_true",
@@ -21,8 +39,8 @@ def main():
     os.makedirs(args.out_dir, exist_ok=True)
 
     files = sorted(
-        glob.glob(os.path.join(args.raw_dir, "*.csv")) +
-        glob.glob(os.path.join(args.raw_dir, "*.csv.gz"))
+        glob.glob(os.path.join(args.raw_dir, "*.csv"))
+        + glob.glob(os.path.join(args.raw_dir, "*.csv.gz"))
     )
 
     if not files:

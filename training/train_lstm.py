@@ -1,11 +1,20 @@
 import os
 import glob
+import sys
 import time
 import argparse
+
 import numpy as np
 import torch
 from torch import nn
 from torch.utils.data import Dataset, DataLoader
+
+THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, os.pardir))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+
+from config import PATHS, TRAINING, DEFAULT_CHECKPOINT_PATH
 
 
 class ShardedWindowsDataset(Dataset):
@@ -27,7 +36,9 @@ class ShardedWindowsDataset(Dataset):
             base = x_path.replace(f"_X_{split}.npy", "")
             y_path = base + f"_y_{split}.npy"
             if not os.path.exists(y_path):
-                raise RuntimeError(f"Missing matching y file for {x_path}: expected {y_path}")
+                raise RuntimeError(
+                    f"Missing matching y file for {x_path}: expected {y_path}"
+                )
 
             X = np.load(x_path, mmap_mode="r")
             Y = np.load(y_path, mmap_mode="r")
@@ -86,10 +97,6 @@ class LSTMForecaster(nn.Module):
         self.fc = nn.Linear(hidden_size, horizon)
 
     def forward(self, x):
-        """
-        x: (batch, seq_len, input_size)
-        returns: (batch, horizon)
-        """
         out, _ = self.lstm(x)
         last = out[:, -1, :]
         pred = self.fc(last)
@@ -105,7 +112,7 @@ def train(args):
         torch.cuda.manual_seed_all(args.seed)
 
     run_ts = time.strftime("%Y%m%d-%H%M%S")
-    log_dir = "/dataset1/alibaba_v2022/logs"
+    log_dir = PATHS.LOGS_DIR
     os.makedirs(log_dir, exist_ok=True)
     log_path = os.path.join(log_dir, f"train_{run_ts}.log")
     print(f"Epoch summaries will be logged to: {log_path}")
@@ -298,35 +305,30 @@ def parse_args():
         required=True,
         help="Directory with part-*_X_{train,val,test}.npy and part-*_y_{train,val,test}.npy",
     )
-    p.add_argument("--input_len", type=int, default=60)
-    p.add_argument("--pred_horizon", type=int, default=5)
-    p.add_argument("--hidden_size", type=int, default=64)
-    p.add_argument("--num_layers", type=int, default=2)
-    p.add_argument("--dropout", type=float, default=0.1)
-    p.add_argument("--batch_size", type=int, default=256)
-    p.add_argument("--epochs", type=int, default=10)
-    p.add_argument("--lr", type=float, default=1e-3)
-    p.add_argument("--grad_clip", type=float, default=1.0)
-    p.add_argument("--num_workers", type=int, default=4)
-    p.add_argument(
-        "--cpu",
-        action="store_true",
-    )
-    p.add_argument("--seed", type=int, default=42)
-    p.add_argument(
-        "--log_interval",
-        type=int,
-        default=1000,
-    )
+    p.add_argument("--input_len", type=int, default=PREPROCESSING.INPUT_LEN)
+    p.add_argument("--pred_horizon", type=int, default=PREPROCESSING.PRED_HORIZON)
+    p.add_argument("--hidden_size", type=int, default=TRAINING.HIDDEN_SIZE)
+    p.add_argument("--num_layers", type=int, default=TRAINING.NUM_LAYERS)
+    p.add_argument("--dropout", type=float, default=TRAINING.DROPOUT)
+    p.add_argument("--batch_size", type=int, default=TRAINING.BATCH_SIZE)
+    p.add_argument("--epochs", type=int, default=TRAINING.EPOCHS)
+    p.add_argument("--lr", type=float, default=TRAINING.LR)
+    p.add_argument("--grad_clip", type=float, default=TRAINING.GRAD_CLIP)
+    p.add_argument("--num_workers", type=int, default=TRAINING.NUM_WORKERS)
+    p.add_argument("--cpu", action="store_true")
+    p.add_argument("--seed", type=int, default=TRAINING.SEED)
+    p.add_argument("--log_interval", type=int, default=TRAINING.LOG_INTERVAL)
     p.add_argument(
         "--checkpoint_path",
         type=str,
-        default="/dataset1/alibaba_v2022/models/lstm_cpu_baseline.pt",
+        default=DEFAULT_CHECKPOINT_PATH,
     )
 
     return p.parse_args()
 
 
 if __name__ == "__main__":
+    from config import PREPROCESSING 
+
     args = parse_args()
     train(args)
