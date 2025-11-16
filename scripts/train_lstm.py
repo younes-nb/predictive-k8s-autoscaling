@@ -1,5 +1,6 @@
 import os
 import glob
+import time
 import argparse
 import numpy as np
 import torch
@@ -59,8 +60,9 @@ class ShardedWindowsDataset(Dataset):
                 prev_cum = 0 if shard_idx == 0 else self.cum_lengths[shard_idx - 1]
                 local_idx = idx - prev_cum
                 X, Y = self.shards[shard_idx]
-                x_arr = X[local_idx]
-                y_arr = Y[local_idx]
+
+                x_arr = np.array(X[local_idx], copy=True)
+                y_arr = np.array(Y[local_idx], copy=True)
 
                 x_tensor = torch.from_numpy(x_arr).float().unsqueeze(-1)
                 y_tensor = torch.from_numpy(y_arr).float()
@@ -101,6 +103,20 @@ def train(args):
     torch.manual_seed(args.seed)
     if device.type == "cuda":
         torch.cuda.manual_seed_all(args.seed)
+
+    run_ts = time.strftime("%Y%m%d-%H%M%S")
+    log_dir = "/dataset1/alibaba_v2022/logs"
+    os.makedirs(log_dir, exist_ok=True)
+    log_path = os.path.join(log_dir, f"train_{run_ts}.log")
+    print(f"Epoch summaries will be logged to: {log_path}")
+
+    with open(log_path, "a") as f:
+        f.write(f"Run timestamp: {run_ts}\n")
+        f.write(f"Device: {device}\n")
+        f.write(f"Windows dir: {args.windows_dir}\n")
+        f.write(f"Checkpoint path: {args.checkpoint_path}\n")
+        f.write(f"Hyperparams: {vars(args)}\n")
+        f.write("-" * 60 + "\n")
 
     print("Loading datasets from:", args.windows_dir)
     print(f"  input_len={args.input_len}, horizon={args.pred_horizon}")
@@ -174,7 +190,11 @@ def train(args):
         num_batches = len(train_loader)
         print(f"\nEpoch {epoch}/{args.epochs} - {num_batches} batches")
 
+        epoch_train_start = time.time()
+
         for batch_idx, (X_batch, y_batch) in enumerate(train_loader, start=1):
+            batch_start = time.time()
+
             X_batch = X_batch.to(device)
             y_batch = y_batch.to(device)
 
@@ -188,6 +208,8 @@ def train(args):
 
             optimizer.step()
 
+            batch_time = time.time() - batch_start
+
             batch_size = X_batch.size(0)
             train_loss_sum += loss.item() * batch_size
             train_count += batch_size
@@ -198,15 +220,22 @@ def train(args):
                     f"  [Epoch {epoch:03d}] "
                     f"Batch {batch_idx:06d}/{num_batches:06d} "
                     f"Loss (batch)={loss.item():.6f} "
-                    f"Avg (so far)={avg_so_far:.6f}"
+                    f"Avg (so far)={avg_so_far:.6f} "
+                    f"BatchTime={batch_time:.3f}s"
                 )
 
+        train_time_epoch = time.time() - epoch_train_start
         train_loss = train_loss_sum / max(1, train_count)
+
+        val_loss = None
+        val_time_epoch = None
 
         if val_loader is not None:
             model.eval()
             val_loss_sum = 0.0
             val_count = 0
+
+            val_start = time.time()
             with torch.no_grad():
                 for X_batch, y_batch in val_loader:
                     X_batch = X_batch.to(device)
@@ -217,14 +246,27 @@ def train(args):
                     val_loss_sum += loss.item() * batch_size
                     val_count += batch_size
 
+            val_time_epoch = time.time() - val_start
             val_loss = val_loss_sum / max(1, val_count)
-        else:
-            val_loss = None
 
         if val_loss is not None:
-            print(f"Epoch {epoch:03d} SUMMARY: train_loss={train_loss:.6f}, val_loss={val_loss:.6f}")
+            summary = (
+                f"Epoch {epoch:03d} SUMMARY: "
+                f"train_loss={train_loss:.6f}, "
+                f"val_loss={val_loss:.6f}, "
+                f"train_time={train_time_epoch:.2f}s, "
+                f"val_time={val_time_epoch:.2f}s"
+            )
         else:
-            print(f"Epoch {epoch:03d} SUMMARY: train_loss={train_loss:.6f}")
+            summary = (
+                f"Epoch {epoch:03d} SUMMARY: "
+                f"train_loss={train_loss:.6f}, "
+                f"train_time={train_time_epoch:.2f}s"
+            )
+
+        print(summary)
+        with open(log_path, "a") as f:
+            f.write(summary + "\n")
 
         score = val_loss if val_loss is not None else train_loss
         if score < best_score:
@@ -235,13 +277,18 @@ def train(args):
                     "epoch": epoch,
                     "train_loss": train_loss,
                     "val_loss": val_loss,
+                    "train_time_epoch": train_time_epoch,
+                    "val_time_epoch": val_time_epoch,
                     "args": vars(args),
                 },
                 args.checkpoint_path,
             )
             print(f"  → Saved new best model (score={score:.6f}) to {args.checkpoint_path}")
 
-    print("\nTraining complete. Best score:", best_score)
+    final_msg = f"Training complete. Best score: {best_score:.6f}"
+    print("\n" + final_msg)
+    with open(log_path, "a") as f:
+        f.write(final_msg + "\n")
 
 
 def parse_args():
