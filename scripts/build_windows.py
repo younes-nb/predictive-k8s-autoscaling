@@ -15,8 +15,11 @@ def windowize(arr, in_len, horizon, stride):
 
 
 def moving_average(a, window):
-    if window <= 1:
+    n = len(a)
+    if window <= 1 or n == 0:
         return a
+    if window > n:
+        window = n
     kernel = np.ones(window, dtype=a.dtype) / float(window)
     return np.convolve(a, kernel, mode="same")
 
@@ -96,6 +99,10 @@ def main():
             if a_max - a_min < 1e-8:
                 continue
             a_norm = (a_smooth - a_min) / (a_max - a_min + 1e-8)
+
+            if len(minutes) != len(a_norm):
+                print(f"[WARN] length mismatch in group, skipping: len(minutes)={len(minutes)}, len(a_norm)={len(a_norm)}")
+                continue
 
             train_mask = minutes < train_end
             val_mask = (minutes >= train_end) & (minutes < val_end)
