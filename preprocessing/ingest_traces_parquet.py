@@ -1,7 +1,7 @@
+import argparse
 import glob
 import os
 import sys
-import argparse
 
 import polars as pl
 
@@ -15,20 +15,10 @@ from config import PREPROCESSING
 
 def main():
     p = argparse.ArgumentParser(
-        description="Ingest CSV trace files into Parquet (CPU-only baseline)."
+        description="Ingest CSV trace files into Parquet in a streaming, memory-safe way."
     )
-    p.add_argument("--raw_dir", required=True, help="Directory with CSV files.")
-    p.add_argument(
-        "--out_dir",
-        required=True,
-        help="Output directory for Parquet files.",
-    )
-    p.add_argument(
-        "--repartition",
-        type=int,
-        default=PREPROCESSING.REPARTITION,
-        help=f"Number of Parquet parts (default {PREPROCESSING.REPARTITION}).",
-    )
+    p.add_argument("--raw_dir", required=True, help="Directory with CSV / CSV.GZ files.")
+    p.add_argument("--out_dir", required=True, help="Output directory for Parquet files.")
     p.add_argument(
         "--keep_raw",
         action="store_true",
@@ -39,16 +29,20 @@ def main():
     os.makedirs(args.out_dir, exist_ok=True)
 
     files = sorted(
-        glob.glob(os.path.join(args.raw_dir, "*.csv"))
-        + glob.glob(os.path.join(args.raw_dir, "*.csv.gz"))
+        glob.glob(os.path.join(args.raw_dir, "*.csv")) +
+        glob.glob(os.path.join(args.raw_dir, "*.csv.gz"))
     )
-
     if not files:
         raise SystemExit(f"No CSV/CSV.GZ files found under {args.raw_dir}")
 
-    batches = []
-    scan_kwargs = dict(low_memory=True, try_parse_dates=False, infer_schema_length=50000)
-    needed = {"timestamp", "msname", "msinstanceid", "cpu_utilization"}
+    needed = {"timestamp", PREPROCESSING.TARGET_COL, *PREPROCESSING.ID_COLS}
+    scan_kwargs = dict(
+        low_memory=True,
+        try_parse_dates=False,
+        infer_schema_length=50_000,
+    )
+
+    part_idx = 0
 
     for f in files:
         print(f"Reading {f} ...")
@@ -62,46 +56,28 @@ def main():
         df = df.drop_nulls(subset=list(needed))
 
         df = df.with_columns(
-            pl.from_epoch(pl.col("timestamp") / 1000, time_unit="s").alias("timestamp_dt")
+            pl.from_epoch(pl.col("timestamp") / 1000, time_unit="s").alias(PREPROCESSING.TIME_COL)
         )
 
         df = df.select(
-            "timestamp", "timestamp_dt", "msname", "msinstanceid", "cpu_utilization"
+            "timestamp",
+            PREPROCESSING.TIME_COL,
+            *list(PREPROCESSING.ID_COLS),
+            PREPROCESSING.TARGET_COL,
         )
 
-        batches.append(df)
+        out_path = os.path.join(args.out_dir, f"part-{part_idx:05d}.parquet")
+        print(f"  Writing {df.height} rows -> {out_path}")
+        df.write_parquet(out_path, compression="zstd")
+        part_idx += 1
 
-    if not batches:
-        raise SystemExit("No usable CSV batches after validation")
-
-    big = pl.concat(batches, rechunk=True)
-    print(f"Total rows after concat: {big.height}")
-
-    big = big.sort(["timestamp_dt", "msname", "msinstanceid"])
-    big = big.rechunk()
-
-    npart = max(1, args.repartition)
-    rows = big.height
-    rows_per = (rows + npart - 1) // npart
-
-    for i in range(npart):
-        start = i * rows_per
-        if start >= rows:
-            break
-        end = min(rows, start + rows_per)
-        out_path = os.path.join(args.out_dir, f"part-{i:05d}.parquet")
-        print(f"Writing rows {start}:{end} -> {out_path}")
-        big.slice(start, end - start).write_parquet(out_path, compression="zstd")
-
-    print("Wrote parquet parts to", args.out_dir)
-
-    if not args.keep_raw:
-        print("Deleting raw CSV files to save space...")
-        for f in files:
+        if not args.keep_raw:
             try:
                 os.remove(f)
             except OSError as e:
                 print(f"[WARN] Failed to remove {f}: {e}")
+
+    print(f"Wrote {part_idx} parquet parts to {args.out_dir}")
 
 
 if __name__ == "__main__":
