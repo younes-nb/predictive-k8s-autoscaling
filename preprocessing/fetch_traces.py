@@ -9,7 +9,7 @@ REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, os.pardir))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from config import PATHS, DATASET_TABLES  # noqa: E402
+from config import PATHS, DATASET_TABLES
 
 
 BASE_URL = "https://aliopentrace.oss-cn-beijing.aliyuncs.com/v2022MicroservicesTraces"
@@ -71,7 +71,10 @@ def extract_and_remove_tar(tar_path: str, out_dir: str):
     print(f"Extracting {tar_path} into {out_dir}")
     try:
         with tarfile.open(tar_path, "r:gz") as tar:
-            tar.extractall(path=out_dir)
+            try:
+                tar.extractall(path=out_dir, filter="data")
+            except TypeError:
+                tar.extractall(path=out_dir)
         os.remove(tar_path)
         return True
     except Exception as e:
