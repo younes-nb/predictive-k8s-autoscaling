@@ -62,6 +62,22 @@ def main():
         help="Skip testing step.",
     )
 
+    ap.add_argument(
+        "--skip_fetch",
+        action="store_true",
+        help="Within preprocessing, skip fetch_traces.py.",
+    )
+    ap.add_argument(
+        "--skip_ingest",
+        action="store_true",
+        help="Within preprocessing, skip ingest_traces_parquet.py.",
+    )
+    ap.add_argument(
+        "--skip_windows",
+        action="store_true",
+        help="Within preprocessing, skip build_windows.py.",
+    )
+
     args = ap.parse_args()
 
     preprocess_script = os.path.join(REPO_ROOT, "run_preprocessing.py")
@@ -79,6 +95,14 @@ def main():
             "--end_date",
             args.end_date,
         ]
+
+        if args.skip_fetch:
+            cmd_pre.append("--skip_fetch")
+        if args.skip_ingest:
+            cmd_pre.append("--skip_ingest")
+        if args.skip_windows:
+            cmd_pre.append("--skip_windows")
+
         total_times["preprocessing"] = run(cmd_pre, "Step 1: Preprocessing")
     else:
         print("\n=== Skipping preprocessing step (per --skip_preprocessing) ===")

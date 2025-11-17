@@ -4,11 +4,11 @@ import os
 
 @dataclass(frozen=True)
 class Paths:
-    RAW_MSRESOURCE: str = "/dataset1/alibaba_v2022/raw/msresource"
-    PARQUET_MSRESOURCE: str = "/dataset1/alibaba_v2022/parquet/msresource"
-    WINDOWS_DIR: str = "/dataset2/alibaba_v2022/windows"
-    MODELS_DIR: str = "/dataset1/alibaba_v2022/models"
-    LOGS_DIR: str = "/dataset1/alibaba_v2022/logs"
+    RAW_MSRESOURCE: str = "/dataset/alibaba_v2022/raw/msresource"
+    PARQUET_MSRESOURCE: str = "/dataset/alibaba_v2022/parquet/msresource"
+    WINDOWS_DIR: str = "/dataset/alibaba_v2022/windows"
+    MODELS_DIR: str = "/dataset/alibaba_v2022/models"
+    LOGS_DIR: str = "/dataset/alibaba_v2022/logs"
 
 
 @dataclass(frozen=True)

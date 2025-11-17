@@ -38,6 +38,22 @@ def main():
         "--smoothing_window", type=int, default=PREPROCESSING.SMOOTHING_WINDOW
     )
 
+    ap.add_argument(
+        "--skip_fetch",
+        action="store_true",
+        help="Skip fetch_traces.py (assume raw CSVs already exist).",
+    )
+    ap.add_argument(
+        "--skip_ingest",
+        action="store_true",
+        help="Skip ingest_traces_parquet.py (assume Parquet files already exist).",
+    )
+    ap.add_argument(
+        "--skip_windows",
+        action="store_true",
+        help="Skip build_windows.py (assume window .npy files already exist).",
+    )
+
     args = ap.parse_args()
 
     repo_root = Path(__file__).resolve().parent
@@ -46,61 +62,70 @@ def main():
     ingest_script = repo_root / "preprocessing" / "ingest_traces_parquet.py"
     windows_script = repo_root / "preprocessing" / "build_windows.py"
 
-    cmd_fetch = [
-        sys.executable,
-        str(fetch_script),
-        "--start_date",
-        args.start_date,
-        "--end_date",
-        args.end_date,
-        "--table",
-        "msresource",
-        "--raw_dir",
-        args.raw_dir,
-    ]
-    print("=== Step 1: Fetch Data ===")
-    print("Running:", " ".join(cmd_fetch))
-    subprocess.run(cmd_fetch, check=True)
+    if not args.skip_fetch:
+        cmd_fetch = [
+            sys.executable,
+            str(fetch_script),
+            "--start_date",
+            args.start_date,
+            "--end_date",
+            args.end_date,
+            "--table",
+            "msresource",
+            "--raw_dir",
+            args.raw_dir,
+        ]
+        print("=== Step 1: Fetch Data ===")
+        print("Running:", " ".join(cmd_fetch))
+        subprocess.run(cmd_fetch, check=True)
+    else:
+        print("=== Skipping Step 1: Fetch Data (per --skip_fetch) ===")
 
-    os.makedirs(args.parquet_dir, exist_ok=True)
-    cmd_ingest = [
-        sys.executable,
-        str(ingest_script),
-        "--raw_dir",
-        args.raw_dir,
-        "--out_dir",
-        args.parquet_dir,
-    ]
-    print("=== Step 2: Ingest CSV -> Parquet ===")
-    print("Running:", " ".join(cmd_ingest))
-    subprocess.run(cmd_ingest, check=True)
+    if not args.skip_ingest:
+        os.makedirs(args.parquet_dir, exist_ok=True)
+        cmd_ingest = [
+            sys.executable,
+            str(ingest_script),
+            "--raw_dir",
+            args.raw_dir,
+            "--out_dir",
+            args.parquet_dir,
+        ]
+        print("=== Step 2: Ingest CSV -> Parquet ===")
+        print("Running:", " ".join(cmd_ingest))
+        subprocess.run(cmd_ingest, check=True)
+    else:
+        print("=== Skipping Step 2: Ingest CSV -> Parquet (per --skip_ingest) ===")
 
-    os.makedirs(args.windows_dir, exist_ok=True)
-    cmd_windows = [
-        sys.executable,
-        str(windows_script),
-        "--parquet_dir",
-        args.parquet_dir,
-        "--out_dir",
-        args.windows_dir,
-        "--input_len",
-        str(args.input_len),
-        "--pred_horizon",
-        str(args.pred_horizon),
-        "--stride",
-        str(args.stride),
-        "--train_frac",
-        str(args.train_frac),
-        "--val_frac",
-        str(args.val_frac),
-        "--smoothing_window",
-        str(args.smoothing_window),
-    ]
-    print("=== Step 3: Build windows ===")
-    print("Running:", " ".join(cmd_windows))
-    subprocess.run(cmd_windows, check=True)
+    if not args.skip_windows:
+        os.makedirs(args.windows_dir, exist_ok=True)
+        cmd_windows = [
+            sys.executable,
+            str(windows_script),
+            "--parquet_dir",
+            args.parquet_dir,
+            "--out_dir",
+            args.windows_dir,
+            "--input_len",
+            str(args.input_len),
+            "--pred_horizon",
+            str(args.pred_horizon),
+            "--stride",
+            str(args.stride),
+            "--train_frac",
+            str(args.train_frac),
+            "--val_frac",
+            str(args.val_frac),
+            "--smoothing_window",
+            str(args.smoothing_window),
+        ]
+        print("=== Step 3: Build windows ===")
+        print("Running:", " ".join(cmd_windows))
+        subprocess.run(cmd_windows, check=True)
+    else:
+        print("=== Skipping Step 3: Build windows (per --skip_windows) ===")
 
-    print("=== Preprocessing pipeline completed successfully ===")
+    print("=== Preprocessing pipeline completed (with skips as configured) ===")
 
 
 if __name__ == "__main__":
