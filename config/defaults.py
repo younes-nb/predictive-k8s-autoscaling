@@ -1,7 +1,6 @@
-import os
 from dataclasses import dataclass
 from typing import Tuple
-
+import os
 
 @dataclass(frozen=True)
 class Paths:
@@ -16,29 +15,33 @@ class Paths:
 class PreprocessingDefaults:
     INPUT_LEN: int = 60
     PRED_HORIZON: int = 5
-    STRIDE: int = 1
-    TRAIN_FRAC: float = 0.7
-    VAL_FRAC: float = 0.15
+    STRIDE: int = 10
+    TRAIN_FRAC: float = 0.5
+    VAL_FRAC: float = 0.25
     SMOOTHING_WINDOW: int = 5
     REPARTITION: int = 4
     TIME_COL: str = "timestamp_dt"
     TARGET_COL: str = "cpu_utilization"
     ID_COLS: Tuple[str, ...] = ("msname", "msinstanceid")
     FREQ: str = "1m"
+    SERVICE_COL: str = "msname"
+    MAX_SERVICES: int = 2000
+    SUBSET_SEED: int = 42
 
 
 @dataclass(frozen=True)
 class TrainingDefaults:
-    HIDDEN_SIZE: int = 64
-    NUM_LAYERS: int = 2
+    HIDDEN_SIZE: int = 32
+    NUM_LAYERS: int = 1
     DROPOUT: float = 0.1
-    BATCH_SIZE: int = 256
-    EPOCHS: int = 10
+    BATCH_SIZE: int = 512
+    EPOCHS: int = 3
     LR: float = 1e-3
     GRAD_CLIP: float = 1.0
-    NUM_WORKERS: int = 4
+    NUM_WORKERS: int = 8
     SEED: int = 42
-    LOG_INTERVAL: int = 1000
+    LOG_INTERVAL: int = 2000
+    INFERENCE_REPEATS: int = 100
 
 
 PATHS = Paths()

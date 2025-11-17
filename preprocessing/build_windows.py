@@ -39,6 +39,7 @@ def main():
     )
     p.add_argument("--parquet_dir", required=True)
     p.add_argument("--out_dir", required=True)
+
     p.add_argument("--time_col", default=PREPROCESSING.TIME_COL)
     p.add_argument("--target_col", default=PREPROCESSING.TARGET_COL)
     p.add_argument(
@@ -47,6 +48,7 @@ def main():
         default=list(PREPROCESSING.ID_COLS),
     )
     p.add_argument("--freq", default=PREPROCESSING.FREQ)
+
     p.add_argument("--input_len", type=int, default=PREPROCESSING.INPUT_LEN)
     p.add_argument("--pred_horizon", type=int, default=PREPROCESSING.PRED_HORIZON)
     p.add_argument("--stride", type=int, default=PREPROCESSING.STRIDE)
@@ -57,6 +59,25 @@ def main():
         type=int,
         default=PREPROCESSING.SMOOTHING_WINDOW,
     )
+    p.add_argument(
+        "--service_col",
+        type=str,
+        default=PREPROCESSING.SERVICE_COL,
+        help="Column that identifies the service for subsetting (default: msname).",
+    )
+    p.add_argument(
+        "--max_services",
+        type=int,
+        default=PREPROCESSING.MAX_SERVICES,
+        help="Max number of services to keep globally (0 means use all services).",
+    )
+    p.add_argument(
+        "--subset_seed",
+        type=int,
+        default=PREPROCESSING.SUBSET_SEED,
+        help="Random seed used when sampling a subset of services.",
+    )
+
     args = p.parse_args()
 
     if args.train_frac <= 0 or args.val_frac < 0:
@@ -70,9 +91,81 @@ def main():
     if not parts:
         raise SystemExit("No parquet found")
 
+    selected_services = None
+    if args.max_services and args.max_services > 0:
+        service_col = args.service_col
+        print(
+            f"Selecting a global subset of services from column '{service_col}' "
+            f"(max_services={args.max_services}, seed={args.subset_seed})"
+        )
+
+        all_services = set()
+        for pq in parts:
+            try:
+                df_services = pl.read_parquet(pq, columns=[service_col])
+            except Exception as e:
+                print(
+                    f"[ERROR] Unable to read column '{service_col}' from {pq}: {e}",
+                    file=sys.stderr,
+                )
+                raise SystemExit(
+                    f"Service column '{service_col}' not found in parquet schema."
+                )
+
+            uniq = df_services[service_col].unique()
+            all_services.update(uniq.to_list())
+
+        all_services_list = sorted(all_services)
+        total_services = len(all_services_list)
+
+        if total_services == 0:
+            raise SystemExit(
+                f"No services found in column '{service_col}' across all parquet files."
+            )
+
+        if total_services <= args.max_services:
+            selected_services = all_services_list
+            print(
+                f"Found {total_services} services (<= max_services). "
+                f"Using all of them."
+            )
+        else:
+            rng = np.random.default_rng(args.subset_seed)
+            indices = rng.choice(
+                total_services,
+                size=args.max_services,
+                replace=False,
+            )
+            services_array = np.array(all_services_list, dtype=object)
+            selected_services = services_array[indices].tolist()
+            print(
+                f"Found {total_services} services total, "
+                f"randomly selected {len(selected_services)}."
+            )
+
+        selected_services = set(selected_services)
+        sample_preview = list(selected_services)[:10]
+        print(f"Example selected services (up to 10): {sample_preview}")
+    # -------------------------------------------------------------------------
+
     for shard_idx, pq in enumerate(parts):
         print(f"=== Processing parquet shard {shard_idx}: {pq}")
         df = pl.read_parquet(pq)
+
+        if selected_services is not None:
+            if args.service_col not in df.columns:
+                raise SystemExit(
+                    f"service_col '{args.service_col}' not present in shard {pq}"
+                )
+            before_rows = df.height
+            df = df.filter(pl.col(args.service_col).is_in(list(selected_services)))
+            after_rows = df.height
+            print(
+                f"  Filtered shard rows by service subset: {before_rows} -> {after_rows}"
+            )
+            if after_rows == 0:
+                print("  Shard has no rows after service filtering, skipping.")
+                continue
 
         if df[args.time_col].dtype != pl.Datetime:
             df = df.with_columns(pl.col(args.time_col).cast(pl.Datetime))
