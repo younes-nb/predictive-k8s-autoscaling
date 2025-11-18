@@ -37,6 +37,12 @@ def main():
     ap.add_argument(
         "--smoothing_window", type=int, default=PREPROCESSING.SMOOTHING_WINDOW
     )
+    
+    ap.add_argument(
+        "--keep_raw",
+        action="store_true",
+        help="If set, do NOT delete raw CSVs after Parquet is written (passed to ingest_traces_parquet.py).",
+    )
 
     ap.add_argument(
         "--skip_fetch",
@@ -91,6 +97,8 @@ def main():
             "--out_dir",
             args.parquet_dir,
         ]
+        if args.keep_raw:
+            cmd_ingest.append("--keep_raw")
         print("=== Step 2: Ingest CSV -> Parquet ===")
         print("Running:", " ".join(cmd_ingest))
         subprocess.run(cmd_ingest, check=True)

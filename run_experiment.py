@@ -77,6 +77,11 @@ def main():
         action="store_true",
         help="Within preprocessing, skip build_windows.py.",
     )
+    ap.add_argument(
+        "--keep_raw",
+        action="store_true",
+        help="Forward to preprocessing so ingest_traces_parquet.py keeps raw CSVs.",
+    )
 
     args = ap.parse_args()
 
@@ -102,6 +107,8 @@ def main():
             cmd_pre.append("--skip_ingest")
         if args.skip_windows:
             cmd_pre.append("--skip_windows")
+        if args.keep_raw:
+            cmd_pre.append("--keep_raw")
 
         total_times["preprocessing"] = run(cmd_pre, "Step 1: Preprocessing")
     else:
