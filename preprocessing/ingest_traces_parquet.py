@@ -4,6 +4,8 @@ import argparse
 import sys
 
 import polars as pl
+import pyarrow.parquet as pq
+
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, os.pardir))
@@ -15,7 +17,7 @@ from config import PREPROCESSING
 
 def main():
     p = argparse.ArgumentParser(
-        description="Ingest CSV trace files into Parquet (CPU-only baseline, streaming)."
+        description="Ingest CSV trace files into Parquet (CPU-only baseline, streaming, incremental writer)."
     )
     p.add_argument("--raw_dir", required=True, help="Directory with CSV files.")
     p.add_argument("--out_dir", required=True, help="Output directory for Parquet files.")
@@ -56,7 +58,6 @@ def main():
     )
 
     part_idx = 0
-
     for i in range(npart):
         start = (n_files * i) // npart
         end = (n_files * (i + 1)) // npart
@@ -65,11 +66,14 @@ def main():
             continue
 
         print(
-            f"\n[Part {part_idx}] Reading files {start}..{end - 1} "
+            f"\n[Part {part_idx}] Processing files {start}..{end - 1} "
             f"({len(batch_files)} CSVs)"
         )
 
-        batches = []
+        writer = None
+        total_rows = 0
+        out_path = os.path.join(args.out_dir, f"part-{part_idx:05d}.parquet")
+
         for f in batch_files:
             print(f"  Reading {f} ...")
             df = pl.read_csv(f, **scan_kwargs)
@@ -95,22 +99,29 @@ def main():
                 "cpu_utilization",
             )
 
-            batches.append(df)
+            df = df.sort(["timestamp_dt", "msname", "msinstanceid"])
 
-        if not batches:
-            print(f"  [Part {part_idx}] No usable rows in this batch, skipping.")
-            continue
+            if df.height == 0:
+                print("  [INFO] No usable rows after cleaning; skipping this file.")
+                continue
 
-        big = pl.concat(batches, rechunk=True)
-        print(f"  [Part {part_idx}] Rows after concat: {big.height}")
+            table = df.to_arrow()
+            if writer is None:
+                print(f"  [Part {part_idx}] Creating Parquet writer for {out_path}")
+                writer = pq.ParquetWriter(out_path, table.schema, compression="zstd")
 
-        big = big.sort(["timestamp_dt", "msname", "msinstanceid"]).rechunk()
+            writer.write_table(table)
+            total_rows += table.num_rows
 
-        out_path = os.path.join(args.out_dir, f"part-{part_idx:05d}.parquet")
-        print(f"  [Part {part_idx}] Writing -> {out_path}")
-        big.write_parquet(out_path, compression="zstd")
-
-        part_idx += 1
+        if writer is not None:
+            writer.close()
+            print(f"  [Part {part_idx}] Wrote {total_rows} rows -> {out_path}")
+            part_idx += 1
+        else:
+            print(
+                f"  [Part {part_idx}] No usable rows in this batch, "
+                f"no Parquet file written."
+            )
 
     print(f"\nWrote {part_idx} parquet parts to {args.out_dir}")
 
