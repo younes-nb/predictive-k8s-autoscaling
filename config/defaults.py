@@ -4,12 +4,11 @@ import os
 
 @dataclass(frozen=True)
 class Paths:
-    RAW_MSRESOURCE: str = "/dataset/alibaba_v2022/raw/msresource"
-    PARQUET_MSRESOURCE: str = "/dataset/alibaba_v2022/parquet/msresource"
-    WINDOWS_DIR: str = "/dataset/alibaba_v2022/windows"
-    MODELS_DIR: str = "/dataset/alibaba_v2022/models"
-    LOGS_DIR: str = "/dataset/alibaba_v2022/logs"
-
+    RAW_MSRESOURCE: str = "/dataset/raw/msresource"
+    PARQUET_MSRESOURCE: str = "/dataset/parquet/msresource"
+    WINDOWS_DIR: str = "/dataset/windows"
+    MODELS_DIR: str = "/dataset/models"
+    LOGS_DIR: str = "/dataset/logs"
 
 @dataclass(frozen=True)
 class PreprocessingDefaults:
@@ -31,11 +30,11 @@ class PreprocessingDefaults:
 
 @dataclass(frozen=True)
 class TrainingDefaults:
-    HIDDEN_SIZE: int = 32
-    NUM_LAYERS: int = 1
+    HIDDEN_SIZE: int = 64
+    NUM_LAYERS: int = 2
     DROPOUT: float = 0.1
     BATCH_SIZE: int = 512
-    EPOCHS: int = 3
+    EPOCHS: int = 5
     LR: float = 1e-3
     GRAD_CLIP: float = 1.0
     NUM_WORKERS: int = 8
