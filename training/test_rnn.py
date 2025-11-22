@@ -83,9 +83,6 @@ class ShardedWindowsDataset(Dataset):
 
 
 class RNNForecaster(nn.Module):
-    """
-    Same architecture as in train_lstm.py, supports LSTM or GRU.
-    """
     def __init__(
         self,
         input_size: int = 1,
@@ -144,7 +141,14 @@ def evaluate_test(args):
     dropout = ckpt_args.get("dropout", TRAINING.DROPOUT)
     pred_horizon = ckpt_args.get("pred_horizon", PREPROCESSING.PRED_HORIZON)
     input_len = ckpt_args.get("input_len", PREPROCESSING.INPUT_LEN)
-    rnn_type = ckpt_args.get("rnn_type", "lstm")
+
+    rnn_type_ckpt = ckpt_args.get("rnn_type")
+    if rnn_type_ckpt is not None:
+        rnn_type = rnn_type_ckpt
+    elif args.rnn_type is not None:
+        rnn_type = args.rnn_type
+    else:
+        rnn_type = "lstm"
 
     with open(log_path, "a") as f:
         f.write(f"Run timestamp: {run_ts}\n")
@@ -153,8 +157,8 @@ def evaluate_test(args):
         f.write(f"Checkpoint path: {args.checkpoint_path}\n")
         f.write(f"Loaded hyperparams from checkpoint: {ckpt_args}\n")
         f.write(
-            f"Effective input_len={input_len}, "
-            f"pred_horizon={pred_horizon}, rnn_type={rnn_type}\n"
+            f"Effective input_len={input_len}, pred_horizon={pred_horizon}, "
+            f"rnn_type={rnn_type}\n"
         )
         f.write("-" * 60 + "\n")
 
@@ -334,6 +338,15 @@ def parse_args():
         type=int,
         default=TRAINING.INFERENCE_REPEATS,
         help="Number of repeated forward passes for inference-time benchmark.",
+    )
+    p.add_argument(
+        "--rnn_type",
+        choices=["lstm", "gru"],
+        default=None,
+        help=(
+            "RNN cell type to use if not stored in checkpoint "
+            "(default: use checkpoint metadata or 'lstm')."
+        ),
     )
 
     return p.parse_args()
