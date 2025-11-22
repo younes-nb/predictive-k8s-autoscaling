@@ -180,7 +180,7 @@ def evaluate_test(args):
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
-        pin_memory=False,  # CPU only
+        pin_memory=False,
         drop_last=False,
     )
 
