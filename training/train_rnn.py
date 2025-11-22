@@ -82,12 +82,28 @@ class ShardedWindowsDataset(Dataset):
         raise IndexError(idx)
 
 
-class LSTMForecaster(nn.Module):
-    def __init__(self, input_size=1, hidden_size=64, num_layers=2,
-                 dropout=0.1, horizon=5):
+class RNNForecaster(nn.Module):
+    """
+    Generic RNN forecaster that can use LSTM or GRU cells.
+    """
+    def __init__(
+        self,
+        input_size: int = 1,
+        hidden_size: int = 64,
+        num_layers: int = 2,
+        dropout: float = 0.1,
+        horizon: int = 5,
+        rnn_type: str = "lstm",
+    ):
         super().__init__()
         self.horizon = horizon
-        self.lstm = nn.LSTM(
+        self.rnn_type = rnn_type.lower()
+        if self.rnn_type not in ("lstm", "gru"):
+            raise ValueError(f"Unsupported rnn_type: {self.rnn_type}")
+
+        rnn_cls = nn.LSTM if self.rnn_type == "lstm" else nn.GRU
+
+        self.rnn = rnn_cls(
             input_size=input_size,
             hidden_size=hidden_size,
             num_layers=num_layers,
@@ -97,7 +113,9 @@ class LSTMForecaster(nn.Module):
         self.fc = nn.Linear(hidden_size, horizon)
 
     def forward(self, x):
-        out, _ = self.lstm(x)
+        if x.dim() == 2:
+            x = x.unsqueeze(-1)
+        out, _ = self.rnn(x)
         last = out[:, -1, :]
         pred = self.fc(last)
         return pred
@@ -168,12 +186,13 @@ def train(args):
     else:
         print("[INFO] No validation data available, skipping validation.")
 
-    model = LSTMForecaster(
+    model = RNNForecaster(
         input_size=1,
         hidden_size=args.hidden_size,
         num_layers=args.num_layers,
         dropout=args.dropout,
         horizon=args.pred_horizon,
+        rnn_type=args.rnn_type,
     ).to(device)
 
     criterion = nn.MSELoss()
@@ -299,7 +318,7 @@ def train(args):
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Train LSTM on CPU windows.")
+    p = argparse.ArgumentParser(description="Train RNN (LSTM/GRU) on CPU windows.")
     p.add_argument(
         "--windows_dir",
         required=True,
@@ -323,12 +342,18 @@ def parse_args():
         type=str,
         default=DEFAULT_CHECKPOINT_PATH,
     )
+    p.add_argument(
+        "--rnn_type",
+        choices=["lstm", "gru"],
+        default="lstm",
+        help="Recurrent cell type to use (default: lstm).",
+    )
 
     return p.parse_args()
 
 
 if __name__ == "__main__":
-    from config import PREPROCESSING 
+    from config import PREPROCESSING
 
     args = parse_args()
     train(args)

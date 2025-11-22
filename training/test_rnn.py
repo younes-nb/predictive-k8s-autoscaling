@@ -82,12 +82,28 @@ class ShardedWindowsDataset(Dataset):
         raise IndexError(idx)
 
 
-class LSTMForecaster(nn.Module):
-    def __init__(self, input_size=1, hidden_size=64, num_layers=2,
-                 dropout=0.1, horizon=5):
+class RNNForecaster(nn.Module):
+    """
+    Same architecture as in train_lstm.py, supports LSTM or GRU.
+    """
+    def __init__(
+        self,
+        input_size: int = 1,
+        hidden_size: int = 64,
+        num_layers: int = 2,
+        dropout: float = 0.1,
+        horizon: int = 5,
+        rnn_type: str = "lstm",
+    ):
         super().__init__()
         self.horizon = horizon
-        self.lstm = nn.LSTM(
+        self.rnn_type = rnn_type.lower()
+        if self.rnn_type not in ("lstm", "gru"):
+            raise ValueError(f"Unsupported rnn_type: {self.rnn_type}")
+
+        rnn_cls = nn.LSTM if self.rnn_type == "lstm" else nn.GRU
+
+        self.rnn = rnn_cls(
             input_size=input_size,
             hidden_size=hidden_size,
             num_layers=num_layers,
@@ -97,19 +113,19 @@ class LSTMForecaster(nn.Module):
         self.fc = nn.Linear(hidden_size, horizon)
 
     def forward(self, x):
-        out, _ = self.lstm(x)
+        if x.dim() == 2:
+            x = x.unsqueeze(-1)
+        out, _ = self.rnn(x)
         last = out[:, -1, :]
         pred = self.fc(last)
         return pred
 
 
 def evaluate_test(args):
-    device = torch.device("cuda" if torch.cuda.is_available() and not args.cpu else "cpu")
+    device = torch.device("cpu")
     print("Using device:", device)
 
     torch.manual_seed(args.seed)
-    if device.type == "cuda":
-        torch.cuda.manual_seed_all(args.seed)
 
     run_ts = time.strftime("%Y%m%d-%H%M%S")
     log_dir = PATHS.LOGS_DIR
@@ -121,13 +137,14 @@ def evaluate_test(args):
         raise FileNotFoundError(f"Checkpoint not found: {args.checkpoint_path}")
 
     checkpoint = torch.load(args.checkpoint_path, map_location=device)
-    ckpt_args = checkpoint.get("args", {})
+    ckpt_args = checkpoint.get("args", checkpoint.get("hparams", {}))
 
     hidden_size = ckpt_args.get("hidden_size", TRAINING.HIDDEN_SIZE)
     num_layers = ckpt_args.get("num_layers", TRAINING.NUM_LAYERS)
     dropout = ckpt_args.get("dropout", TRAINING.DROPOUT)
     pred_horizon = ckpt_args.get("pred_horizon", PREPROCESSING.PRED_HORIZON)
     input_len = ckpt_args.get("input_len", PREPROCESSING.INPUT_LEN)
+    rnn_type = ckpt_args.get("rnn_type", "lstm")
 
     with open(log_path, "a") as f:
         f.write(f"Run timestamp: {run_ts}\n")
@@ -135,11 +152,14 @@ def evaluate_test(args):
         f.write(f"Windows dir: {args.windows_dir}\n")
         f.write(f"Checkpoint path: {args.checkpoint_path}\n")
         f.write(f"Loaded hyperparams from checkpoint: {ckpt_args}\n")
-        f.write(f"Effective input_len={input_len}, pred_horizon={pred_horizon}\n")
+        f.write(
+            f"Effective input_len={input_len}, "
+            f"pred_horizon={pred_horizon}, rnn_type={rnn_type}\n"
+        )
         f.write("-" * 60 + "\n")
 
     print("Loading test dataset from:", args.windows_dir)
-    print(f"  input_len={input_len}, horizon={pred_horizon}")
+    print(f"  input_len={input_len}, horizon={pred_horizon}, rnn_type={rnn_type}")
 
     test_dataset = ShardedWindowsDataset(
         windows_dir=args.windows_dir,
@@ -153,16 +173,17 @@ def evaluate_test(args):
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
-        pin_memory=(device.type == "cuda"),
+        pin_memory=False,
         drop_last=False,
     )
 
-    model = LSTMForecaster(
+    model = RNNForecaster(
         input_size=1,
         hidden_size=hidden_size,
         num_layers=num_layers,
         dropout=dropout,
         horizon=pred_horizon,
+        rnn_type=rnn_type,
     ).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
@@ -273,7 +294,7 @@ def evaluate_test(args):
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Evaluate LSTM model on test set.")
+    p = argparse.ArgumentParser(description="Evaluate RNN (LSTM/GRU) model on test set.")
     p.add_argument(
         "--windows_dir",
         default=PATHS.WINDOWS_DIR,
@@ -282,7 +303,7 @@ def parse_args():
     p.add_argument(
         "--checkpoint_path",
         default=DEFAULT_CHECKPOINT_PATH,
-        help="Path to the trained LSTM checkpoint (.pt).",
+        help="Path to the trained checkpoint (.pt).",
     )
     p.add_argument(
         "--batch_size",
@@ -295,11 +316,6 @@ def parse_args():
         type=int,
         default=TRAINING.NUM_WORKERS,
         help="Number of DataLoader workers.",
-    )
-    p.add_argument(
-        "--cpu",
-        action="store_true",
-        help="Force CPU even if CUDA is available.",
     )
     p.add_argument(
         "--seed",

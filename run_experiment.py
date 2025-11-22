@@ -25,7 +25,7 @@ def run(cmd, title: str):
 
 def main():
     ap = argparse.ArgumentParser(
-        description="Run full pipeline: preprocessing -> train LSTM -> test LSTM"
+        description="Run full pipeline: preprocessing -> train model -> test model"
     )
     ap.add_argument("--start_date", required=True, help="e.g. 0d0")
     ap.add_argument("--end_date", required=True, help="e.g. 1d0")
@@ -38,12 +38,18 @@ def main():
     ap.add_argument(
         "--checkpoint_path",
         default=DEFAULT_CHECKPOINT_PATH,
-        help=f"Path to save/load LSTM checkpoint (default: {DEFAULT_CHECKPOINT_PATH})",
+        help=f"Path to save/load model checkpoint (default: {DEFAULT_CHECKPOINT_PATH})",
     )
     ap.add_argument(
         "--cpu",
         action="store_true",
-        help="Force CPU for train/test even if CUDA is available.",
+        help="Force CPU for train step even if CUDA is available.",
+    )
+    ap.add_argument(
+        "--rnn_type",
+        choices=["lstm", "gru"],
+        default="lstm",
+        help="RNN cell type to use in train_rnn.py/test_rnn.py (default: lstm).",
     )
 
     ap.add_argument(
@@ -86,8 +92,8 @@ def main():
     args = ap.parse_args()
 
     preprocess_script = os.path.join(REPO_ROOT, "run_preprocessing.py")
-    train_script = os.path.join(REPO_ROOT, "training", "train_lstm.py")
-    test_script = os.path.join(REPO_ROOT, "training", "test_lstm.py")
+    train_script = os.path.join(REPO_ROOT, "training", "train_rnn.py")
+    test_script = os.path.join(REPO_ROOT, "training", "test_rnn.py")
 
     total_times = {}
 
@@ -122,11 +128,13 @@ def main():
             args.windows_dir,
             "--checkpoint_path",
             args.checkpoint_path,
+            "--rnn_type",
+            args.rnn_type,
         ]
         if args.cpu:
             cmd_train.append("--cpu")
 
-        total_times["training"] = run(cmd_train, "Step 2: Train LSTM")
+        total_times["training"] = run(cmd_train, "Step 2: Train Model")
     else:
         print("\n=== Skipping training step (per --skip_training) ===")
 
@@ -138,11 +146,11 @@ def main():
             args.windows_dir,
             "--checkpoint_path",
             args.checkpoint_path,
+            "--rnn_type",
+            args.rnn_type,
         ]
-        if args.cpu:
-            cmd_test.append("--cpu")
 
-        total_times["testing"] = run(cmd_test, "Step 3: Test LSTM")
+        total_times["testing"] = run(cmd_test, "Step 3: Test Model")
     else:
         print("\n=== Skipping testing step (per --skip_testing) ===")
 

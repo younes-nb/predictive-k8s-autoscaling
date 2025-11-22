@@ -15,8 +15,8 @@ class PreprocessingDefaults:
     INPUT_LEN: int = 60
     PRED_HORIZON: int = 5
     STRIDE: int = 10
-    TRAIN_FRAC: float = 0.5
-    VAL_FRAC: float = 0.25
+    TRAIN_FRAC: float = 0.6
+    VAL_FRAC: float = 0.2
     SMOOTHING_WINDOW: int = 5
     REPARTITION: int = 4
     TIME_COL: str = "timestamp_dt"
@@ -34,7 +34,7 @@ class TrainingDefaults:
     NUM_LAYERS: int = 2
     DROPOUT: float = 0.1
     BATCH_SIZE: int = 512
-    EPOCHS: int = 5
+    EPOCHS: int = 10
     LR: float = 1e-3
     GRAD_CLIP: float = 1.0
     NUM_WORKERS: int = 8
@@ -47,7 +47,7 @@ PATHS = Paths()
 PREPROCESSING = PreprocessingDefaults()
 TRAINING = TrainingDefaults()
 
-DEFAULT_CHECKPOINT_PATH = os.path.join(PATHS.MODELS_DIR, "lstm_cpu_baseline.pt")
+DEFAULT_CHECKPOINT_PATH = os.path.join(PATHS.MODELS_DIR, "model.pt")
 
 DATASET_TABLES = {
     "msresource": {
