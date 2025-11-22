@@ -53,6 +53,32 @@ def main():
     )
 
     ap.add_argument(
+        "--input_len",
+        type=int,
+        help="Override input sequence length passed to train_rnn.py",
+    )
+    ap.add_argument(
+        "--pred_horizon",
+        type=int,
+        help="Override prediction horizon passed to train_rnn.py",
+    )
+    ap.add_argument(
+        "--hidden_size",
+        type=int,
+        help="Override hidden size passed to train_rnn.py",
+    )
+    ap.add_argument(
+        "--num_layers",
+        type=int,
+        help="Override number of RNN layers passed to train_rnn.py",
+    )
+    ap.add_argument(
+        "--dropout",
+        type=float,
+        help="Override dropout rate passed to train_rnn.py",
+    )
+
+    ap.add_argument(
         "--skip_preprocessing",
         action="store_true",
         help="Skip run_preprocessing.py (assume windows already built).",
@@ -133,6 +159,17 @@ def main():
         ]
         if args.cpu:
             cmd_train.append("--cpu")
+
+        if args.input_len is not None:
+            cmd_train.extend(["--input_len", str(args.input_len)])
+        if args.pred_horizon is not None:
+            cmd_train.extend(["--pred_horizon", str(args.pred_horizon)])
+        if args.hidden_size is not None:
+            cmd_train.extend(["--hidden_size", str(args.hidden_size)])
+        if args.num_layers is not None:
+            cmd_train.extend(["--num_layers", str(args.num_layers)])
+        if args.dropout is not None:
+            cmd_train.extend(["--dropout", str(args.dropout)])
 
         total_times["training"] = run(cmd_train, "Step 2: Train Model")
     else:
