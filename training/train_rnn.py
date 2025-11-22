@@ -1,6 +1,6 @@
 import os
-import glob
 import sys
+import glob
 import time
 import argparse
 
@@ -14,7 +14,7 @@ REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, os.pardir))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from config import PATHS, TRAINING, DEFAULT_CHECKPOINT_PATH
+from config import PATHS, PREPROCESSING, TRAINING, DEFAULT_CHECKPOINT_PATH
 
 
 class ShardedWindowsDataset(Dataset):
@@ -84,7 +84,7 @@ class ShardedWindowsDataset(Dataset):
 
 class RNNForecaster(nn.Module):
     """
-    Generic RNN forecaster that can use LSTM or GRU cells.
+    Same architecture as in train_rnn.py, supports LSTM or GRU.
     """
     def __init__(
         self,
@@ -121,239 +121,240 @@ class RNNForecaster(nn.Module):
         return pred
 
 
-def train(args):
-    device = torch.device("cuda" if torch.cuda.is_available() and not args.cpu else "cpu")
+def evaluate_test(args):
+    device = torch.device("cpu")
     print("Using device:", device)
 
     torch.manual_seed(args.seed)
-    if device.type == "cuda":
-        torch.cuda.manual_seed_all(args.seed)
 
     run_ts = time.strftime("%Y%m%d-%H%M%S")
     log_dir = PATHS.LOGS_DIR
     os.makedirs(log_dir, exist_ok=True)
-    log_path = os.path.join(log_dir, f"train_{run_ts}.log")
-    print(f"Epoch summaries will be logged to: {log_path}")
+    log_path = os.path.join(log_dir, f"test_{run_ts}.log")
+    print(f"Test summary will be logged to: {log_path}")
+
+    if not os.path.exists(args.checkpoint_path):
+        raise FileNotFoundError(f"Checkpoint not found: {args.checkpoint_path}")
+
+    checkpoint = torch.load(args.checkpoint_path, map_location=device)
+    ckpt_args = checkpoint.get("args", checkpoint.get("hparams", {}))
+
+    hidden_size = ckpt_args.get("hidden_size", TRAINING.HIDDEN_SIZE)
+    num_layers = ckpt_args.get("num_layers", TRAINING.NUM_LAYERS)
+    dropout = ckpt_args.get("dropout", TRAINING.DROPOUT)
+    pred_horizon = ckpt_args.get("pred_horizon", PREPROCESSING.PRED_HORIZON)
+    input_len = ckpt_args.get("input_len", PREPROCESSING.INPUT_LEN)
+
+    rnn_type_ckpt = ckpt_args.get("rnn_type")
+    if rnn_type_ckpt is not None:
+        rnn_type = rnn_type_ckpt
+    elif args.rnn_type is not None:
+        rnn_type = args.rnn_type
+    else:
+        rnn_type = "lstm"
 
     with open(log_path, "a") as f:
         f.write(f"Run timestamp: {run_ts}\n")
         f.write(f"Device: {device}\n")
         f.write(f"Windows dir: {args.windows_dir}\n")
         f.write(f"Checkpoint path: {args.checkpoint_path}\n")
-        f.write(f"Hyperparams: {vars(args)}\n")
+        f.write(f"Loaded hyperparams from checkpoint: {ckpt_args}\n")
+        f.write(
+            f"Effective input_len={input_len}, pred_horizon={pred_horizon}, "
+            f"rnn_type={rnn_type}\n"
+        )
         f.write("-" * 60 + "\n")
 
-    print("Loading datasets from:", args.windows_dir)
-    print(f"  input_len={args.input_len}, horizon={args.pred_horizon}")
+    print("Loading test dataset from:", args.windows_dir)
+    print(f"  input_len={input_len}, horizon={pred_horizon}, rnn_type={rnn_type}")
 
-    train_dataset = ShardedWindowsDataset(
+    test_dataset = ShardedWindowsDataset(
         windows_dir=args.windows_dir,
-        split="train",
-        input_len=args.input_len,
-        horizon=args.pred_horizon,
+        split="test",
+        input_len=input_len,
+        horizon=pred_horizon,
     )
 
-    try:
-        val_dataset = ShardedWindowsDataset(
-            windows_dir=args.windows_dir,
-            split="val",
-            input_len=args.input_len,
-            horizon=args.pred_horizon,
-        )
-    except RuntimeError as e:
-        print("[WARN] Could not load val split:", e)
-        val_dataset = None
-
-    train_loader = DataLoader(
-        train_dataset,
+    test_loader = DataLoader(
+        test_dataset,
         batch_size=args.batch_size,
-        shuffle=True,
+        shuffle=False,
         num_workers=args.num_workers,
-        pin_memory=(device.type == "cuda"),
-        drop_last=True,
+        pin_memory=False,  # CPU only
+        drop_last=False,
     )
-
-    val_loader = None
-    if val_dataset is not None and len(val_dataset) > 0:
-        val_loader = DataLoader(
-            val_dataset,
-            batch_size=args.batch_size,
-            shuffle=False,
-            num_workers=args.num_workers,
-            pin_memory=(device.type == "cuda"),
-            drop_last=False,
-        )
-    else:
-        print("[INFO] No validation data available, skipping validation.")
 
     model = RNNForecaster(
         input_size=1,
-        hidden_size=args.hidden_size,
-        num_layers=args.num_layers,
-        dropout=args.dropout,
-        horizon=args.pred_horizon,
-        rnn_type=args.rnn_type,
+        hidden_size=hidden_size,
+        num_layers=num_layers,
+        dropout=dropout,
+        horizon=pred_horizon,
+        rnn_type=rnn_type,
     ).to(device)
+    model.load_state_dict(checkpoint["model_state_dict"])
+    model.eval()
 
-    criterion = nn.MSELoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
-    best_score = float("inf")
-
-    ckpt_dir = os.path.dirname(args.checkpoint_path)
-    if ckpt_dir:
-        os.makedirs(ckpt_dir, exist_ok=True)
-
-    print("Model:")
+    print("Model for testing:")
     print(model)
-    print("Checkpoint will be saved to:", args.checkpoint_path)
     print("-" * 80)
 
-    for epoch in range(1, args.epochs + 1):
-        model.train()
-        train_loss_sum = 0.0
-        train_count = 0
+    mse_sum = 0.0
+    mae_sum = 0.0
+    total_elems = 0
 
-        num_batches = len(train_loader)
-        print(f"\nEpoch {epoch}/{args.epochs} - {num_batches} batches")
+    start_test = time.time()
 
-        epoch_train_start = time.time()
-
-        for batch_idx, (X_batch, y_batch) in enumerate(train_loader, start=1):
-            batch_start = time.time()
-
+    with torch.no_grad():
+        for batch_idx, (X_batch, y_batch) in enumerate(test_loader, start=1):
             X_batch = X_batch.to(device)
             y_batch = y_batch.to(device)
 
-            optimizer.zero_grad()
             preds = model(X_batch)
-            loss = criterion(preds, y_batch)
-            loss.backward()
 
-            if args.grad_clip is not None and args.grad_clip > 0:
-                nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+            diff = preds - y_batch
+            mse_batch = torch.sum(diff * diff).item()
+            mae_batch = torch.sum(torch.abs(diff)).item()
+            n_elems = y_batch.numel()
 
-            optimizer.step()
+            mse_sum += mse_batch
+            mae_sum += mae_batch
+            total_elems += n_elems
 
-            batch_time = time.time() - batch_start
-
-            batch_size = X_batch.size(0)
-            train_loss_sum += loss.item() * batch_size
-            train_count += batch_size
-
-            if batch_idx % args.log_interval == 0 or batch_idx == num_batches:
-                avg_so_far = train_loss_sum / max(1, train_count)
+            if batch_idx % args.log_interval == 0 or batch_idx == len(test_loader):
+                running_mse = mse_sum / max(1, total_elems)
+                elapsed = time.time() - start_test
                 print(
-                    f"  [Epoch {epoch:03d}] "
-                    f"Batch {batch_idx:06d}/{num_batches:06d} "
-                    f"Loss (batch)={loss.item():.6f} "
-                    f"Avg (so far)={avg_so_far:.6f} "
-                    f"BatchTime={batch_time:.3f}s"
+                    f"[Test] Batch {batch_idx:06d}/{len(test_loader):06d} "
+                    f"running_mse={running_mse:.6f} elapsed={elapsed:.2f}s"
                 )
 
-        train_time_epoch = time.time() - epoch_train_start
-        train_loss = train_loss_sum / max(1, train_count)
+    end_test = time.time()
+    test_time = end_test - start_test
 
-        val_loss = None
-        val_time_epoch = None
+    if total_elems == 0:
+        raise RuntimeError("Test set produced 0 elements; please check your windows.")
 
-        if val_loader is not None:
-            model.eval()
-            val_loss_sum = 0.0
-            val_count = 0
+    test_mse = mse_sum / total_elems
+    test_mae = mae_sum / total_elems
 
-            val_start = time.time()
-            with torch.no_grad():
-                for X_batch, y_batch in val_loader:
-                    X_batch = X_batch.to(device)
-                    y_batch = y_batch.to(device)
-                    preds = model(X_batch)
-                    loss = criterion(preds, y_batch)
-                    batch_size = X_batch.size(0)
-                    val_loss_sum += loss.item() * batch_size
-                    val_count += batch_size
+    test_summary = (
+        f"TEST SUMMARY: "
+        f"mse={test_mse:.6f}, "
+        f"mae={test_mae:.6f}, "
+        f"test_time={test_time:.2f}s, "
+        f"num_windows={len(test_dataset)}, "
+        f"batch_size={args.batch_size}"
+    )
 
-            val_time_epoch = time.time() - val_start
-            val_loss = val_loss_sum / max(1, val_count)
+    print("\n" + test_summary)
+    with open(log_path, "a") as f:
+        f.write(test_summary + "\n")
 
-        if val_loss is not None:
-            summary = (
-                f"Epoch {epoch:03d} SUMMARY: "
-                f"train_loss={train_loss:.6f}, "
-                f"val_loss={val_loss:.6f}, "
-                f"train_time={train_time_epoch:.2f}s, "
-                f"val_time={val_time_epoch:.2f}s"
-            )
-        else:
-            summary = (
-                f"Epoch {epoch:03d} SUMMARY: "
-                f"train_loss={train_loss:.6f}, "
-                f"train_time={train_time_epoch:.2f}s"
-            )
+    infer_msg = "Inference benchmark could not be run (empty test set)."
+    if len(test_dataset) > 0:
+        sample_loader = DataLoader(
+            test_dataset,
+            batch_size=args.batch_size,
+            shuffle=False,
+            num_workers=0,
+            drop_last=False,
+        )
+        sample_X, _ = next(iter(sample_loader))
+        sample_X = sample_X.to(device)
 
-        print(summary)
+        with torch.no_grad():
+            for _ in range(5):
+                _ = model(sample_X)
+
+        repeats = args.inference_repeats
+        t0 = time.time()
+        with torch.no_grad():
+            for _ in range(repeats):
+                _ = model(sample_X)
+        t1 = time.time()
+
+        total_inf_time = t1 - t0
+        avg_batch_time = total_inf_time / repeats
+        avg_sample_time = avg_batch_time / sample_X.size(0)
+
+        infer_msg = (
+            "INFERENCE BENCHMARK: "
+            f"batch_size={sample_X.size(0)}, "
+            f"repeats={repeats}, "
+            f"avg_batch_time={avg_batch_time:.6f}s, "
+            f"avg_sample_time={avg_sample_time*1000:.6f}ms"
+        )
+
+        print(infer_msg)
         with open(log_path, "a") as f:
-            f.write(summary + "\n")
+            f.write(infer_msg + "\n")
+    else:
+        print(infer_msg)
+        with open(log_path, "a") as f:
+            f.write(infer_msg + "\n")
 
-        score = val_loss if val_loss is not None else train_loss
-        if score < best_score:
-            best_score = score
-            torch.save(
-                {
-                    "model_state_dict": model.state_dict(),
-                    "epoch": epoch,
-                    "train_loss": train_loss,
-                    "val_loss": val_loss,
-                    "train_time_epoch": train_time_epoch,
-                    "val_time_epoch": val_time_epoch,
-                    "args": vars(args),
-                },
-                args.checkpoint_path,
-            )
-            print(f"  → Saved new best model (score={score:.6f}) to {args.checkpoint_path}")
-
-    final_msg = f"Training complete. Best score: {best_score:.6f}"
-    print("\n" + final_msg)
+    final_msg = "Test run complete."
+    print(final_msg)
     with open(log_path, "a") as f:
         f.write(final_msg + "\n")
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Train RNN (LSTM/GRU) on CPU windows.")
+    p = argparse.ArgumentParser(description="Evaluate RNN (LSTM/GRU) model on test set.")
     p.add_argument(
         "--windows_dir",
-        required=True,
+        default=PATHS.WINDOWS_DIR,
         help="Directory with part-*_X_{train,val,test}.npy and part-*_y_{train,val,test}.npy",
     )
-    p.add_argument("--input_len", type=int, default=PREPROCESSING.INPUT_LEN)
-    p.add_argument("--pred_horizon", type=int, default=PREPROCESSING.PRED_HORIZON)
-    p.add_argument("--hidden_size", type=int, default=TRAINING.HIDDEN_SIZE)
-    p.add_argument("--num_layers", type=int, default=TRAINING.NUM_LAYERS)
-    p.add_argument("--dropout", type=float, default=TRAINING.DROPOUT)
-    p.add_argument("--batch_size", type=int, default=TRAINING.BATCH_SIZE)
-    p.add_argument("--epochs", type=int, default=TRAINING.EPOCHS)
-    p.add_argument("--lr", type=float, default=TRAINING.LR)
-    p.add_argument("--grad_clip", type=float, default=TRAINING.GRAD_CLIP)
-    p.add_argument("--num_workers", type=int, default=TRAINING.NUM_WORKERS)
-    p.add_argument("--cpu", action="store_true")
-    p.add_argument("--seed", type=int, default=TRAINING.SEED)
-    p.add_argument("--log_interval", type=int, default=TRAINING.LOG_INTERVAL)
     p.add_argument(
         "--checkpoint_path",
-        type=str,
         default=DEFAULT_CHECKPOINT_PATH,
+        help="Path to the trained checkpoint (.pt).",
+    )
+    p.add_argument(
+        "--batch_size",
+        type=int,
+        default=TRAINING.BATCH_SIZE,
+        help="Batch size for evaluation and inference benchmark.",
+    )
+    p.add_argument(
+        "--num_workers",
+        type=int,
+        default=TRAINING.NUM_WORKERS,
+        help="Number of DataLoader workers.",
+    )
+    p.add_argument(
+        "--seed",
+        type=int,
+        default=TRAINING.SEED,
+        help="Random seed.",
+    )
+    p.add_argument(
+        "--log_interval",
+        type=int,
+        default=TRAINING.LOG_INTERVAL,
+        help="How often to print running test metrics.",
+    )
+    p.add_argument(
+        "--inference_repeats",
+        type=int,
+        default=TRAINING.INFERENCE_REPEATS,
+        help="Number of repeated forward passes for inference-time benchmark.",
     )
     p.add_argument(
         "--rnn_type",
         choices=["lstm", "gru"],
-        default="lstm",
-        help="Recurrent cell type to use (default: lstm).",
+        default=None,
+        help=(
+            "RNN cell type to use if not stored in checkpoint "
+            "(default: use checkpoint metadata or 'lstm')."
+        ),
     )
 
     return p.parse_args()
 
 
 if __name__ == "__main__":
-    from config import PREPROCESSING
-
     args = parse_args()
-    train(args)
+    evaluate_test(args)
