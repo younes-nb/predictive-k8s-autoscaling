@@ -57,7 +57,9 @@ class ShardedWindowsDataset(Dataset):
             self.cum_lengths.append(total)
 
         self.total_len = total
-        print(f"[{split}] Loaded {len(self.shards)} shard(s), total windows: {self.total_len}")
+        print(
+            f"[{split}] Loaded {len(self.shards)} shard(s), total windows: {self.total_len}"
+        )
 
     def __len__(self):
         return self.total_len
@@ -298,7 +300,9 @@ def evaluate_test(args):
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Evaluate RNN (LSTM/GRU) model on test set.")
+    p = argparse.ArgumentParser(
+        description="Evaluate RNN (LSTM/GRU) model on test set."
+    )
     p.add_argument(
         "--windows_dir",
         default=PATHS.WINDOWS_DIR,

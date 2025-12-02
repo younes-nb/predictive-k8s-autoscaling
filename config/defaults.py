@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from typing import Tuple
 import os
 
+
 @dataclass(frozen=True)
 class Paths:
     RAW_MSRESOURCE: str = "/dataset/raw/msresource"
@@ -9,6 +10,7 @@ class Paths:
     WINDOWS_DIR: str = "/dataset/windows"
     MODELS_DIR: str = "/dataset/models"
     LOGS_DIR: str = "/dataset/logs"
+
 
 @dataclass(frozen=True)
 class PreprocessingDefaults:

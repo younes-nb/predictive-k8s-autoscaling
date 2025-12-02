@@ -37,7 +37,7 @@ def main():
     ap.add_argument(
         "--smoothing_window", type=int, default=PREPROCESSING.SMOOTHING_WINDOW
     )
-    
+
     ap.add_argument(
         "--keep_raw",
         action="store_true",

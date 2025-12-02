@@ -57,7 +57,9 @@ class ShardedWindowsDataset(Dataset):
             self.cum_lengths.append(total)
 
         self.total_len = total
-        print(f"[{split}] Loaded {len(self.shards)} shard(s), total windows: {self.total_len}")
+        print(
+            f"[{split}] Loaded {len(self.shards)} shard(s), total windows: {self.total_len}"
+        )
 
     def __len__(self):
         return self.total_len
@@ -119,7 +121,9 @@ class RNNForecaster(nn.Module):
 
 
 def train(args):
-    device = torch.device("cuda" if torch.cuda.is_available() and not args.cpu else "cpu")
+    device = torch.device(
+        "cuda" if torch.cuda.is_available() and not args.cpu else "cpu"
+    )
     print("Using device:", device)
 
     torch.manual_seed(args.seed)
@@ -306,7 +310,9 @@ def train(args):
                 },
                 args.checkpoint_path,
             )
-            print(f"  → Saved new best model (score={score:.6f}) to {args.checkpoint_path}")
+            print(
+                f"  → Saved new best model (score={score:.6f}) to {args.checkpoint_path}"
+            )
 
     final_msg = f"Training complete. Best score: {best_score:.6f}"
     print("\n" + final_msg)
@@ -343,7 +349,6 @@ def parse_args():
         "--rnn_type",
         choices=["lstm", "gru"],
         default="lstm",
-        help="Recurrent cell type to use (default: lstm).",
     )
 
     return p.parse_args()

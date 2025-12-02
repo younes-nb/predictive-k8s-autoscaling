@@ -20,7 +20,9 @@ def main():
         description="Ingest CSV trace files into Parquet (CPU-only baseline, streaming, incremental writer)."
     )
     p.add_argument("--raw_dir", required=True, help="Directory with CSV files.")
-    p.add_argument("--out_dir", required=True, help="Output directory for Parquet files.")
+    p.add_argument(
+        "--out_dir", required=True, help="Output directory for Parquet files."
+    )
     p.add_argument(
         "--repartition",
         type=int,
