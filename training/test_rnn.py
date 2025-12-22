@@ -85,6 +85,9 @@ class ShardedWindowsDataset(Dataset):
 
 
 class RNNForecaster(nn.Module):
+    """
+    Generic RNN forecaster that can use LSTM or GRU cells.
+    """
     def __init__(
         self,
         input_size: int = 1,
@@ -164,10 +167,17 @@ def evaluate_test(args):
             f"Effective input_len={input_len}, pred_horizon={pred_horizon}, "
             f"rnn_type={rnn_type}\n"
         )
+        f.write(
+            f"Classification threshold (for acc/precision/recall/f1) = "
+            f"{args.class_threshold}\n"
+        )
         f.write("-" * 60 + "\n")
 
     print("Loading test dataset from:", args.windows_dir)
-    print(f"  input_len={input_len}, horizon={pred_horizon}, rnn_type={rnn_type}")
+    print(
+        f"  input_len={input_len}, horizon={pred_horizon}, "
+        f"rnn_type={rnn_type}, class_threshold={args.class_threshold}"
+    )
 
     test_dataset = ShardedWindowsDataset(
         windows_dir=args.windows_dir,
@@ -204,6 +214,9 @@ def evaluate_test(args):
     mae_sum = 0.0
     total_elems = 0
 
+    threshold = args.class_threshold
+    tp = fp = tn = fn = 0
+
     start_test = time.time()
 
     with torch.no_grad():
@@ -222,6 +235,19 @@ def evaluate_test(args):
             mae_sum += mae_batch
             total_elems += n_elems
 
+            y_true_flat = y_batch.view(-1)
+            y_pred_flat = preds.view(-1)
+
+            true_pos_mask = (y_true_flat >= threshold) & (y_pred_flat >= threshold)
+            true_neg_mask = (y_true_flat < threshold) & (y_pred_flat < threshold)
+            false_pos_mask = (y_true_flat < threshold) & (y_pred_flat >= threshold)
+            false_neg_mask = (y_true_flat >= threshold) & (y_pred_flat < threshold)
+
+            tp += true_pos_mask.sum().item()
+            tn += true_neg_mask.sum().item()
+            fp += false_pos_mask.sum().item()
+            fn += false_neg_mask.sum().item()
+
             if batch_idx % args.log_interval == 0 or batch_idx == len(test_loader):
                 running_mse = mse_sum / max(1, total_elems)
                 elapsed = time.time() - start_test
@@ -239,10 +265,35 @@ def evaluate_test(args):
     test_mse = mse_sum / total_elems
     test_mae = mae_sum / total_elems
 
+    total_cls = tp + tn + fp + fn
+    if total_cls > 0:
+        accuracy = (tp + tn) / total_cls
+    else:
+        accuracy = 0.0
+
+    if (tp + fp) > 0:
+        precision = tp / (tp + fp)
+    else:
+        precision = 0.0
+
+    if (tp + fn) > 0:
+        recall = tp / (tp + fn)
+    else:
+        recall = 0.0
+
+    if (precision + recall) > 0:
+        f1 = 2 * precision * recall / (precision + recall)
+    else:
+        f1 = 0.0
+
     test_summary = (
-        f"TEST SUMMARY: "
+        "TEST SUMMARY: "
         f"mse={test_mse:.6f}, "
         f"mae={test_mae:.6f}, "
+        f"accuracy={accuracy:.6f}, "
+        f"precision={precision:.6f}, "
+        f"recall={recall:.6f}, "
+        f"f1={f1:.6f}, "
         f"test_time={test_time:.2f}s, "
         f"num_windows={len(test_dataset)}, "
         f"batch_size={args.batch_size}"
@@ -352,6 +403,20 @@ def parse_args():
         help=(
             "RNN cell type to use if not stored in checkpoint "
             "(default: use checkpoint metadata or 'lstm')."
+        ),
+    )
+    p.add_argument(
+        "--cpu",
+        action="store_true",
+        help="Force CPU even if CUDA is available.",
+    )
+    p.add_argument(
+        "--class_threshold",
+        type=float,
+        default=0.8,
+        help=(
+            "Threshold on CPU utilization to define the positive class "
+            "for accuracy/precision/recall/F1 (default: 0.8)."
         ),
     )
 
