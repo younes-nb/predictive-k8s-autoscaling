@@ -121,7 +121,9 @@ class RNNForecaster(nn.Module):
 
 
 def evaluate_test(args):
-    device = torch.device("cpu")
+    device = torch.device(
+        "cuda" if torch.cuda.is_available() and not args.cpu else "cpu"
+    )
     print("Using device:", device)
 
     torch.manual_seed(args.seed)
