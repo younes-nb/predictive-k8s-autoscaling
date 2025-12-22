@@ -17,8 +17,8 @@ class PreprocessingDefaults:
     INPUT_LEN: int = 60
     PRED_HORIZON: int = 5
     STRIDE: int = 10
-    TRAIN_FRAC: float = 0.6
-    VAL_FRAC: float = 0.2
+    TRAIN_FRAC: float = 0.7
+    VAL_FRAC: float = 0.1
     SMOOTHING_WINDOW: int = 5
     REPARTITION: int = 4
     TIME_COL: str = "timestamp_dt"
@@ -32,9 +32,9 @@ class PreprocessingDefaults:
 
 @dataclass(frozen=True)
 class TrainingDefaults:
-    HIDDEN_SIZE: int = 64
-    NUM_LAYERS: int = 2
-    DROPOUT: float = 0.1
+    HIDDEN_SIZE: int = 96
+    NUM_LAYERS: int = 3
+    DROPOUT: float = 0.15
     BATCH_SIZE: int = 512
     EPOCHS: int = 10
     LR: float = 1e-3
