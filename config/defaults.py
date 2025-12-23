@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Tuple
+from typing import Tuple, Dict, Any
 import os
 
 
@@ -12,6 +12,18 @@ class Paths:
     LOGS_DIR: str = "/dataset/logs"
 
 
+FEATURE_SETS: Dict[str, Dict[str, Any]] = {
+    "cpu": {
+        "feature_cols": ["cpu_utilization"],
+        "target_col": "cpu_utilization",
+    },
+    "cpu_mem": {
+        "feature_cols": ["cpu_utilization", "mem_utilization"],
+        "target_col": "cpu_utilization",
+    },
+}
+
+
 @dataclass(frozen=True)
 class PreprocessingDefaults:
     INPUT_LEN: int = 60
@@ -22,12 +34,12 @@ class PreprocessingDefaults:
     SMOOTHING_WINDOW: int = 5
     REPARTITION: int = 4
     TIME_COL: str = "timestamp_dt"
-    TARGET_COL: str = "cpu_utilization"
     ID_COLS: Tuple[str, ...] = ("msname", "msinstanceid")
     FREQ: str = "1m"
     SERVICE_COL: str = "msname"
     MAX_SERVICES: int = 2000
     SUBSET_SEED: int = 42
+    FEATURE_SET: str = "cpu"
 
 
 @dataclass(frozen=True)

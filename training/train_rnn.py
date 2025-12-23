@@ -14,7 +14,7 @@ REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, os.pardir))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from config import PATHS, TRAINING, DEFAULT_CHECKPOINT_PATH
+from config.defaults import PATHS, PREPROCESSING, TRAINING, DEFAULT_CHECKPOINT_PATH
 
 
 class ShardedWindowsDataset(Dataset):
@@ -46,8 +46,21 @@ class ShardedWindowsDataset(Dataset):
             if X.shape[0] != Y.shape[0]:
                 raise RuntimeError(f"Shape mismatch between {x_path} and {y_path}")
 
-            if X.ndim != 2 or X.shape[1] != input_len:
-                print(f"[WARN] {x_path} has shape {X.shape}, expected (*, {input_len})")
+            if X.ndim == 2:
+                if X.shape[1] != input_len:
+                    print(
+                        f"[WARN] {x_path} has shape {X.shape}, expected (*, {input_len})"
+                    )
+            elif X.ndim == 3:
+                if X.shape[1] != input_len:
+                    print(
+                        f"[WARN] {x_path} has shape {X.shape}, expected (*, {input_len}, F)"
+                    )
+            else:
+                raise RuntimeError(
+                    f"[ERROR] {x_path} has unsupported ndim={X.ndim} (shape={X.shape})"
+                )
+
             if Y.ndim != 2 or Y.shape[1] != horizon:
                 print(f"[WARN] {y_path} has shape {Y.shape}, expected (*, {horizon})")
 
@@ -77,7 +90,10 @@ class ShardedWindowsDataset(Dataset):
                 x_arr = np.array(X[local_idx], copy=True)
                 y_arr = np.array(Y[local_idx], copy=True)
 
-                x_tensor = torch.from_numpy(x_arr).float().unsqueeze(-1)
+                if x_arr.ndim == 1:
+                    x_arr = x_arr[:, None]
+
+                x_tensor = torch.from_numpy(x_arr).float()
                 y_tensor = torch.from_numpy(y_arr).float()
                 return x_tensor, y_tensor
 
@@ -116,8 +132,7 @@ class RNNForecaster(nn.Module):
             x = x.unsqueeze(-1)
         out, _ = self.rnn(x)
         last = out[:, -1, :]
-        pred = self.fc(last)
-        return pred
+        return self.fc(last)
 
 
 def train(args):
@@ -131,21 +146,14 @@ def train(args):
         torch.cuda.manual_seed_all(args.seed)
 
     run_ts = time.strftime("%Y%m%d-%H%M%S")
-    log_dir = PATHS.LOGS_DIR
-    os.makedirs(log_dir, exist_ok=True)
-    log_path = os.path.join(log_dir, f"train_{run_ts}.log")
+    os.makedirs(PATHS.LOGS_DIR, exist_ok=True)
+    log_path = os.path.join(PATHS.LOGS_DIR, f"train_{run_ts}.log")
     print(f"Epoch summaries will be logged to: {log_path}")
 
-    with open(log_path, "a") as f:
-        f.write(f"Run timestamp: {run_ts}\n")
-        f.write(f"Device: {device}\n")
-        f.write(f"Windows dir: {args.windows_dir}\n")
-        f.write(f"Checkpoint path: {args.checkpoint_path}\n")
-        f.write(f"Hyperparams: {vars(args)}\n")
-        f.write("-" * 60 + "\n")
-
     print("Loading datasets from:", args.windows_dir)
-    print(f"  input_len={args.input_len}, horizon={args.pred_horizon}")
+    print(
+        f"  input_len={args.input_len}, horizon={args.pred_horizon}, rnn_type={args.rnn_type}"
+    )
 
     train_dataset = ShardedWindowsDataset(
         windows_dir=args.windows_dir,
@@ -164,6 +172,14 @@ def train(args):
     except RuntimeError as e:
         print("[WARN] Could not load val split:", e)
         val_dataset = None
+
+    first_X, _ = train_dataset.shards[0]
+    if first_X.ndim == 3:
+        input_size = int(first_X.shape[2])
+    else:
+        input_size = 1
+
+    print(f"Inferred input_size={input_size} feature(s) from windows")
 
     train_loader = DataLoader(
         train_dataset,
@@ -188,7 +204,7 @@ def train(args):
         print("[INFO] No validation data available, skipping validation.")
 
     model = RNNForecaster(
-        input_size=1,
+        input_size=input_size,
         hidden_size=args.hidden_size,
         num_layers=args.num_layers,
         dropout=args.dropout,
@@ -203,6 +219,15 @@ def train(args):
     ckpt_dir = os.path.dirname(args.checkpoint_path)
     if ckpt_dir:
         os.makedirs(ckpt_dir, exist_ok=True)
+
+    with open(log_path, "a") as f:
+        f.write(f"Run timestamp: {run_ts}\n")
+        f.write(f"Device: {device}\n")
+        f.write(f"Windows dir: {args.windows_dir}\n")
+        f.write(f"Checkpoint path: {args.checkpoint_path}\n")
+        f.write(f"Hyperparams: {vars(args)}\n")
+        f.write(f"Inferred input_size: {input_size}\n")
+        f.write("-" * 60 + "\n")
 
     print("Model:")
     print(model)
@@ -237,9 +262,9 @@ def train(args):
 
             batch_time = time.time() - batch_start
 
-            batch_size = X_batch.size(0)
-            train_loss_sum += loss.item() * batch_size
-            train_count += batch_size
+            bs = X_batch.size(0)
+            train_loss_sum += loss.item() * bs
+            train_count += bs
 
             if batch_idx % args.log_interval == 0 or batch_idx == num_batches:
                 avg_so_far = train_loss_sum / max(1, train_count)
@@ -269,9 +294,9 @@ def train(args):
                     y_batch = y_batch.to(device)
                     preds = model(X_batch)
                     loss = criterion(preds, y_batch)
-                    batch_size = X_batch.size(0)
-                    val_loss_sum += loss.item() * batch_size
-                    val_count += batch_size
+                    bs = X_batch.size(0)
+                    val_loss_sum += loss.item() * bs
+                    val_count += bs
 
             val_time_epoch = time.time() - val_start
             val_loss = val_loss_sum / max(1, val_count)
@@ -306,7 +331,7 @@ def train(args):
                     "val_loss": val_loss,
                     "train_time_epoch": train_time_epoch,
                     "val_time_epoch": val_time_epoch,
-                    "args": vars(args),
+                    "args": {**vars(args), "input_size": input_size},
                 },
                 args.checkpoint_path,
             )
@@ -321,12 +346,10 @@ def train(args):
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Train RNN (LSTM/GRU) on CPU windows.")
-    p.add_argument(
-        "--windows_dir",
-        required=True,
-        help="Directory with part-*_X_{train,val,test}.npy and part-*_y_{train,val,test}.npy",
+    p = argparse.ArgumentParser(
+        description="Train RNN (LSTM/GRU) on windowed datasets."
     )
+    p.add_argument("--windows_dir", required=True)
     p.add_argument("--input_len", type=int, default=PREPROCESSING.INPUT_LEN)
     p.add_argument("--pred_horizon", type=int, default=PREPROCESSING.PRED_HORIZON)
     p.add_argument("--hidden_size", type=int, default=TRAINING.HIDDEN_SIZE)
@@ -340,22 +363,12 @@ def parse_args():
     p.add_argument("--cpu", action="store_true")
     p.add_argument("--seed", type=int, default=TRAINING.SEED)
     p.add_argument("--log_interval", type=int, default=TRAINING.LOG_INTERVAL)
-    p.add_argument(
-        "--checkpoint_path",
-        type=str,
-        default=DEFAULT_CHECKPOINT_PATH,
-    )
-    p.add_argument(
-        "--rnn_type",
-        choices=["lstm", "gru"],
-        default="lstm",
-    )
+    p.add_argument("--checkpoint_path", type=str, default=DEFAULT_CHECKPOINT_PATH)
+    p.add_argument("--rnn_type", choices=["lstm", "gru"], default="lstm")
 
     return p.parse_args()
 
 
 if __name__ == "__main__":
-    from config import PREPROCESSING
-
     args = parse_args()
     train(args)
