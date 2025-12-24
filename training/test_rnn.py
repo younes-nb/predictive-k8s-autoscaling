@@ -352,20 +352,18 @@ def parse_args():
     p = argparse.ArgumentParser(description="Evaluate RNN (LSTM/GRU) model on test set (CPU).")
     p.add_argument("--windows_dir", default=PATHS.WINDOWS_DIR)
     p.add_argument("--checkpoint_path", default=DEFAULT_CHECKPOINT_PATH)
-
     p.add_argument("--batch_size", type=int, default=TRAINING.BATCH_SIZE)
     p.add_argument("--num_workers", type=int, default=TRAINING.NUM_WORKERS)
-
     p.add_argument("--seed", type=int, default=TRAINING.SEED)
     p.add_argument("--log_interval", type=int, default=TRAINING.LOG_INTERVAL)
     p.add_argument("--inference_repeats", type=int, default=TRAINING.INFERENCE_REPEATS)
-
     p.add_argument(
         "--rnn_type",
         choices=["lstm", "gru"],
         default=None,
         help="Must match checkpoint rnn_type; used as a safety check.",
     )
+    p.add_argument("--cpu", action="store_true")
     p.add_argument(
         "--class_threshold",
         type=float,
