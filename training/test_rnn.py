@@ -14,14 +14,15 @@ REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, os.pardir))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from config import PATHS, PREPROCESSING, TRAINING, DEFAULT_CHECKPOINT_PATH
+from config.defaults import PATHS, PREPROCESSING, TRAINING, DEFAULT_CHECKPOINT_PATH
 
 
 class ShardedWindowsDataset(Dataset):
-    def __init__(self, windows_dir, split, input_len, horizon):
-        self.input_len = input_len
-        self.horizon = horizon
+    def __init__(self, windows_dir: str, split: str, input_len: int, horizon: int):
+        self.input_len = int(input_len)
+        self.horizon = int(horizon)
         self.split = split
+
         self.shards = []
         self.lengths = []
         self.cum_lengths = []
@@ -36,9 +37,7 @@ class ShardedWindowsDataset(Dataset):
             base = x_path.replace(f"_X_{split}.npy", "")
             y_path = base + f"_y_{split}.npy"
             if not os.path.exists(y_path):
-                raise RuntimeError(
-                    f"Missing matching y file for {x_path}: expected {y_path}"
-                )
+                raise RuntimeError(f"Missing matching y file for {x_path}: expected {y_path}")
 
             X = np.load(x_path, mmap_mode="r")
             Y = np.load(y_path, mmap_mode="r")
@@ -46,10 +45,17 @@ class ShardedWindowsDataset(Dataset):
             if X.shape[0] != Y.shape[0]:
                 raise RuntimeError(f"Shape mismatch between {x_path} and {y_path}")
 
-            if X.ndim != 2 or X.shape[1] != input_len:
-                print(f"[WARN] {x_path} has shape {X.shape}, expected (*, {input_len})")
-            if Y.ndim != 2 or Y.shape[1] != horizon:
-                print(f"[WARN] {y_path} has shape {Y.shape}, expected (*, {horizon})")
+            if X.ndim == 2:
+                if X.shape[1] != self.input_len:
+                    print(f"[WARN] {x_path} has shape {X.shape}, expected (*, {self.input_len})")
+            elif X.ndim == 3:
+                if X.shape[1] != self.input_len:
+                    print(f"[WARN] {x_path} has shape {X.shape}, expected (*, {self.input_len}, F)")
+            else:
+                raise RuntimeError(f"[ERROR] {x_path} has unsupported ndim={X.ndim} (shape={X.shape})")
+
+            if Y.ndim != 2 or Y.shape[1] != self.horizon:
+                print(f"[WARN] {y_path} has shape {Y.shape}, expected (*, {self.horizon})")
 
             self.shards.append((X, Y))
             self.lengths.append(X.shape[0])
@@ -57,14 +63,12 @@ class ShardedWindowsDataset(Dataset):
             self.cum_lengths.append(total)
 
         self.total_len = total
-        print(
-            f"[{split}] Loaded {len(self.shards)} shard(s), total windows: {self.total_len}"
-        )
+        print(f"[{split}] Loaded {len(self.shards)} shard(s), total windows: {self.total_len}")
 
     def __len__(self):
         return self.total_len
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx: int):
         if idx < 0 or idx >= self.total_len:
             raise IndexError(idx)
 
@@ -77,7 +81,14 @@ class ShardedWindowsDataset(Dataset):
                 x_arr = np.array(X[local_idx], copy=True)
                 y_arr = np.array(Y[local_idx], copy=True)
 
-                x_tensor = torch.from_numpy(x_arr).float().unsqueeze(-1)
+                if x_arr.ndim == 1:
+                    x_arr = x_arr[:, None] 
+                elif x_arr.ndim == 2:
+                    pass 
+                else:
+                    raise RuntimeError(f"Unexpected x_arr ndim={x_arr.ndim}, shape={x_arr.shape}")
+
+                x_tensor = torch.from_numpy(x_arr).float()
                 y_tensor = torch.from_numpy(y_arr).float()
                 return x_tensor, y_tensor
 
@@ -85,9 +96,6 @@ class ShardedWindowsDataset(Dataset):
 
 
 class RNNForecaster(nn.Module):
-    """
-    Generic RNN forecaster that can use LSTM or GRU cells.
-    """
     def __init__(
         self,
         input_size: int = 1,
@@ -114,13 +122,23 @@ class RNNForecaster(nn.Module):
         )
         self.fc = nn.Linear(hidden_size, horizon)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         if x.dim() == 2:
             x = x.unsqueeze(-1)
+
+        if x.dim() == 4 and x.size(-1) == 1:
+            x = x.squeeze(-1)
+
+        if x.dim() != 3:
+            raise ValueError(f"RNN: Expected input 3D (B,T,F), got {x.dim()}D instead (shape={tuple(x.shape)})")
+
         out, _ = self.rnn(x)
         last = out[:, -1, :]
-        pred = self.fc(last)
-        return pred
+        return self.fc(last)
+
+
+def safe_div(num: float, den: float) -> float:
+    return float(num) / float(den) if den != 0 else 0.0
 
 
 def evaluate_test(args):
@@ -132,30 +150,30 @@ def evaluate_test(args):
     torch.manual_seed(args.seed)
 
     run_ts = time.strftime("%Y%m%d-%H%M%S")
-    log_dir = PATHS.LOGS_DIR
-    os.makedirs(log_dir, exist_ok=True)
-    log_path = os.path.join(log_dir, f"test_{run_ts}.log")
+    os.makedirs(PATHS.LOGS_DIR, exist_ok=True)
+    log_path = os.path.join(PATHS.LOGS_DIR, f"test_{run_ts}.log")
     print(f"Test summary will be logged to: {log_path}")
 
     if not os.path.exists(args.checkpoint_path):
         raise FileNotFoundError(f"Checkpoint not found: {args.checkpoint_path}")
 
-    checkpoint = torch.load(args.checkpoint_path, map_location=device)
+    checkpoint = torch.load(args.checkpoint_path, map_location="cpu")
     ckpt_args = checkpoint.get("args", checkpoint.get("hparams", {}))
 
-    hidden_size = ckpt_args.get("hidden_size", TRAINING.HIDDEN_SIZE)
-    num_layers = ckpt_args.get("num_layers", TRAINING.NUM_LAYERS)
-    dropout = ckpt_args.get("dropout", TRAINING.DROPOUT)
-    pred_horizon = ckpt_args.get("pred_horizon", PREPROCESSING.PRED_HORIZON)
-    input_len = ckpt_args.get("input_len", PREPROCESSING.INPUT_LEN)
+    hidden_size = int(ckpt_args.get("hidden_size", TRAINING.HIDDEN_SIZE))
+    num_layers = int(ckpt_args.get("num_layers", TRAINING.NUM_LAYERS))
+    dropout = float(ckpt_args.get("dropout", TRAINING.DROPOUT))
+    pred_horizon = int(ckpt_args.get("pred_horizon", PREPROCESSING.PRED_HORIZON))
+    input_len = int(ckpt_args.get("input_len", PREPROCESSING.INPUT_LEN))
+    ckpt_rnn_type = str(ckpt_args.get("rnn_type", "lstm")).lower()
 
-    rnn_type_ckpt = ckpt_args.get("rnn_type")
-    if rnn_type_ckpt is not None:
-        rnn_type = rnn_type_ckpt
-    elif args.rnn_type is not None:
-        rnn_type = args.rnn_type
-    else:
-        rnn_type = "lstm"
+    if args.rnn_type is not None:
+        if args.rnn_type.lower() != ckpt_rnn_type:
+            raise SystemExit(
+                f"--rnn_type={args.rnn_type} does not match checkpoint rnn_type={ckpt_rnn_type}. "
+                f"Use the same rnn_type used during training."
+            )
+    rnn_type = ckpt_rnn_type
 
     with open(log_path, "a") as f:
         f.write(f"Run timestamp: {run_ts}\n")
@@ -163,21 +181,12 @@ def evaluate_test(args):
         f.write(f"Windows dir: {args.windows_dir}\n")
         f.write(f"Checkpoint path: {args.checkpoint_path}\n")
         f.write(f"Loaded hyperparams from checkpoint: {ckpt_args}\n")
-        f.write(
-            f"Effective input_len={input_len}, pred_horizon={pred_horizon}, "
-            f"rnn_type={rnn_type}\n"
-        )
-        f.write(
-            f"Classification threshold (for acc/precision/recall/f1) = "
-            f"{args.class_threshold}\n"
-        )
+        f.write(f"Effective input_len={input_len}, pred_horizon={pred_horizon}, rnn_type={rnn_type}\n")
+        f.write(f"class_threshold={args.class_threshold}\n")
         f.write("-" * 60 + "\n")
 
     print("Loading test dataset from:", args.windows_dir)
-    print(
-        f"  input_len={input_len}, horizon={pred_horizon}, "
-        f"rnn_type={rnn_type}, class_threshold={args.class_threshold}"
-    )
+    print(f"  input_len={input_len}, horizon={pred_horizon}, rnn_type={rnn_type}, class_threshold={args.class_threshold}")
 
     test_dataset = ShardedWindowsDataset(
         windows_dir=args.windows_dir,
@@ -191,18 +200,24 @@ def evaluate_test(args):
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
-        pin_memory=False,
         drop_last=False,
     )
 
+    input_size = ckpt_args.get("input_size", None)
+    if input_size is None:
+        first_X, _ = test_dataset[0]
+        input_size = int(first_X.shape[1]) 
+    input_size = int(input_size)
+
     model = RNNForecaster(
-        input_size=1,
+        input_size=input_size,
         hidden_size=hidden_size,
         num_layers=num_layers,
         dropout=dropout,
         horizon=pred_horizon,
         rnn_type=rnn_type,
     ).to(device)
+
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
 
@@ -214,39 +229,30 @@ def evaluate_test(args):
     mae_sum = 0.0
     total_elems = 0
 
-    threshold = args.class_threshold
     tp = fp = tn = fn = 0
 
     start_test = time.time()
+    thr = float(args.class_threshold)
 
     with torch.no_grad():
         for batch_idx, (X_batch, y_batch) in enumerate(test_loader, start=1):
             X_batch = X_batch.to(device)
             y_batch = y_batch.to(device)
 
-            preds = model(X_batch)
+            preds = model(X_batch) 
 
             diff = preds - y_batch
-            mse_batch = torch.sum(diff * diff).item()
-            mae_batch = torch.sum(torch.abs(diff)).item()
-            n_elems = y_batch.numel()
+            mse_sum += torch.sum(diff * diff).item()
+            mae_sum += torch.sum(torch.abs(diff)).item()
+            total_elems += y_batch.numel()
 
-            mse_sum += mse_batch
-            mae_sum += mae_batch
-            total_elems += n_elems
+            y_true = (y_batch >= thr)
+            y_pred = (preds >= thr)
 
-            y_true_flat = y_batch.view(-1)
-            y_pred_flat = preds.view(-1)
-
-            true_pos_mask = (y_true_flat >= threshold) & (y_pred_flat >= threshold)
-            true_neg_mask = (y_true_flat < threshold) & (y_pred_flat < threshold)
-            false_pos_mask = (y_true_flat < threshold) & (y_pred_flat >= threshold)
-            false_neg_mask = (y_true_flat >= threshold) & (y_pred_flat < threshold)
-
-            tp += true_pos_mask.sum().item()
-            tn += true_neg_mask.sum().item()
-            fp += false_pos_mask.sum().item()
-            fn += false_neg_mask.sum().item()
+            tp += torch.sum(y_pred & y_true).item()
+            fp += torch.sum(y_pred & (~y_true)).item()
+            fn += torch.sum((~y_pred) & y_true).item()
+            tn += torch.sum((~y_pred) & (~y_true)).item()
 
             if batch_idx % args.log_interval == 0 or batch_idx == len(test_loader):
                 running_mse = mse_sum / max(1, total_elems)
@@ -256,52 +262,42 @@ def evaluate_test(args):
                     f"running_mse={running_mse:.6f} elapsed={elapsed:.2f}s"
                 )
 
-    end_test = time.time()
-    test_time = end_test - start_test
-
+    test_time = time.time() - start_test
     if total_elems == 0:
         raise RuntimeError("Test set produced 0 elements; please check your windows.")
 
     test_mse = mse_sum / total_elems
     test_mae = mae_sum / total_elems
 
-    total_cls = tp + tn + fp + fn
-    if total_cls > 0:
-        accuracy = (tp + tn) / total_cls
-    else:
-        accuracy = 0.0
-
-    if (tp + fp) > 0:
-        precision = tp / (tp + fp)
-    else:
-        precision = 0.0
-
-    if (tp + fn) > 0:
-        recall = tp / (tp + fn)
-    else:
-        recall = 0.0
-
-    if (precision + recall) > 0:
-        f1 = 2 * precision * recall / (precision + recall)
-    else:
-        f1 = 0.0
+    accuracy = safe_div(tp + tn, tp + tn + fp + fn)
+    precision = safe_div(tp, tp + fp)
+    recall = safe_div(tp, tp + fn)
+    f1 = safe_div(2 * precision * recall, precision + recall)
 
     test_summary = (
-        "TEST SUMMARY: "
+        f"TEST SUMMARY: "
         f"mse={test_mse:.6f}, "
         f"mae={test_mae:.6f}, "
-        f"accuracy={accuracy:.6f}, "
-        f"precision={precision:.6f}, "
-        f"recall={recall:.6f}, "
-        f"f1={f1:.6f}, "
         f"test_time={test_time:.2f}s, "
         f"num_windows={len(test_dataset)}, "
         f"batch_size={args.batch_size}"
     )
 
+    cls_summary = (
+        f"CLASSIFICATION (thr={thr}): "
+        f"acc={accuracy:.6f}, "
+        f"prec={precision:.6f}, "
+        f"recall={recall:.6f}, "
+        f"f1={f1:.6f}, "
+        f"tp={int(tp)}, fp={int(fp)}, tn={int(tn)}, fn={int(fn)}"
+    )
+
     print("\n" + test_summary)
+    print(cls_summary)
+
     with open(log_path, "a") as f:
         f.write(test_summary + "\n")
+        f.write(cls_summary + "\n")
 
     infer_msg = "Inference benchmark could not be run (empty test set)."
     if len(test_dataset) > 0:
@@ -319,12 +315,12 @@ def evaluate_test(args):
             for _ in range(5):
                 _ = model(sample_X)
 
-        repeats = args.inference_repeats
-        t0 = time.time()
+        repeats = int(args.inference_repeats)
+        t0 = time.perf_counter()
         with torch.no_grad():
             for _ in range(repeats):
                 _ = model(sample_X)
-        t1 = time.time()
+        t1 = time.perf_counter()
 
         total_inf_time = t1 - t0
         avg_batch_time = total_inf_time / repeats
@@ -353,71 +349,28 @@ def evaluate_test(args):
 
 
 def parse_args():
-    p = argparse.ArgumentParser(
-        description="Evaluate RNN (LSTM/GRU) model on test set."
-    )
-    p.add_argument(
-        "--windows_dir",
-        default=PATHS.WINDOWS_DIR,
-        help="Directory with part-*_X_{train,val,test}.npy and part-*_y_{train,val,test}.npy",
-    )
-    p.add_argument(
-        "--checkpoint_path",
-        default=DEFAULT_CHECKPOINT_PATH,
-        help="Path to the trained checkpoint (.pt).",
-    )
-    p.add_argument(
-        "--batch_size",
-        type=int,
-        default=TRAINING.BATCH_SIZE,
-        help="Batch size for evaluation and inference benchmark.",
-    )
-    p.add_argument(
-        "--num_workers",
-        type=int,
-        default=TRAINING.NUM_WORKERS,
-        help="Number of DataLoader workers.",
-    )
-    p.add_argument(
-        "--seed",
-        type=int,
-        default=TRAINING.SEED,
-        help="Random seed.",
-    )
-    p.add_argument(
-        "--log_interval",
-        type=int,
-        default=TRAINING.LOG_INTERVAL,
-        help="How often to print running test metrics.",
-    )
-    p.add_argument(
-        "--inference_repeats",
-        type=int,
-        default=TRAINING.INFERENCE_REPEATS,
-        help="Number of repeated forward passes for inference-time benchmark.",
-    )
+    p = argparse.ArgumentParser(description="Evaluate RNN (LSTM/GRU) model on test set (CPU).")
+    p.add_argument("--windows_dir", default=PATHS.WINDOWS_DIR)
+    p.add_argument("--checkpoint_path", default=DEFAULT_CHECKPOINT_PATH)
+
+    p.add_argument("--batch_size", type=int, default=TRAINING.BATCH_SIZE)
+    p.add_argument("--num_workers", type=int, default=TRAINING.NUM_WORKERS)
+
+    p.add_argument("--seed", type=int, default=TRAINING.SEED)
+    p.add_argument("--log_interval", type=int, default=TRAINING.LOG_INTERVAL)
+    p.add_argument("--inference_repeats", type=int, default=TRAINING.INFERENCE_REPEATS)
+
     p.add_argument(
         "--rnn_type",
         choices=["lstm", "gru"],
         default=None,
-        help=(
-            "RNN cell type to use if not stored in checkpoint "
-            "(default: use checkpoint metadata or 'lstm')."
-        ),
-    )
-    p.add_argument(
-        "--cpu",
-        action="store_true",
-        help="Force CPU even if CUDA is available.",
+        help="Must match checkpoint rnn_type; used as a safety check.",
     )
     p.add_argument(
         "--class_threshold",
         type=float,
         default=0.8,
-        help=(
-            "Threshold on CPU utilization to define the positive class "
-            "for accuracy/precision/recall/F1 (default: 0.8)."
-        ),
+        help="Threshold on (normalized) cpu utilization to compute Accuracy/Precision/Recall/F1.",
     )
 
     return p.parse_args()
