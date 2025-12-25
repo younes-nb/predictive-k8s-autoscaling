@@ -246,8 +246,8 @@ def evaluate_test(args):
             mae_sum += torch.sum(torch.abs(diff)).item()
             total_elems += y_batch.numel()
 
-            y_true = (y_batch >= thr)
-            y_pred = (preds >= thr)
+            y_true = (y_batch.max(dim=1).values >= thr)
+            y_pred = (preds.max(dim=1).values >= thr)
 
             tp += torch.sum(y_pred & y_true).item()
             fp += torch.sum(y_pred & (~y_true)).item()
