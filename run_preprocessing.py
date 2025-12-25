@@ -1,139 +1,111 @@
-import argparse
 import os
-import subprocess
 import sys
-from pathlib import Path
+import time
+import argparse
+import subprocess
 
-from config import PATHS, PREPROCESSING
+THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = THIS_DIR
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+
+from config.defaults import (
+    PATHS,
+    PREPROCESSING,
+    FEATURE_SETS,
+    DATASET_TABLES,
+    tables_for_feature_set,
+)
+
+
+def run(cmd, title: str):
+    print(f"\n=== {title} ===")
+    print("Running:", " ".join(cmd))
+    start = time.time()
+    subprocess.run(cmd, check=True)
+    elapsed = time.time() - start
+    print(f"=== {title} completed in {elapsed:.2f}s ===")
+    return elapsed
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Run full preprocessing pipeline")
-
-    ap.add_argument("--start_date", required=True, help="e.g. 0d0")
-    ap.add_argument("--end_date", required=True, help="e.g. 1d0")
-
-    ap.add_argument(
-        "--raw_dir",
-        default=PATHS.RAW_MSRESOURCE,
-        help="Where raw CSVs (extracted from tar.gz) should live.",
+    ap = argparse.ArgumentParser(
+        description="Preprocessing: fetch -> ingest(all needed tables) -> build_windows(join)"
     )
-    ap.add_argument(
-        "--parquet_dir",
-        default=PATHS.PARQUET_MSRESOURCE,
-        help="Where Parquet shards should be written.",
-    )
-    ap.add_argument(
-        "--windows_dir",
-        default=PATHS.WINDOWS_DIR,
-        help="Where windowed .npy files should be written.",
-    )
-
-    ap.add_argument("--input_len", type=int, default=PREPROCESSING.INPUT_LEN)
-    ap.add_argument("--pred_horizon", type=int, default=PREPROCESSING.PRED_HORIZON)
-    ap.add_argument("--stride", type=int, default=PREPROCESSING.STRIDE)
-    ap.add_argument("--train_frac", type=float, default=PREPROCESSING.TRAIN_FRAC)
-    ap.add_argument("--val_frac", type=float, default=PREPROCESSING.VAL_FRAC)
-    ap.add_argument(
-        "--smoothing_window", type=int, default=PREPROCESSING.SMOOTHING_WINDOW
-    )
+    ap.add_argument("--start_date", default="0d0")
+    ap.add_argument("--end_date", default="7d0")
 
     ap.add_argument(
-        "--keep_raw",
-        action="store_true",
-        help="If set, do NOT delete raw CSVs after Parquet is written (passed to ingest_traces_parquet.py).",
+        "--feature_set",
+        default=PREPROCESSING.FEATURE_SET,
+        choices=list(FEATURE_SETS.keys()),
     )
+    ap.add_argument("--windows_dir", default=PATHS.WINDOWS_DIR)
 
-    ap.add_argument(
-        "--skip_fetch",
-        action="store_true",
-        help="Skip fetch_traces.py (assume raw CSVs already exist).",
-    )
-    ap.add_argument(
-        "--skip_ingest",
-        action="store_true",
-        help="Skip ingest_traces_parquet.py (assume Parquet files already exist).",
-    )
-    ap.add_argument(
-        "--skip_windows",
-        action="store_true",
-        help="Skip build_windows.py (assume window .npy files already exist).",
-    )
+    ap.add_argument("--skip_fetch", action="store_true")
+    ap.add_argument("--skip_ingest", action="store_true")
+    ap.add_argument("--skip_windows", action="store_true")
+    ap.add_argument("--keep_raw", action="store_true")
 
     args = ap.parse_args()
 
-    repo_root = Path(__file__).resolve().parent
+    needed_tables = sorted(list(tables_for_feature_set(args.feature_set)))
+    print(f"feature_set={args.feature_set} => tables={needed_tables}")
 
-    fetch_script = repo_root / "preprocessing" / "fetch_traces.py"
-    ingest_script = repo_root / "preprocessing" / "ingest_traces_parquet.py"
-    windows_script = repo_root / "preprocessing" / "build_windows.py"
+    fetch_script = os.path.join(REPO_ROOT, "preprocessing", "fetch_traces.py")
+    ingest_script = os.path.join(REPO_ROOT, "preprocessing", "ingest_traces_parquet.py")
+    windows_script = os.path.join(REPO_ROOT, "preprocessing", "build_windows.py")
 
     if not args.skip_fetch:
-        cmd_fetch = [
+        cmd = [
             sys.executable,
-            str(fetch_script),
+            fetch_script,
             "--start_date",
             args.start_date,
             "--end_date",
             args.end_date,
-            "--table",
-            "msresource",
-            "--raw_dir",
-            args.raw_dir,
+            "--feature_set",
+            args.feature_set,
         ]
-        print("=== Step 1: Fetch Data ===")
-        print("Running:", " ".join(cmd_fetch))
-        subprocess.run(cmd_fetch, check=True)
+        run(cmd, "Step 1: Fetch")
     else:
-        print("=== Skipping Step 1: Fetch Data (per --skip_fetch) ===")
+        print("\n=== Skipping fetch ===")
 
     if not args.skip_ingest:
-        os.makedirs(args.parquet_dir, exist_ok=True)
-        cmd_ingest = [
-            sys.executable,
-            str(ingest_script),
-            "--raw_dir",
-            args.raw_dir,
-            "--out_dir",
-            args.parquet_dir,
-        ]
-        if args.keep_raw:
-            cmd_ingest.append("--keep_raw")
-        print("=== Step 2: Ingest CSV -> Parquet ===")
-        print("Running:", " ".join(cmd_ingest))
-        subprocess.run(cmd_ingest, check=True)
+        for t in needed_tables:
+            cfg = DATASET_TABLES[t]
+            cmd = [
+                sys.executable,
+                ingest_script,
+                "--table",
+                t,
+                "--feature_set",
+                args.feature_set,
+                "--raw_dir",
+                cfg["raw_dir"],
+                "--out_dir",
+                cfg["parquet_dir"],
+            ]
+            if args.keep_raw:
+                cmd.append("--keep_raw")
+            run(cmd, f"Step 2: Ingest table={t}")
     else:
-        print("=== Skipping Step 2: Ingest CSV -> Parquet (per --skip_ingest) ===")
+        print("\n=== Skipping ingest ===")
 
     if not args.skip_windows:
-        os.makedirs(args.windows_dir, exist_ok=True)
-        cmd_windows = [
+        cmd = [
             sys.executable,
-            str(windows_script),
-            "--parquet_dir",
-            args.parquet_dir,
+            windows_script,
             "--out_dir",
             args.windows_dir,
-            "--input_len",
-            str(args.input_len),
-            "--pred_horizon",
-            str(args.pred_horizon),
-            "--stride",
-            str(args.stride),
-            "--train_frac",
-            str(args.train_frac),
-            "--val_frac",
-            str(args.val_frac),
-            "--smoothing_window",
-            str(args.smoothing_window),
+            "--feature_set",
+            args.feature_set,
         ]
-        print("=== Step 3: Build windows ===")
-        print("Running:", " ".join(cmd_windows))
-        subprocess.run(cmd_windows, check=True)
+        run(cmd, "Step 3: Build windows (join tables)")
     else:
-        print("=== Skipping Step 3: Build windows (per --skip_windows) ===")
+        print("\n=== Skipping windows ===")
 
-    print("=== Preprocessing pipeline completed (with skips as configured) ===")
+    print("\nPreprocessing complete.")
 
 
 if __name__ == "__main__":

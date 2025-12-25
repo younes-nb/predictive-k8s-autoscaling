@@ -10,7 +10,7 @@ REPO_ROOT = THIS_DIR
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from config import PATHS, DEFAULT_CHECKPOINT_PATH
+from config.defaults import PATHS, DEFAULT_CHECKPOINT_PATH, PREPROCESSING, FEATURE_SETS
 
 
 def run(cmd, title: str):
@@ -27,8 +27,16 @@ def main():
     ap = argparse.ArgumentParser(
         description="Run full pipeline: preprocessing -> train model -> test model"
     )
-    ap.add_argument("--start_date", required=True, help="e.g. 0d0")
-    ap.add_argument("--end_date", required=True, help="e.g. 1d0")
+
+    ap.add_argument("--start_date", default="0d0", help="e.g. 0d0 (default: 0d0)")
+    ap.add_argument("--end_date", default="7d0", help="e.g. 7d0 (default: 7d0)")
+
+    ap.add_argument(
+        "--feature_set",
+        default=PREPROCESSING.FEATURE_SET,
+        choices=list(FEATURE_SETS.keys()),
+        help="Predefined feature set to use for preprocessing (default from config).",
+    )
 
     ap.add_argument(
         "--windows_dir",
@@ -52,68 +60,20 @@ def main():
         help="RNN cell type to use in train_rnn.py/test_rnn.py (default: lstm).",
     )
 
-    ap.add_argument(
-        "--input_len",
-        type=int,
-        help="Override input sequence length passed to train_rnn.py",
-    )
-    ap.add_argument(
-        "--pred_horizon",
-        type=int,
-        help="Override prediction horizon passed to train_rnn.py",
-    )
-    ap.add_argument(
-        "--hidden_size",
-        type=int,
-        help="Override hidden size passed to train_rnn.py",
-    )
-    ap.add_argument(
-        "--num_layers",
-        type=int,
-        help="Override number of RNN layers passed to train_rnn.py",
-    )
-    ap.add_argument(
-        "--dropout",
-        type=float,
-        help="Override dropout rate passed to train_rnn.py",
-    )
+    ap.add_argument("--input_len", type=int, help="Override input sequence length passed to train_rnn.py")
+    ap.add_argument("--pred_horizon", type=int, help="Override prediction horizon passed to train_rnn.py")
+    ap.add_argument("--hidden_size", type=int, help="Override hidden size passed to train_rnn.py")
+    ap.add_argument("--num_layers", type=int, help="Override number of RNN layers passed to train_rnn.py")
+    ap.add_argument("--dropout", type=float, help="Override dropout rate passed to train_rnn.py")
 
-    ap.add_argument(
-        "--skip_preprocessing",
-        action="store_true",
-        help="Skip run_preprocessing.py (assume windows already built).",
-    )
-    ap.add_argument(
-        "--skip_training",
-        action="store_true",
-        help="Skip training step (assume checkpoint already exists).",
-    )
-    ap.add_argument(
-        "--skip_testing",
-        action="store_true",
-        help="Skip testing step.",
-    )
+    ap.add_argument("--skip_preprocessing", action="store_true")
+    ap.add_argument("--skip_training", action="store_true")
+    ap.add_argument("--skip_testing", action="store_true")
 
-    ap.add_argument(
-        "--skip_fetch",
-        action="store_true",
-        help="Within preprocessing, skip fetch_traces.py.",
-    )
-    ap.add_argument(
-        "--skip_ingest",
-        action="store_true",
-        help="Within preprocessing, skip ingest_traces_parquet.py.",
-    )
-    ap.add_argument(
-        "--skip_windows",
-        action="store_true",
-        help="Within preprocessing, skip build_windows.py.",
-    )
-    ap.add_argument(
-        "--keep_raw",
-        action="store_true",
-        help="Forward to preprocessing so ingest_traces_parquet.py keeps raw CSVs.",
-    )
+    ap.add_argument("--skip_fetch", action="store_true")
+    ap.add_argument("--skip_ingest", action="store_true")
+    ap.add_argument("--skip_windows", action="store_true")
+    ap.add_argument("--keep_raw", action="store_true")
 
     args = ap.parse_args()
 
@@ -131,6 +91,10 @@ def main():
             args.start_date,
             "--end_date",
             args.end_date,
+            "--feature_set",
+            args.feature_set,
+            "--windows_dir",
+            args.windows_dir,
         ]
 
         if args.skip_fetch:
@@ -186,7 +150,6 @@ def main():
             "--rnn_type",
             args.rnn_type,
         ]
-
         total_times["testing"] = run(cmd_test, "Step 3: Test Model")
     else:
         print("\n=== Skipping testing step (per --skip_testing) ===")

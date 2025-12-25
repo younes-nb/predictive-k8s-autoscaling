@@ -9,18 +9,14 @@ REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, os.pardir))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from config import PATHS, DATASET_TABLES
-
+from config.defaults import (
+    DATASET_TABLES,
+    PREPROCESSING,
+    FEATURE_SETS,
+    tables_for_feature_set,
+)
 
 BASE_URL = "https://aliopentrace.oss-cn-beijing.aliyuncs.com/v2022MicroservicesTraces"
-
-TABLE_CONFIG = {
-    "msresource": {
-        "prefix": DATASET_TABLES["msresource"]["prefix"],
-        "ratio_min": DATASET_TABLES["msresource"]["ratio_min"],
-        "default_raw_dir": PATHS.RAW_MSRESOURCE,
-    },
-}
 
 
 def parse_dh(s: str):
@@ -36,7 +32,6 @@ def compute_indices(start_date: str, end_date: str, ratio_min: int):
 
     start_min = sd * 24 * 60 + sh * 60
     end_min = ed * 24 * 60 + eh * 60
-
     if end_min <= start_min:
         raise ValueError("end_date must be after start_date")
 
@@ -44,11 +39,10 @@ def compute_indices(start_date: str, end_date: str, ratio_min: int):
     end_idx = end_min // ratio_min - 1
     if end_idx < start_idx:
         end_idx = start_idx
-
     return start_idx, end_idx
 
 
-def download_file(url: str, dst_path: str):
+def download_file(url: str, dst_path: str) -> bool:
     os.makedirs(os.path.dirname(dst_path), exist_ok=True)
     print(f"Downloading {url} -> {dst_path}")
     try:
@@ -67,7 +61,7 @@ def download_file(url: str, dst_path: str):
     return True
 
 
-def extract_and_remove_tar(tar_path: str, out_dir: str):
+def extract_and_remove_tar(tar_path: str, out_dir: str) -> bool:
     print(f"Extracting {tar_path} into {out_dir}")
     try:
         with tarfile.open(tar_path, "r:gz") as tar:
@@ -86,56 +80,73 @@ def main():
     ap = argparse.ArgumentParser(
         description="Download and extract Alibaba v2022 trace chunks."
     )
-    ap.add_argument("--start_date", required=True, help="e.g. 0d0")
-    ap.add_argument("--end_date", required=True, help="e.g. 1d0")
+    ap.add_argument("--start_date", default="0d0", help="e.g. 0d0")
+    ap.add_argument("--end_date", default="7d0", help="e.g. 7d0")
+
     ap.add_argument(
-        "--table",
-        default="msresource",
-        help="Table name (currently only 'msresource' is configured).",
+        "--feature_set",
+        default=PREPROCESSING.FEATURE_SET,
+        choices=list(FEATURE_SETS.keys()),
+        help="Which feature set to prepare (controls which tables are fetched).",
     )
+
     ap.add_argument(
-        "--raw_dir",
+        "--tables",
+        nargs="+",
         default=None,
-        help="Override default raw directory (otherwise use config.PATHS).",
+        help="Optional explicit table list (overrides --feature_set).",
     )
+
     args = ap.parse_args()
 
-    if args.table not in TABLE_CONFIG:
-        print(f"ERROR: table '{args.table}' not in TABLE_CONFIG.", file=sys.stderr)
-        sys.exit(2)
+    if args.tables is None:
+        needed_tables = sorted(list(tables_for_feature_set(args.feature_set)))
+    else:
+        needed_tables = list(args.tables)
 
-    cfg = TABLE_CONFIG[args.table]
-    raw_dir = args.raw_dir or cfg["default_raw_dir"]
-    os.makedirs(raw_dir, exist_ok=True)
+    print(f"Feature set: {args.feature_set}")
+    print(f"Tables to fetch: {needed_tables}")
+    print(f"Range: {args.start_date} -> {args.end_date}")
 
-    try:
-        start_idx, end_idx = compute_indices(
-            args.start_date, args.end_date, cfg["ratio_min"]
-        )
-    except ValueError as e:
-        print("ERROR:", e, file=sys.stderr)
-        sys.exit(2)
+    for table in needed_tables:
+        if table not in DATASET_TABLES:
+            raise SystemExit(
+                f"Unknown table '{table}'. Add it to DATASET_TABLES in config/defaults.py"
+            )
 
-    print(f"Table: {args.table}")
-    print(f"Indices: {start_idx} .. {end_idx}")
-    print(f"Raw dir: {raw_dir}")
+        cfg = DATASET_TABLES[table]
+        raw_dir = cfg["raw_dir"]
+        os.makedirs(raw_dir, exist_ok=True)
 
-    for idx in range(start_idx, end_idx + 1):
-        url = f"{BASE_URL}/{cfg['prefix']}_{idx}.tar.gz"
-        tar_path = os.path.join(raw_dir, f"{args.table}_{idx}.tar.gz")
+        try:
+            start_idx, end_idx = compute_indices(
+                args.start_date, args.end_date, int(cfg["ratio_min"])
+            )
+        except ValueError as e:
+            print("ERROR:", e, file=sys.stderr)
+            sys.exit(2)
 
-        if not os.path.exists(tar_path):
-            ok = download_file(url, tar_path)
+        print(f"\n=== TABLE {table} ===")
+        print(f"prefix={cfg['prefix']}")
+        print(f"indices: {start_idx} .. {end_idx}")
+        print(f"raw_dir: {raw_dir}")
+
+        for idx in range(start_idx, end_idx + 1):
+            url = f"{BASE_URL}/{cfg['prefix']}_{idx}.tar.gz"
+            tar_path = os.path.join(raw_dir, f"{table}_{idx}.tar.gz")
+
+            if not os.path.exists(tar_path):
+                ok = download_file(url, tar_path)
+                if not ok:
+                    continue
+            else:
+                print(f"Tar already exists, reusing: {tar_path}")
+
+            ok = extract_and_remove_tar(tar_path, raw_dir)
             if not ok:
                 continue
-        else:
-            print(f"Tar already exists, reusing: {tar_path}")
 
-        ok = extract_and_remove_tar(tar_path, raw_dir)
-        if not ok:
-            continue
-
-    print("Done downloading and extracting.")
+    print("\nDone downloading and extracting.")
 
 
 if __name__ == "__main__":

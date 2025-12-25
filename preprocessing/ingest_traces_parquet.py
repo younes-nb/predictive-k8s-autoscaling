@@ -6,20 +6,32 @@ import sys
 import polars as pl
 import pyarrow.parquet as pq
 
-
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, os.pardir))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from config import PREPROCESSING
+from config.defaults import (
+    PREPROCESSING,
+    FEATURE_SETS,
+    DATASET_TABLES,
+    table_to_raw_columns,
+)
 
 
 def main():
     p = argparse.ArgumentParser(
-        description="Ingest CSV trace files into Parquet (CPU-only baseline, streaming, incremental writer)."
+        description="Ingest CSV trace files into Parquet (feature-set aware, per-table)."
     )
-    p.add_argument("--raw_dir", required=True, help="Directory with CSV files.")
+    p.add_argument("--table", required=True, help="Dataset table name, e.g. msresource")
+    p.add_argument(
+        "--feature_set",
+        type=str,
+        default=PREPROCESSING.FEATURE_SET,
+        choices=list(FEATURE_SETS.keys()),
+        help="Controls which feature columns are retained for this table.",
+    )
+    p.add_argument("--raw_dir", required=True, help="Directory with CSV/CSV.GZ files.")
     p.add_argument(
         "--out_dir", required=True, help="Output directory for Parquet files."
     )
@@ -27,14 +39,21 @@ def main():
         "--repartition",
         type=int,
         default=PREPROCESSING.REPARTITION,
-        help="Approximate number of Parquet parts to write (default from config).",
+        help="Approx number of Parquet parts to write.",
     )
-    p.add_argument(
-        "--keep_raw",
-        action="store_true",
-        help="If set, do NOT delete CSV files after Parquet is written.",
-    )
+    p.add_argument("--keep_raw", action="store_true")
     args = p.parse_args()
+
+    if args.table not in DATASET_TABLES:
+        raise SystemExit(f"Unknown table '{args.table}'. Add it to DATASET_TABLES.")
+
+    needed_by_table = table_to_raw_columns(args.feature_set)
+    feature_cols = needed_by_table.get(args.table, [])
+
+    if not feature_cols:
+        raise SystemExit(
+            f"feature_set='{args.feature_set}' does not require any columns from table='{args.table}'."
+        )
 
     os.makedirs(args.out_dir, exist_ok=True)
 
@@ -42,17 +61,20 @@ def main():
         glob.glob(os.path.join(args.raw_dir, "*.csv"))
         + glob.glob(os.path.join(args.raw_dir, "*.csv.gz"))
     )
-
     if not files:
         raise SystemExit(f"No CSV/CSV.GZ files found under {args.raw_dir}")
 
     n_files = len(files)
-    npart = max(1, min(args.repartition, n_files))
+    npart = max(1, min(int(args.repartition), n_files))
 
-    print(f"Found {n_files} CSV files in {args.raw_dir}")
-    print(f"Will create ~{npart} Parquet parts (streaming groups of CSVs).")
+    base_needed = {"timestamp", "msname", "msinstanceid"}
+    needed = base_needed | set(feature_cols)
 
-    needed = {"timestamp", "msname", "msinstanceid", "cpu_utilization"}
+    print(f"Table: {args.table}")
+    print(f"Feature set: {args.feature_set}")
+    print(f"Keeping feature columns: {feature_cols}")
+    print(f"Found {n_files} files, writing ~{npart} parquet parts")
+
     scan_kwargs = dict(
         low_memory=True,
         try_parse_dates=False,
@@ -68,10 +90,8 @@ def main():
             continue
 
         print(
-            f"\n[Part {part_idx}] Processing files {start}..{end - 1} "
-            f"({len(batch_files)} CSVs)"
+            f"\n[Part {part_idx}] files {start}..{end - 1} ({len(batch_files)} files)"
         )
-
         writer = None
         total_rows = 0
         out_path = os.path.join(args.out_dir, f"part-{part_idx:05d}.parquet")
@@ -82,7 +102,7 @@ def main():
 
             missing = needed - set(df.columns)
             if missing:
-                print(f"  [WARN] {f} missing columns {missing}; skipping.")
+                print(f"  [WARN] missing columns {sorted(list(missing))}; skipping.")
                 continue
 
             df = df.drop_nulls(subset=list(needed))
@@ -93,42 +113,36 @@ def main():
                 )
             )
 
-            df = df.select(
+            select_cols = [
                 "timestamp",
                 "timestamp_dt",
                 "msname",
                 "msinstanceid",
-                "cpu_utilization",
-            )
-
-            df = df.sort(["timestamp_dt", "msname", "msinstanceid"])
+                *feature_cols,
+            ]
+            select_cols = list(dict.fromkeys(select_cols))
+            df = df.select(select_cols).sort(["timestamp_dt", "msname", "msinstanceid"])
 
             if df.height == 0:
-                print("  [INFO] No usable rows after cleaning; skipping this file.")
                 continue
 
             table = df.to_arrow()
             if writer is None:
-                print(f"  [Part {part_idx}] Creating Parquet writer for {out_path}")
                 writer = pq.ParquetWriter(out_path, table.schema, compression="zstd")
-
             writer.write_table(table)
             total_rows += table.num_rows
 
         if writer is not None:
             writer.close()
-            print(f"  [Part {part_idx}] Wrote {total_rows} rows -> {out_path}")
+            print(f"  Wrote {total_rows} rows -> {out_path}")
             part_idx += 1
         else:
-            print(
-                f"  [Part {part_idx}] No usable rows in this batch, "
-                f"no Parquet file written."
-            )
+            print("  No usable rows; no parquet written.")
 
     print(f"\nWrote {part_idx} parquet parts to {args.out_dir}")
 
     if not args.keep_raw:
-        print("Deleting raw CSV files to save space...")
+        print("Deleting raw CSV files...")
         for f in files:
             try:
                 os.remove(f)

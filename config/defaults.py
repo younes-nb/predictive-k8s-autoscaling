@@ -1,10 +1,12 @@
 from dataclasses import dataclass
-from typing import Tuple, Dict, Any
+from typing import Tuple, Dict, Any, List, Set
 import os
 
 
 @dataclass(frozen=True)
 class Paths:
+    RAW_ROOT: str = "/dataset/raw"
+    PARQUET_ROOT: str = "/dataset/parquet"
     RAW_MSRESOURCE: str = "/dataset/raw/msresource"
     PARQUET_MSRESOURCE: str = "/dataset/parquet/msresource"
     WINDOWS_DIR: str = "/dataset/windows"
@@ -12,16 +14,93 @@ class Paths:
     LOGS_DIR: str = "/dataset/logs"
 
 
-FEATURE_SETS: Dict[str, Dict[str, Any]] = {
-    "cpu": {
-        "feature_cols": ["cpu_utilization"],
-        "target_col": "cpu_utilization",
-    },
-    "cpu_mem": {
-        "feature_cols": ["cpu_utilization", "mem_utilization"],
-        "target_col": "cpu_utilization",
+PATHS = Paths()
+
+DEFAULT_CHECKPOINT_PATH = os.path.join(PATHS.MODELS_DIR, "model.pt")
+
+DATASET_TABLES: Dict[str, Dict[str, Any]] = {
+    "msresource": {
+        "prefix": "MSMetricsUpdate/MSMetricsUpdate",
+        "ratio_min": 30,
+        "raw_dir": PATHS.RAW_MSRESOURCE,
+        "parquet_dir": PATHS.PARQUET_MSRESOURCE,
     },
 }
+
+FEATURES: Dict[str, Dict[str, str]] = {
+    "cpu_utilization": {"table": "msresource", "column": "cpu_utilization"},
+    "memory_utilization": {"table": "msresource", "column": "memory_utilization"},
+}
+
+FEATURE_SETS: Dict[str, Dict[str, Any]] = {
+    "cpu": {
+        "features": ["cpu_utilization"],
+        "target": "cpu_utilization",
+    },
+    "cpu_mem": {
+        "features": ["cpu_utilization", "memory_utilization"],
+        "target": "cpu_utilization",
+    },
+}
+
+
+def get_feature_set(name: str) -> Dict[str, Any]:
+    if name not in FEATURE_SETS:
+        raise KeyError(
+            f"Unknown feature_set='{name}'. Available: {list(FEATURE_SETS.keys())}"
+        )
+    spec = FEATURE_SETS[name]
+    feats = list(spec["features"])
+    target = str(spec["target"])
+
+    if target not in feats:
+        raise ValueError(
+            f"feature_set='{name}': target='{target}' must be included in features={feats}"
+        )
+    for f in feats:
+        if f not in FEATURES:
+            raise KeyError(
+                f"feature_set='{name}': feature '{f}' not defined in FEATURES"
+            )
+    return spec
+
+
+def feature_names_for_feature_set(feature_set: str) -> List[str]:
+    return list(get_feature_set(feature_set)["features"])
+
+
+def target_feature_for_feature_set(feature_set: str) -> str:
+    return str(get_feature_set(feature_set)["target"])
+
+
+def tables_for_feature_set(feature_set: str) -> Set[str]:
+    feats = feature_names_for_feature_set(feature_set)
+    return {FEATURES[f]["table"] for f in feats}
+
+
+def table_to_raw_columns(feature_set: str) -> Dict[str, List[str]]:
+    spec = get_feature_set(feature_set)
+    out: Dict[str, List[str]] = {}
+    for feat_name in spec["features"]:
+        meta = FEATURES[feat_name]
+        t = meta["table"]
+        c = meta["column"]
+        out.setdefault(t, [])
+        if c not in out[t]:
+            out[t].append(c)
+    return out
+
+
+def table_to_feature_exprs(feature_set: str) -> Dict[str, List[tuple]]:
+    spec = get_feature_set(feature_set)
+    out: Dict[str, List[tuple]] = {}
+    for feat_name in spec["features"]:
+        meta = FEATURES[feat_name]
+        t = meta["table"]
+        c = meta["column"]
+        out.setdefault(t, [])
+        out[t].append((feat_name, c))
+    return out
 
 
 @dataclass(frozen=True)
@@ -57,15 +136,5 @@ class TrainingDefaults:
     INFERENCE_REPEATS: int = 100
 
 
-PATHS = Paths()
 PREPROCESSING = PreprocessingDefaults()
 TRAINING = TrainingDefaults()
-
-DEFAULT_CHECKPOINT_PATH = os.path.join(PATHS.MODELS_DIR, "model.pt")
-
-DATASET_TABLES = {
-    "msresource": {
-        "prefix": "MSMetricsUpdate/MSMetricsUpdate",
-        "ratio_min": 30,
-    },
-}
