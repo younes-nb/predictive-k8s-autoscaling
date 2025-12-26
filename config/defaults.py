@@ -9,6 +9,8 @@ class Paths:
     PARQUET_ROOT: str = "/dataset/parquet"
     RAW_MSRESOURCE: str = "/dataset/raw/msresource"
     PARQUET_MSRESOURCE: str = "/dataset/parquet/msresource"
+    RAW_NODE: str = "/dataset/raw/node"
+    PARQUET_NODE: str = "/dataset/parquet/node"
     WINDOWS_DIR: str = "/dataset/windows"
     MODELS_DIR: str = "/dataset/models"
     LOGS_DIR: str = "/dataset/logs"
@@ -25,21 +27,39 @@ DATASET_TABLES: Dict[str, Dict[str, Any]] = {
         "raw_dir": PATHS.RAW_MSRESOURCE,
         "parquet_dir": PATHS.PARQUET_MSRESOURCE,
     },
+    "node": {
+        "prefix": "NodeMetricsUpdate/NodeMetricsUpdate",
+        "ratio_min": 30,
+        "raw_dir": PATHS.RAW_NODE,
+        "parquet_dir": PATHS.PARQUET_NODE,
+    },
 }
+
 
 FEATURES: Dict[str, Dict[str, str]] = {
     "cpu_utilization": {"table": "msresource", "column": "cpu_utilization"},
     "memory_utilization": {"table": "msresource", "column": "memory_utilization"},
+    "node_cpu_utilization": {"table": "node", "column": "cpu_utilization"},
+    "node_memory_utilization": {"table": "node", "column": "memory_utilization"},
 }
+
 
 FEATURE_SETS: Dict[str, Dict[str, Any]] = {
     "cpu": {
         "features": ["cpu_utilization"],
         "target": "cpu_utilization",
+        "base_table": "msresource",
     },
     "cpu_mem": {
         "features": ["cpu_utilization", "memory_utilization"],
         "target": "cpu_utilization",
+        "base_table": "msresource",
+    },
+    "node_cpu_mem": {
+        "features": ["node_cpu_utilization", "node_memory_utilization"],
+        "target": "node_cpu_utilization",
+        "base_table": "node",
+        "id_cols": ["nodeid"],
     },
 }
 
