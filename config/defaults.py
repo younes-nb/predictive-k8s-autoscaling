@@ -58,10 +58,15 @@ FEATURE_SETS: Dict[str, Dict[str, Any]] = {
         "base_table": "msresource",
     },
     "node_cpu_mem": {
-        "features": ["node_cpu_utilization", "node_memory_utilization"],
-        "target": "node_cpu_utilization",
-        "base_table": "node",
-        "id_cols": ["nodeid"],
+        "features": [
+            "cpu_utilization",
+            "memory_utilization",
+            "node_cpu_utilization",
+            "node_memory_utilization",
+        ],
+        "target": "cpu_utilization",
+        "base_table": "msresource",
+        "join_keys": {"msresource": ["nodeid"], "node": ["nodeid"]},
     },
 }
 

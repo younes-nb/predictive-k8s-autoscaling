@@ -1,8 +1,8 @@
 import os
 import glob
 import sys
+import time
 import argparse
-
 import polars as pl
 import numpy as np
 
@@ -123,9 +123,7 @@ def main():
     target_idx = feature_names.index(target_feature)
 
     needed_tables = sorted(list(tables_for_feature_set(args.feature_set)))
-    table_exprs = table_to_feature_exprs(
-        args.feature_set
-    ) 
+    table_exprs = table_to_feature_exprs(args.feature_set)
 
     base_table = FEATURES[target_feature]["table"]
     if base_table not in needed_tables:
@@ -138,32 +136,18 @@ def main():
     print(f"Base join table: {base_table}")
 
     selected_services = None
-    if args.max_services and args.max_services > 0:
+    if args.max_services > 0:
         base_dir = DATASET_TABLES[base_table]["parquet_dir"]
         base_parts = list_parquet_parts(base_dir)
-        if not base_parts:
-            raise SystemExit(f"No parquet parts found in {base_dir}")
-
-        print(
-            f"Selecting subset of services from '{args.service_col}' "
-            f"(max_services={args.max_services}, seed={args.subset_seed}) using base_table={base_table}"
-        )
-
         all_services = set()
         for pq_path in base_parts:
             df_s = pl.read_parquet(pq_path, columns=[args.service_col])
             all_services.update(df_s[args.service_col].unique().to_list())
 
         all_services_list = sorted(all_services)
-        if len(all_services_list) <= args.max_services:
-            selected_services = set(all_services_list)
-        else:
-            rng = np.random.default_rng(args.subset_seed)
-            idxs = rng.choice(
-                len(all_services_list), size=args.max_services, replace=False
-            )
-            arr = np.array(all_services_list, dtype=object)
-            selected_services = set(arr[idxs].tolist())
+        rng = np.random.default_rng(args.subset_seed)
+        idxs = rng.choice(len(all_services_list), size=args.max_services, replace=False)
+        selected_services = set(np.array(all_services_list)[idxs].tolist())
 
         print(f"Selected services: {len(selected_services)}")
 
@@ -176,11 +160,9 @@ def main():
         table_parts[t] = parts
         print(f"Table '{t}': {len(parts)} parquet parts")
 
-    base_parts = table_parts[base_table]
-
     os.makedirs(args.out_dir, exist_ok=True)
 
-    for shard_idx, base_pq in enumerate(base_parts):
+    for shard_idx, base_pq in enumerate(table_parts[base_table]):
         print(f"\n=== Shard {shard_idx:04d} (base={base_pq}) ===")
 
         base_need_cols = [
@@ -188,7 +170,6 @@ def main():
             *args.id_cols,
             *[raw for _, raw in table_exprs[base_table]],
         ]
-        base_need_cols = list(dict.fromkeys(base_need_cols))
         df_base = pl.read_parquet(base_pq, columns=base_need_cols)
 
         if selected_services is not None and args.service_col in df_base.columns:
@@ -210,33 +191,19 @@ def main():
             if t == base_table:
                 continue
 
-            if shard_idx >= len(table_parts[t]):
-                print(
-                    f"  [WARN] table '{t}' has fewer parts than base table; skipping shard {shard_idx} entirely."
-                )
-                joined = None
-                break
-
             pq_path = table_parts[t][shard_idx]
             need_cols = [
                 args.time_col,
                 *args.id_cols,
                 *[raw for _, raw in table_exprs[t]],
             ]
-            need_cols = list(dict.fromkeys(need_cols))
             df_t = pl.read_parquet(pq_path, columns=need_cols)
 
-            if selected_services is not None and args.service_col in df_t.columns:
-                df_t = df_t.filter(
-                    pl.col(args.service_col).is_in(list(selected_services))
-                )
-
-            if df_t.height == 0:
-                print(
-                    f"  [WARN] table '{t}' shard empty; shard {shard_idx} will be skipped."
-                )
-                joined = None
-                break
+            join_columns = (
+                FEATURE_SETS[args.feature_set].get("join_keys", {}).get(t, [])
+            )
+            if join_columns:
+                join_keys.extend(join_columns)
 
             df_t_agg = build_table_agg(
                 df_t, args.time_col, args.id_cols, args.freq, table_exprs[t]
