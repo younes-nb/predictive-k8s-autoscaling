@@ -73,9 +73,9 @@ def build_table_agg(
 
     out = (
         df.with_columns(pl.col(time_col).dt.truncate(freq).alias("_t"))
-        .group_by("_t", *id_cols)
+        .group_by(["_t"] + id_cols)
         .agg(agg_exprs)
-        .sort(["_t", *id_cols])
+        .sort(["_t"] + id_cols)
     )
     return out
 
@@ -146,10 +146,15 @@ def main():
 
         all_services_list = sorted(all_services)
         rng = np.random.default_rng(args.subset_seed)
-        idxs = rng.choice(len(all_services_list), size=args.max_services, replace=False)
-        selected_services = set(np.array(all_services_list)[idxs].tolist())
-
-        print(f"Selected services: {len(selected_services)}")
+        if len(all_services_list) > args.max_services:
+            idxs = rng.choice(
+                len(all_services_list), size=args.max_services, replace=False
+            )
+            selected_services = set(np.array(all_services_list)[idxs].tolist())
+            print(f"Selected services: {len(selected_services)} (subset)")
+        else:
+            selected_services = set(all_services_list)
+            print(f"Selected services: {len(selected_services)} (all available)")
 
     table_parts: dict[str, list[str]] = {}
     for t in needed_tables:
@@ -165,12 +170,21 @@ def main():
     for shard_idx, base_pq in enumerate(table_parts[base_table]):
         print(f"\n=== Shard {shard_idx:04d} (base={base_pq}) ===")
 
+        base_id_cols = DATASET_TABLES[base_table]["key_cols"]
+
         base_need_cols = [
             args.time_col,
-            *args.id_cols,
+            *base_id_cols,
             *[raw for _, raw in table_exprs[base_table]],
         ]
-        df_base = pl.read_parquet(base_pq, columns=base_need_cols)
+
+        base_need_cols = list(set(base_need_cols))
+
+        try:
+            df_base = pl.read_parquet(base_pq, columns=base_need_cols)
+        except Exception as e:
+            print(f"Error reading base parquet {base_pq}: {e}")
+            continue
 
         if selected_services is not None and args.service_col in df_base.columns:
             df_base = df_base.filter(
@@ -180,35 +194,66 @@ def main():
                 print("  Base shard empty after service filter; skipping shard.")
                 continue
 
+        agg_keys = base_id_cols
+
         df_base_agg = build_table_agg(
-            df_base, args.time_col, args.id_cols, args.freq, table_exprs[base_table]
+            df_base, args.time_col, agg_keys, args.freq, table_exprs[base_table]
         )
 
         joined = df_base_agg
-        join_keys = ["_t", *args.id_cols]
 
         for t in needed_tables:
             if t == base_table:
                 continue
 
+            if shard_idx >= len(table_parts[t]):
+                print(
+                    f"  Warning: Table '{t}' has fewer parts than base table. Skipping join for this table."
+                )
+                continue
+
             pq_path = table_parts[t][shard_idx]
+
+            t_id_cols = DATASET_TABLES[t]["key_cols"]
+
             need_cols = [
                 args.time_col,
-                *args.id_cols,
+                *t_id_cols,
                 *[raw for _, raw in table_exprs[t]],
             ]
-            df_t = pl.read_parquet(pq_path, columns=need_cols)
+            need_cols = list(set(need_cols))
 
-            join_columns = (
-                FEATURE_SETS[args.feature_set].get("join_keys", {}).get(t, [])
-            )
-            if join_columns:
-                join_keys.extend(join_columns)
+            try:
+                df_t = pl.read_parquet(pq_path, columns=need_cols)
+            except Exception as e:
+                print(f"  Error reading table '{t}': {e}. Skipping this table join.")
+                continue
 
             df_t_agg = build_table_agg(
-                df_t, args.time_col, args.id_cols, args.freq, table_exprs[t]
+                df_t, args.time_col, t_id_cols, args.freq, table_exprs[t]
             )
-            joined = joined.join(df_t_agg, on=join_keys, how="left")
+
+            feature_spec = FEATURE_SETS[args.feature_set]
+            spec_join_keys = feature_spec.get("join_keys", {})
+
+            if t in spec_join_keys:
+                join_on = ["_t"] + spec_join_keys[t]
+            else:
+                common = set(joined.columns).intersection(df_t_agg.columns)
+                join_on = list(common)
+
+            missing_keys = [
+                k
+                for k in join_on
+                if k not in joined.columns or k not in df_t_agg.columns
+            ]
+            if missing_keys:
+                print(
+                    f"  Cannot join table '{t}': missing keys {missing_keys}. Skipping."
+                )
+                continue
+
+            joined = joined.join(df_t_agg, on=join_on, how="left")
 
         if joined is None or joined.height == 0:
             print("  Joined shard empty; skipping.")
@@ -223,7 +268,14 @@ def main():
         shard_val_X, shard_val_y = [], []
         shard_test_X, shard_test_y = [], []
 
-        for _, g in joined.group_by(args.id_cols, maintain_order=True):
+        group_cols = [c for c in args.id_cols if c in joined.columns]
+        if not group_cols:
+            print(
+                f"  Error: args.id_cols {args.id_cols} not found in joined columns {joined.columns}. Cannot group."
+            )
+            continue
+
+        for _, g in joined.group_by(group_cols, maintain_order=True):
             g = g.sort("_t")
             T = g.height
             if T < args.input_len + args.pred_horizon:
