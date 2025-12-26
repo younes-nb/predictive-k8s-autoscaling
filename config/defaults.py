@@ -26,12 +26,14 @@ DATASET_TABLES: Dict[str, Dict[str, Any]] = {
         "ratio_min": 30,
         "raw_dir": PATHS.RAW_MSRESOURCE,
         "parquet_dir": PATHS.PARQUET_MSRESOURCE,
+        "key_cols": ["msname", "msinstanceid", "nodeid"],
     },
     "node": {
         "prefix": "NodeMetricsUpdate/NodeMetricsUpdate",
         "ratio_min": 30,
-        "raw_dir": PATHS.RAW_NODE,
-        "parquet_dir": PATHS.PARQUET_NODE,
+        "raw_dir": os.path.join(PATHS.RAW_ROOT, "node"),
+        "parquet_dir": os.path.join(PATHS.PARQUET_ROOT, "node"),
+        "key_cols": ["nodeid"],
     },
 }
 

@@ -23,7 +23,7 @@ def main():
     p = argparse.ArgumentParser(
         description="Ingest CSV trace files into Parquet (feature-set aware, per-table)."
     )
-    p.add_argument("--table", required=True, help="Dataset table name, e.g. msresource")
+    p.add_argument("--table", required=True, help="Dataset table name, e.g. msresource, node")
     p.add_argument(
         "--feature_set",
         type=str,
@@ -32,9 +32,7 @@ def main():
         help="Controls which feature columns are retained for this table.",
     )
     p.add_argument("--raw_dir", required=True, help="Directory with CSV/CSV.GZ files.")
-    p.add_argument(
-        "--out_dir", required=True, help="Output directory for Parquet files."
-    )
+    p.add_argument("--out_dir", required=True, help="Output directory for Parquet files.")
     p.add_argument(
         "--repartition",
         type=int,
@@ -47,9 +45,15 @@ def main():
     if args.table not in DATASET_TABLES:
         raise SystemExit(f"Unknown table '{args.table}'. Add it to DATASET_TABLES.")
 
+    cfg = DATASET_TABLES[args.table]
+    key_cols = list(cfg.get("key_cols", []))
+    if not key_cols:
+        raise SystemExit(
+            f"DATASET_TABLES['{args.table}'] must define key_cols (e.g., ['msname','msinstanceid'] or ['nodeid'])."
+        )
+
     needed_by_table = table_to_raw_columns(args.feature_set)
     feature_cols = needed_by_table.get(args.table, [])
-
     if not feature_cols:
         raise SystemExit(
             f"feature_set='{args.feature_set}' does not require any columns from table='{args.table}'."
@@ -67,11 +71,12 @@ def main():
     n_files = len(files)
     npart = max(1, min(int(args.repartition), n_files))
 
-    base_needed = {"timestamp", "msname", "msinstanceid"}
+    base_needed = {"timestamp", *key_cols}
     needed = base_needed | set(feature_cols)
 
     print(f"Table: {args.table}")
     print(f"Feature set: {args.feature_set}")
+    print(f"Key columns: {key_cols}")
     print(f"Keeping feature columns: {feature_cols}")
     print(f"Found {n_files} files, writing ~{npart} parquet parts")
 
@@ -89,9 +94,7 @@ def main():
         if not batch_files:
             continue
 
-        print(
-            f"\n[Part {part_idx}] files {start}..{end - 1} ({len(batch_files)} files)"
-        )
+        print(f"\n[Part {part_idx}] files {start}..{end - 1} ({len(batch_files)} files)")
         writer = None
         total_rows = 0
         out_path = os.path.join(args.out_dir, f"part-{part_idx:05d}.parquet")
@@ -106,22 +109,18 @@ def main():
                 continue
 
             df = df.drop_nulls(subset=list(needed))
+            if df.height == 0:
+                continue
 
             df = df.with_columns(
-                pl.from_epoch(pl.col("timestamp") / 1000, time_unit="s").alias(
-                    "timestamp_dt"
-                )
+                pl.from_epoch(pl.col("timestamp") / 1000, time_unit="s").alias("timestamp_dt")
             )
 
-            select_cols = [
-                "timestamp",
-                "timestamp_dt",
-                "msname",
-                "msinstanceid",
-                *feature_cols,
-            ]
+            select_cols = ["timestamp", "timestamp_dt", *key_cols, *feature_cols]
             select_cols = list(dict.fromkeys(select_cols))
-            df = df.select(select_cols).sort(["timestamp_dt", "msname", "msinstanceid"])
+
+            sort_cols = ["timestamp_dt", *key_cols]
+            df = df.select(select_cols).sort(sort_cols)
 
             if df.height == 0:
                 continue
