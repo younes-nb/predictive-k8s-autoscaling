@@ -139,13 +139,18 @@ def main():
     if args.max_services > 0:
         base_dir = DATASET_TABLES[base_table]["parquet_dir"]
         base_parts = list_parquet_parts(base_dir)
-        try:
-            lf_s = pl.scan_parquet(base_parts)
-            unique_s = lf_s.select(args.service_col).unique().collect()
-            all_services_list = sorted(unique_s[args.service_col].to_list())
-        except Exception as e:
-            print(f"Error scanning for services: {e}. Fallback to manual read.")
-            all_services_list = []
+        print(f"Scanning {len(base_parts)} parts for unique services...")
+        
+        all_services = set()
+        for part in base_parts:
+            try:
+                df_part_s = pl.scan_parquet(part).select(args.service_col).unique().collect()
+                all_services.update(df_part_s[args.service_col].to_list())
+            except Exception as e:
+                print(f"Warning: Could not read {part}: {e}")
+
+        all_services_list = sorted(list(all_services))
+        print(f"Found {len(all_services_list)} unique services.")
 
         rng = np.random.default_rng(args.subset_seed)
         if len(all_services_list) > args.max_services:
@@ -153,10 +158,10 @@ def main():
                 len(all_services_list), size=args.max_services, replace=False
             )
             selected_services = set(np.array(all_services_list)[idxs].tolist())
-            print(f"Selected services: {len(selected_services)} (subset)")
+            print(f"Selected subset: {len(selected_services)} services")
         else:
             selected_services = set(all_services_list) if all_services_list else None
-            print(f"Selected services: All available")
+            print(f"Using all available services")
 
     table_parts: dict[str, list[str]] = {}
     for t in needed_tables:
@@ -182,9 +187,8 @@ def main():
 
         try:
             lf_base = pl.scan_parquet(base_pq).select(base_need_cols)
-            if selected_services is not None:
-                 if args.service_col in lf_base.columns:
-                     lf_base = lf_base.filter(pl.col(args.service_col).is_in(list(selected_services)))
+            if selected_services is not None and args.service_col in lf_base.columns:
+                lf_base = lf_base.filter(pl.col(args.service_col).is_in(list(selected_services)))
             
             df_base = lf_base.collect()
         except Exception as e:
@@ -192,7 +196,7 @@ def main():
             continue
 
         if df_base.height == 0:
-            print("  Base shard empty; skipping.")
+            print("  Base shard empty after service filter; skipping.")
             continue
         
         if df_base[args.time_col].dtype != pl.Datetime:
@@ -202,9 +206,8 @@ def main():
         max_t = df_base[args.time_col].max()
         print(f"  Time range: {min_t} to {max_t}")
 
-        agg_keys = base_id_cols
         df_base_agg = build_table_agg(
-            df_base, args.time_col, agg_keys, args.freq, table_exprs[base_table]
+            df_base, args.time_col, base_id_cols, args.freq, table_exprs[base_table]
         )
         
         del df_base
@@ -226,13 +229,10 @@ def main():
 
             try:
                 lf_t = pl.scan_parquet(table_parts[t])
-                
                 lf_t = lf_t.filter(
                     pl.col(args.time_col).cast(pl.Datetime) >= min_t,
                     pl.col(args.time_col).cast(pl.Datetime) <= max_t
-                )
-                
-                lf_t = lf_t.select(need_cols)
+                ).select(need_cols)
 
                 lf_t_agg = build_table_agg(
                     lf_t, args.time_col, t_id_cols, args.freq, table_exprs[t]
@@ -243,9 +243,6 @@ def main():
             except Exception as e:
                 print(f"  Error processing table '{t}': {e}. Skipping join.")
                 continue
-
-            if df_t_agg.height == 0:
-                print(f"  Table '{t}' has no data in this time range.")
 
             feature_spec = FEATURE_SETS[args.feature_set]
             spec_join_keys = feature_spec.get("join_keys", {})
@@ -258,21 +255,16 @@ def main():
             
             missing_keys = [k for k in join_on if k not in joined.columns or k not in df_t_agg.columns]
             if missing_keys:
-                print(f"  Cannot join table '{t}': missing keys {missing_keys}. Skipping.")
+                print(f"  Cannot join '{t}': missing keys {missing_keys}. Skipping.")
                 continue
 
             joined = joined.join(df_t_agg, on=join_on, how="left")
-            
             del df_t_agg
             gc.collect()
 
-        if joined is None or joined.height == 0:
-            print("  Joined shard empty; skipping.")
-            continue
-
         joined = joined.drop_nulls(feature_names)
         if joined.height == 0:
-            print("  Joined shard has no rows after drop_nulls(features); skipping.")
+            print("  No rows left after drop_nulls; skipping.")
             continue
 
         shard_train_X, shard_train_y = [], []
@@ -280,10 +272,6 @@ def main():
         shard_test_X, shard_test_y = [], []
 
         group_cols = [c for c in args.id_cols if c in joined.columns]
-        if not group_cols:
-            print(f"  Error: args.id_cols {args.id_cols} not found. Cannot group.")
-            continue
-
         joined = joined.sort(group_cols + ["_t"])
 
         for _, g in joined.group_by(group_cols, maintain_order=True):
@@ -291,10 +279,7 @@ def main():
             if T < args.input_len + args.pred_horizon:
                 continue
 
-            series = []
-            for feat in feature_names:
-                series.append(g[feat].to_numpy().astype("float32"))
-
+            series = [g[feat].to_numpy().astype("float32") for feat in feature_names]
             feat_raw = np.stack(series, axis=1)
 
             F = feat_raw.shape[1]
@@ -307,54 +292,32 @@ def main():
                 s_norm = minmax_norm(s_smooth)
 
                 if j == target_idx:
-                    if s_norm is None:
-                        target_norm = None
-                        break
+                    if s_norm is None: break
                     target_norm = s_norm.astype("float32")
                     feat_norm[:, j] = target_norm
                 else:
-                    feat_norm[:, j] = (
-                        0.0 if s_norm is None else s_norm.astype("float32")
-                    )
+                    feat_norm[:, j] = (0.0 if s_norm is None else s_norm.astype("float32"))
 
-            if target_norm is None:
-                continue
+            if target_norm is None: continue
 
             X_all, Y_all = windowize_multivariate(
-                feat_norm,
-                target_norm,
-                in_len=args.input_len,
-                horizon=args.pred_horizon,
-                stride=args.stride,
+                feat_norm, target_norm, args.input_len, args.pred_horizon, args.stride
             )
             n_w = X_all.shape[0]
-            if n_w == 0:
-                continue
+            if n_w == 0: continue
 
-            cut_train = int(n_w * args.train_frac)
-            cut_val = int(n_w * (args.train_frac + args.val_frac))
+            cut_train = max(int(n_w * args.train_frac), 1)
+            cut_val = min(max(int(n_w * (args.train_frac + args.val_frac)), cut_train + 1), n_w - 1)
 
-            cut_train = max(cut_train, 1)
-            cut_val = max(cut_val, cut_train + 1)
-            cut_val = min(cut_val, n_w - 1)
-
-            Xtr_g, Ytr_g = X_all[:cut_train], Y_all[:cut_train]
-            Xv_g, Yv_g = X_all[cut_train:cut_val], Y_all[cut_train:cut_val]
-            Xte_g, Yte_g = X_all[cut_val:], Y_all[cut_val:]
-
-            if Xtr_g.size:
-                shard_train_X.append(Xtr_g)
-                shard_train_y.append(Ytr_g)
-            if Xv_g.size:
-                shard_val_X.append(Xv_g)
-                shard_val_y.append(Yv_g)
-            if Xte_g.size:
-                shard_test_X.append(Xte_g)
-                shard_test_y.append(Yte_g)
+            if X_all[:cut_train].size:
+                shard_train_X.append(X_all[:cut_train]); shard_train_y.append(Y_all[:cut_train])
+            if X_all[cut_train:cut_val].size:
+                shard_val_X.append(X_all[cut_train:cut_val]); shard_val_y.append(Y_all[cut_train:cut_val])
+            if X_all[cut_val:].size:
+                shard_test_X.append(X_all[cut_val:]); shard_test_y.append(Y_all[cut_val:])
 
         def cat_or_empty(chunks, shape_tail):
-            if not chunks:
-                return np.empty((0, *shape_tail), dtype="float32")
+            if not chunks: return np.empty((0, *shape_tail), dtype="float32")
             return np.concatenate(chunks, axis=0).astype("float32")
 
         if shard_train_X or shard_val_X or shard_test_X:
@@ -366,25 +329,15 @@ def main():
             yte = cat_or_empty(shard_test_y, (args.pred_horizon,))
 
             base = os.path.join(args.out_dir, f"part-{shard_idx:04d}")
-            np.save(base + "_X_train.npy", Xtr)
-            np.save(base + "_y_train.npy", ytr)
-            np.save(base + "_X_val.npy", Xv)
-            np.save(base + "_y_val.npy", yv)
-            np.save(base + "_X_test.npy", Xte)
-            np.save(base + "_y_test.npy", yte)
-
-            print("  Saved:")
-            print(f"    train: {Xtr.shape}, {ytr.shape}")
-            print(f"    val:   {Xv.shape}, {yv.shape}")
-            print(f"    test:  {Xte.shape}, {yte.shape}")
-        else:
-            print("  No windows produced for this shard; nothing saved.")
+            np.save(base + "_X_train.npy", Xtr); np.save(base + "_y_train.npy", ytr)
+            np.save(base + "_X_val.npy", Xv); np.save(base + "_y_val.npy", yv)
+            np.save(base + "_X_test.npy", Xte); np.save(base + "_y_test.npy", yte)
+            print(f"  Saved: train {Xtr.shape}, val {Xv.shape}, test {Xte.shape}")
             
         del joined, shard_train_X, shard_val_X, shard_test_X
         gc.collect()
 
     print("\nAll shards processed.")
-
 
 if __name__ == "__main__":
     main()
