@@ -171,13 +171,11 @@ def main():
         print(f"\n=== Shard {shard_idx:04d} (base={base_pq}) ===")
 
         base_id_cols = DATASET_TABLES[base_table]["key_cols"]
-
         base_need_cols = [
             args.time_col,
             *base_id_cols,
             *[raw for _, raw in table_exprs[base_table]],
         ]
-
         base_need_cols = list(set(base_need_cols))
 
         try:
@@ -193,29 +191,26 @@ def main():
             if df_base.height == 0:
                 print("  Base shard empty after service filter; skipping shard.")
                 continue
+        
+        if df_base[args.time_col].dtype != pl.Datetime:
+            df_base = df_base.with_columns(pl.col(args.time_col).cast(pl.Datetime))
+
+        min_t = df_base[args.time_col].min()
+        max_t = df_base[args.time_col].max()
+        
+        print(f"  Time range: {min_t} to {max_t}")
 
         agg_keys = base_id_cols
-
         df_base_agg = build_table_agg(
             df_base, args.time_col, agg_keys, args.freq, table_exprs[base_table]
         )
-
         joined = df_base_agg
 
         for t in needed_tables:
             if t == base_table:
                 continue
-
-            if shard_idx >= len(table_parts[t]):
-                print(
-                    f"  Warning: Table '{t}' has fewer parts than base table. Skipping join for this table."
-                )
-                continue
-
-            pq_path = table_parts[t][shard_idx]
-
+            
             t_id_cols = DATASET_TABLES[t]["key_cols"]
-
             need_cols = [
                 args.time_col,
                 *t_id_cols,
@@ -224,10 +219,23 @@ def main():
             need_cols = list(set(need_cols))
 
             try:
-                df_t = pl.read_parquet(pq_path, columns=need_cols)
+                lf_t = pl.scan_parquet(table_parts[t])
+                
+                lf_t = lf_t.filter(
+                    pl.col(args.time_col).cast(pl.Datetime) >= min_t,
+                    pl.col(args.time_col).cast(pl.Datetime) <= max_t
+                )
+                
+                lf_t = lf_t.select(need_cols)
+                
+                df_t = lf_t.collect()
+                
             except Exception as e:
-                print(f"  Error reading table '{t}': {e}. Skipping this table join.")
+                print(f"  Error reading/filtering table '{t}': {e}. Skipping join.")
                 continue
+
+            if df_t.height == 0:
+                print(f"  Table '{t}' has no data in this time range. Join will result in nulls.")
 
             df_t_agg = build_table_agg(
                 df_t, args.time_col, t_id_cols, args.freq, table_exprs[t]
@@ -235,22 +243,16 @@ def main():
 
             feature_spec = FEATURE_SETS[args.feature_set]
             spec_join_keys = feature_spec.get("join_keys", {})
-
+            
             if t in spec_join_keys:
                 join_on = ["_t"] + spec_join_keys[t]
             else:
                 common = set(joined.columns).intersection(df_t_agg.columns)
                 join_on = list(common)
-
-            missing_keys = [
-                k
-                for k in join_on
-                if k not in joined.columns or k not in df_t_agg.columns
-            ]
+            
+            missing_keys = [k for k in join_on if k not in joined.columns or k not in df_t_agg.columns]
             if missing_keys:
-                print(
-                    f"  Cannot join table '{t}': missing keys {missing_keys}. Skipping."
-                )
+                print(f"  Cannot join table '{t}': missing keys {missing_keys}. Skipping.")
                 continue
 
             joined = joined.join(df_t_agg, on=join_on, how="left")
@@ -270,9 +272,7 @@ def main():
 
         group_cols = [c for c in args.id_cols if c in joined.columns]
         if not group_cols:
-            print(
-                f"  Error: args.id_cols {args.id_cols} not found in joined columns {joined.columns}. Cannot group."
-            )
+            print(f"  Error: args.id_cols {args.id_cols} not found in joined columns {joined.columns}. Cannot group.")
             continue
 
         for _, g in joined.group_by(group_cols, maintain_order=True):
