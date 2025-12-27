@@ -5,6 +5,7 @@ import time
 import argparse
 import polars as pl
 import numpy as np
+import gc 
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, os.pardir))
@@ -62,17 +63,20 @@ def list_parquet_parts(parquet_dir: str):
 
 
 def build_table_agg(
-    df: pl.DataFrame, time_col: str, id_cols: list, freq: str, feature_exprs: list
+    df_or_lazy, time_col: str, id_cols: list, freq: str, feature_exprs: list
 ):
-    if df[time_col].dtype != pl.Datetime:
-        df = df.with_columns(pl.col(time_col).cast(pl.Datetime))
+    if isinstance(df_or_lazy, pl.DataFrame):
+        if df_or_lazy[time_col].dtype != pl.Datetime:
+            df_or_lazy = df_or_lazy.with_columns(pl.col(time_col).cast(pl.Datetime))
+    else:
+        df_or_lazy = df_or_lazy.with_columns(pl.col(time_col).cast(pl.Datetime))
 
     agg_exprs = [
         pl.col(raw_col).last().alias(feat_name) for feat_name, raw_col in feature_exprs
     ]
 
     out = (
-        df.with_columns(pl.col(time_col).dt.truncate(freq).alias("_t"))
+        df_or_lazy.with_columns(pl.col(time_col).dt.truncate(freq).alias("_t"))
         .group_by(["_t"] + id_cols)
         .agg(agg_exprs)
         .sort(["_t"] + id_cols)
@@ -126,25 +130,23 @@ def main():
     table_exprs = table_to_feature_exprs(args.feature_set)
 
     base_table = FEATURES[target_feature]["table"]
-    if base_table not in needed_tables:
-        raise SystemExit(f"Target feature table '{base_table}' not in needed tables?!")
 
     print(f"Feature set: {args.feature_set}")
     print(f"Tables: {needed_tables}")
-    print(f"Features (ordered): {feature_names}")
-    print(f"Target: {target_feature} (idx={target_idx})")
     print(f"Base join table: {base_table}")
 
     selected_services = None
     if args.max_services > 0:
         base_dir = DATASET_TABLES[base_table]["parquet_dir"]
         base_parts = list_parquet_parts(base_dir)
-        all_services = set()
-        for pq_path in base_parts:
-            df_s = pl.read_parquet(pq_path, columns=[args.service_col])
-            all_services.update(df_s[args.service_col].unique().to_list())
+        try:
+            lf_s = pl.scan_parquet(base_parts)
+            unique_s = lf_s.select(args.service_col).unique().collect()
+            all_services_list = sorted(unique_s[args.service_col].to_list())
+        except Exception as e:
+            print(f"Error scanning for services: {e}. Fallback to manual read.")
+            all_services_list = []
 
-        all_services_list = sorted(all_services)
         rng = np.random.default_rng(args.subset_seed)
         if len(all_services_list) > args.max_services:
             idxs = rng.choice(
@@ -153,8 +155,8 @@ def main():
             selected_services = set(np.array(all_services_list)[idxs].tolist())
             print(f"Selected services: {len(selected_services)} (subset)")
         else:
-            selected_services = set(all_services_list)
-            print(f"Selected services: {len(selected_services)} (all available)")
+            selected_services = set(all_services_list) if all_services_list else None
+            print(f"Selected services: All available")
 
     table_parts: dict[str, list[str]] = {}
     for t in needed_tables:
@@ -163,11 +165,11 @@ def main():
         if not parts:
             raise SystemExit(f"No parquet parts found for table='{t}' in {pq_dir}")
         table_parts[t] = parts
-        print(f"Table '{t}': {len(parts)} parquet parts")
 
     os.makedirs(args.out_dir, exist_ok=True)
 
     for shard_idx, base_pq in enumerate(table_parts[base_table]):
+        gc.collect()
         print(f"\n=== Shard {shard_idx:04d} (base={base_pq}) ===")
 
         base_id_cols = DATASET_TABLES[base_table]["key_cols"]
@@ -179,31 +181,35 @@ def main():
         base_need_cols = list(set(base_need_cols))
 
         try:
-            df_base = pl.read_parquet(base_pq, columns=base_need_cols)
+            lf_base = pl.scan_parquet(base_pq).select(base_need_cols)
+            if selected_services is not None:
+                 if args.service_col in lf_base.columns:
+                     lf_base = lf_base.filter(pl.col(args.service_col).is_in(list(selected_services)))
+            
+            df_base = lf_base.collect()
         except Exception as e:
             print(f"Error reading base parquet {base_pq}: {e}")
             continue
 
-        if selected_services is not None and args.service_col in df_base.columns:
-            df_base = df_base.filter(
-                pl.col(args.service_col).is_in(list(selected_services))
-            )
-            if df_base.height == 0:
-                print("  Base shard empty after service filter; skipping shard.")
-                continue
+        if df_base.height == 0:
+            print("  Base shard empty; skipping.")
+            continue
         
         if df_base[args.time_col].dtype != pl.Datetime:
             df_base = df_base.with_columns(pl.col(args.time_col).cast(pl.Datetime))
 
         min_t = df_base[args.time_col].min()
         max_t = df_base[args.time_col].max()
-        
         print(f"  Time range: {min_t} to {max_t}")
 
         agg_keys = base_id_cols
         df_base_agg = build_table_agg(
             df_base, args.time_col, agg_keys, args.freq, table_exprs[base_table]
         )
+        
+        del df_base
+        gc.collect()
+
         joined = df_base_agg
 
         for t in needed_tables:
@@ -227,19 +233,19 @@ def main():
                 )
                 
                 lf_t = lf_t.select(need_cols)
+
+                lf_t_agg = build_table_agg(
+                    lf_t, args.time_col, t_id_cols, args.freq, table_exprs[t]
+                )
                 
-                df_t = lf_t.collect()
+                df_t_agg = lf_t_agg.collect(streaming=True)
                 
             except Exception as e:
-                print(f"  Error reading/filtering table '{t}': {e}. Skipping join.")
+                print(f"  Error processing table '{t}': {e}. Skipping join.")
                 continue
 
-            if df_t.height == 0:
-                print(f"  Table '{t}' has no data in this time range. Join will result in nulls.")
-
-            df_t_agg = build_table_agg(
-                df_t, args.time_col, t_id_cols, args.freq, table_exprs[t]
-            )
+            if df_t_agg.height == 0:
+                print(f"  Table '{t}' has no data in this time range.")
 
             feature_spec = FEATURE_SETS[args.feature_set]
             spec_join_keys = feature_spec.get("join_keys", {})
@@ -256,6 +262,9 @@ def main():
                 continue
 
             joined = joined.join(df_t_agg, on=join_on, how="left")
+            
+            del df_t_agg
+            gc.collect()
 
         if joined is None or joined.height == 0:
             print("  Joined shard empty; skipping.")
@@ -272,11 +281,12 @@ def main():
 
         group_cols = [c for c in args.id_cols if c in joined.columns]
         if not group_cols:
-            print(f"  Error: args.id_cols {args.id_cols} not found in joined columns {joined.columns}. Cannot group.")
+            print(f"  Error: args.id_cols {args.id_cols} not found. Cannot group.")
             continue
 
+        joined = joined.sort(group_cols + ["_t"])
+
         for _, g in joined.group_by(group_cols, maintain_order=True):
-            g = g.sort("_t")
             T = g.height
             if T < args.input_len + args.pred_horizon:
                 continue
@@ -369,6 +379,9 @@ def main():
             print(f"    test:  {Xte.shape}, {yte.shape}")
         else:
             print("  No windows produced for this shard; nothing saved.")
+            
+        del joined, shard_train_X, shard_val_X, shard_test_X
+        gc.collect()
 
     print("\nAll shards processed.")
 
