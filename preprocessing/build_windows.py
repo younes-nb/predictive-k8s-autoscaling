@@ -187,7 +187,7 @@ def main():
 
         try:
             lf_base = pl.scan_parquet(base_pq).select(base_need_cols)
-            if selected_services is not None and args.service_col in lf_base.columns:
+            if selected_services is not None and args.service_col in lf_base.collect_schema().names():
                 lf_base = lf_base.filter(pl.col(args.service_col).is_in(list(selected_services)))
             
             df_base = lf_base.collect()
@@ -196,7 +196,7 @@ def main():
             continue
 
         if df_base.height == 0:
-            print("  Base shard empty after service filter; skipping.")
+            print("  Base shard empty; skipping.")
             continue
         
         if df_base[args.time_col].dtype != pl.Datetime:
@@ -238,7 +238,7 @@ def main():
                     lf_t, args.time_col, t_id_cols, args.freq, table_exprs[t]
                 )
                 
-                df_t_agg = lf_t_agg.collect(streaming=True)
+                df_t_agg = lf_t_agg.collect(engine="streaming")
                 
             except Exception as e:
                 print(f"  Error processing table '{t}': {e}. Skipping join.")
