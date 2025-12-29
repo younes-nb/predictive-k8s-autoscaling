@@ -5,9 +5,9 @@ import numpy as np
 import pandas as pd
 from collections import defaultdict
 from datetime import datetime
-from config.defaults import LOGS_DIR, RAW_MSRESOURCE
+from config.defaults import PATHS
 
-os.makedirs(LOGS_DIR, exist_ok=True)
+os.makedirs(PATHS.LOGS_DIR, exist_ok=True)
 
 CHUNK_SIZE = 1_000_000
 ALPHA = 1.0
@@ -53,7 +53,7 @@ class OnlineServiceStats:
 def stream_msresource_stats() -> dict:
     service_stats = defaultdict(OnlineServiceStats)
 
-    files = sorted(glob.glob(os.path.join(RAW_MSRESOURCE, "*.csv")))
+    files = sorted(glob.glob(os.path.join(PATHS.RAW_MSRESOURCE, "*.csv")))
     if not files:
         raise RuntimeError("No MSResource CSV files found.")
 
