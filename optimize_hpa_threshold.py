@@ -4,6 +4,8 @@ import json
 import argparse
 import numpy as np
 import pandas as pd
+import re
+from pathlib import Path
 from collections import defaultdict
 from datetime import datetime, timezone
 from typing import List, Optional
@@ -53,6 +55,15 @@ class OnlineServiceStats:
         return float(np.mean(samples > u_crit))
 
 
+def _natural_key(path: str) -> tuple:
+    name = Path(path).name
+    stem = Path(path).stem
+    m = re.search(r"_(\d+)$", stem)
+    if m:
+        return (stem[: m.start()], int(m.group(1)), name)
+    return (stem, float("inf"), name)
+
+
 def select_files(
     raw_dir: str,
     pattern: str = "*.csv",
@@ -61,7 +72,9 @@ def select_files(
     end: Optional[int] = None,
     indices: Optional[List[int]] = None,
 ) -> List[str]:
-    files = sorted(glob.glob(os.path.join(raw_dir, pattern)))
+    files = glob.glob(os.path.join(raw_dir, pattern))
+    files = sorted(files, key=_natural_key)
+
     if not files:
         raise RuntimeError(f"No files matched pattern='{pattern}' in {raw_dir}")
 
