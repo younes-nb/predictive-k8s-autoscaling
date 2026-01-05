@@ -11,6 +11,8 @@ class Paths:
     PARQUET_MSRESOURCE: str = "/dataset/parquet/msresource"
     RAW_NODE: str = "/dataset/raw/node"
     PARQUET_NODE: str = "/dataset/parquet/node"
+    RAW_MSRTMCRE: str = "/dataset/raw/msrtmcre"
+    PARQUET_MSRTMCRE: str = "/dataset/parquet/msrtmcre"
     WINDOWS_DIR: str = "/dataset/windows"
     MODELS_DIR: str = "/dataset/models"
     LOGS_DIR: str = "/dataset/logs"
@@ -31,9 +33,16 @@ DATASET_TABLES: Dict[str, Dict[str, Any]] = {
     "node": {
         "prefix": "NodeMetricsUpdate/NodeMetricsUpdate",
         "ratio_min": 30,
-        "raw_dir": os.path.join(PATHS.RAW_ROOT, "node"),
-        "parquet_dir": os.path.join(PATHS.PARQUET_ROOT, "node"),
+        "raw_dir": PATHS.RAW_NODE,
+        "parquet_dir": PATHS.PARQUET_NODE,
         "key_cols": ["nodeid"],
+    },
+    "msrtmcre": {
+        "prefix": "MSRTMCREUpdate/MSRTMCREUpdate",
+        "ratio_min": 30,
+        "raw_dir": PATHS.RAW_MSRTMCRE,
+        "parquet_dir": PATHS.PARQUET_MSRTMCRE,
+        "key_cols": ["msname", "msinstanceid"],
     },
 }
 
