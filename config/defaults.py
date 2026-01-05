@@ -150,8 +150,8 @@ class PreprocessingDefaults:
     REPARTITION: int = 4
     TIME_COL: str = "timestamp_dt"
     ID_COLS: Tuple[str, ...] = ("msname", "msinstanceid")
-    FREQ: str = "1m"
     SERVICE_COL: str = "msname"
+    FREQ: str = "1m"
     MAX_SERVICES: int = 2000
     SUBSET_SEED: int = 42
     FEATURE_SET: str = "cpu"
@@ -169,6 +169,14 @@ class TrainingDefaults:
     NUM_WORKERS: int = 8
     SEED: int = 42
     LOG_INTERVAL: int = 2000
+    USE_WEIGHTS: bool = True
+    MC_REPEATS: int = 25
+    TAU_BASE: float = 0.80
+    K_UNCERTAINTY: float = 2.0
+    GAMMA: float = 6.0
+    DELTA: float = 0.05
+    THETA_MIN: float = 0.60
+    THETA_MAX: float = 0.90
     INFERENCE_REPEATS: int = 100
 
 

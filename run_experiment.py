@@ -25,24 +25,23 @@ def run(cmd, title: str):
 
 def main():
     ap = argparse.ArgumentParser(
-        description="Run full pipeline: preprocessing -> train model -> test model"
+        description="Run full pipeline: preprocessing -> compute weights -> train model -> test model"
     )
 
     ap.add_argument("--start_date", default="0d0", help="e.g. 0d0 (default: 0d0)")
     ap.add_argument("--end_date", default="7d0", help="e.g. 7d0 (default: 7d0)")
-
     ap.add_argument(
         "--feature_set",
         default=PREPROCESSING.FEATURE_SET,
         choices=list(FEATURE_SETS.keys()),
         help="Predefined feature set to use for preprocessing (default from config).",
     )
-
     ap.add_argument(
         "--windows_dir",
         default=PATHS.WINDOWS_DIR,
         help=f"Directory with windows .npy files (default: {PATHS.WINDOWS_DIR})",
     )
+
     ap.add_argument(
         "--checkpoint_path",
         default=DEFAULT_CHECKPOINT_PATH,
@@ -57,14 +56,14 @@ def main():
         "--rnn_type",
         choices=["lstm", "gru"],
         default="lstm",
-        help="RNN cell type to use in train_rnn.py/test_rnn.py (default: lstm).",
+        help="RNN cell type (default: lstm).",
     )
 
-    ap.add_argument("--input_len", type=int, help="Override input sequence length passed to train_rnn.py")
-    ap.add_argument("--pred_horizon", type=int, help="Override prediction horizon passed to train_rnn.py")
-    ap.add_argument("--hidden_size", type=int, help="Override hidden size passed to train_rnn.py")
-    ap.add_argument("--num_layers", type=int, help="Override number of RNN layers passed to train_rnn.py")
-    ap.add_argument("--dropout", type=float, help="Override dropout rate passed to train_rnn.py")
+    ap.add_argument("--input_len", type=int, help="Override input sequence length")
+    ap.add_argument("--pred_horizon", type=int, help="Override prediction horizon")
+    ap.add_argument("--hidden_size", type=int, help="Override hidden size")
+    ap.add_argument("--num_layers", type=int, help="Override number of RNN layers")
+    ap.add_argument("--dropout", type=float, help="Override dropout rate")
 
     ap.add_argument("--skip_preprocessing", action="store_true")
     ap.add_argument("--skip_training", action="store_true")
@@ -75,11 +74,21 @@ def main():
     ap.add_argument("--skip_windows", action="store_true")
     ap.add_argument("--keep_raw", action="store_true")
 
+    ap.add_argument(
+        "--use_weights",
+        action="store_true",
+        help="Use adaptive boundary weights for training (requires a pre-trained checkpoint or 2-stage training)",
+    )
+
     args = ap.parse_args()
 
     preprocess_script = os.path.join(REPO_ROOT, "run_preprocessing.py")
-    train_script = os.path.join(REPO_ROOT, "training", "train_rnn.py")
-    test_script = os.path.join(REPO_ROOT, "training", "test_rnn.py")
+    train_script = os.path.join(REPO_ROOT, "training", "train.py")
+    test_script = os.path.join(REPO_ROOT, "training", "evaluate.py")
+
+    compute_weights_script = os.path.join(
+        REPO_ROOT, "tools", "compute_boundary_weights.py"
+    )
 
     total_times = {}
 
@@ -110,6 +119,42 @@ def main():
     else:
         print("\n=== Skipping preprocessing step (per --skip_preprocessing) ===")
 
+    if not args.skip_training and args.use_weights:
+        if not os.path.exists(args.checkpoint_path):
+            print(
+                f"[WARN] --use_weights requested but {args.checkpoint_path} not found."
+            )
+            print(
+                "       Skipping weight computation (cannot compute uncertainty without a model)."
+            )
+        else:
+            print("\n=== Computing boundary weights ===")
+            cmd_weights = [
+                sys.executable,
+                compute_weights_script,
+                "--windows_dir",
+                args.windows_dir,
+                "--checkpoint_path",
+                args.checkpoint_path,
+                "--rnn_type",
+                args.rnn_type,
+            ]
+
+            if args.input_len:
+                cmd_weights.extend(["--input_len", str(args.input_len)])
+            if args.hidden_size:
+                cmd_weights.extend(["--hidden_size", str(args.hidden_size)])
+            if args.num_layers:
+                cmd_weights.extend(["--num_layers", str(args.num_layers)])
+            if args.dropout:
+                cmd_weights.extend(["--dropout", str(args.dropout)])
+            if args.pred_horizon:
+                cmd_weights.extend(["--horizon", str(args.pred_horizon)])
+
+            total_times["compute_weights"] = run(
+                cmd_weights, "Step 2: Compute Boundary Weights"
+            )
+
     if not args.skip_training:
         cmd_train = [
             sys.executable,
@@ -135,7 +180,10 @@ def main():
         if args.dropout is not None:
             cmd_train.extend(["--dropout", str(args.dropout)])
 
-        total_times["training"] = run(cmd_train, "Step 2: Train Model")
+        if args.use_weights:
+            cmd_train.append("--use_weights")
+
+        total_times["training"] = run(cmd_train, "Step 3: Train Model")
     else:
         print("\n=== Skipping training step (per --skip_training) ===")
 
@@ -147,16 +195,17 @@ def main():
             args.windows_dir,
             "--checkpoint_path",
             args.checkpoint_path,
-            "--rnn_type",
-            args.rnn_type,
         ]
-        total_times["testing"] = run(cmd_test, "Step 3: Test Model")
+        if args.cpu:
+            cmd_test.append("--cpu")
+
+        total_times["testing"] = run(cmd_test, "Step 4: Test Model")
     else:
         print("\n=== Skipping testing step (per --skip_testing) ===")
 
     print("\n========== PIPELINE SUMMARY ==========")
     for stage, t in total_times.items():
-        print(f"{stage:>12}: {t:.2f}s")
+        print(f"{stage:>15}: {t:.2f}s")
     print("=======================================")
 
 
