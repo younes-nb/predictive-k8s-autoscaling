@@ -38,7 +38,7 @@ DATASET_TABLES: Dict[str, Dict[str, Any]] = {
         "key_cols": ["nodeid"],
     },
     "msrtmcre": {
-        "prefix": "MSRTMCREUpdate/MSRTMCREUpdate",
+        "prefix": "MCRRTUpdate/MCRRTUpdate",
         "ratio_min": 30,
         "raw_dir": PATHS.RAW_MSRTMCRE,
         "parquet_dir": PATHS.PARQUET_MSRTMCRE,
