@@ -25,7 +25,6 @@ def evaluate(args):
     checkpoint = torch.load(args.checkpoint_path, map_location=device)
     ckpt_args = checkpoint["args"]
 
-    input_size = ckpt_args.get("input_size", 1)
     hidden_size = ckpt_args["hidden_size"]
     num_layers = ckpt_args["num_layers"]
     dropout = ckpt_args["dropout"]
@@ -34,6 +33,15 @@ def evaluate(args):
     input_len = ckpt_args["input_len"]
 
     test_ds = ShardedWindowsDataset(args.windows_dir, "test", input_len, horizon)
+
+    if len(test_ds) > 0:
+        first_x, _ = test_ds[0]
+        input_size = first_x.shape[-1] if first_x.ndim > 1 else 1
+        print(f"Inferred input_size={input_size} from test dataset.")
+    else:
+        input_size = ckpt_args.get("input_size", 1)
+        print(f"[WARN] Test dataset empty. Fallback input_size={input_size}.")
+
     test_loader = DataLoader(
         test_ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers
     )
@@ -48,6 +56,7 @@ def evaluate(args):
     ).to(device)
 
     model.load_state_dict(checkpoint["model_state_dict"])
+    model.eval()
 
     mse_sum = 0
     tp = fp = tn = fn = 0
@@ -61,6 +70,7 @@ def evaluate(args):
         mu, sigma = mc_dropout_predict(model, x, repeats=args.inference_repeats)
 
         mse_sum += ((mu - y) ** 2).sum().item()
+
         theta_base = torch.full(mu.shape, args.base_threshold, device=device)
 
         adaptive_thr = compute_adaptive_thresholds(
@@ -83,6 +93,10 @@ def evaluate(args):
 
         if i % 10 == 0:
             print(f"Batch {i}/{len(test_loader)} processed...")
+
+    if total_samples == 0:
+        print("No samples found.")
+        return
 
     mse = mse_sum / (total_samples * horizon)
     precision = tp / (tp + fp + 1e-8)
