@@ -10,7 +10,13 @@ REPO_ROOT = THIS_DIR
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from config.defaults import PATHS, DEFAULT_CHECKPOINT_PATH, PREPROCESSING, FEATURE_SETS
+from config.defaults import (
+    PATHS,
+    DEFAULT_CHECKPOINT_PATH,
+    PREPROCESSING,
+    FEATURE_SETS,
+    TRAINING,
+)
 
 
 def run(cmd, title: str):
@@ -72,11 +78,17 @@ def main():
     ap.add_argument("--skip_fetch", action="store_true")
     ap.add_argument("--skip_ingest", action="store_true")
     ap.add_argument("--skip_windows", action="store_true")
-    ap.add_argument("--keep_raw", action="store_true")
+    ap.add_argument(
+        "--delete_raw",
+        action="store_false",
+        dest="keep_raw",
+        help="Delete raw files during preprocessing.",
+    )
 
     ap.add_argument(
         "--use_weights",
         action="store_true",
+        default=TRAINING.USE_WEIGHTS,
         help="Use adaptive boundary weights for training (requires a pre-trained checkpoint or 2-stage training)",
     )
 
@@ -112,8 +124,8 @@ def main():
             cmd_pre.append("--skip_ingest")
         if args.skip_windows:
             cmd_pre.append("--skip_windows")
-        if args.keep_raw:
-            cmd_pre.append("--keep_raw")
+        if not args.keep_raw:
+            cmd_pre.append("--delete_raw")
 
         total_times["preprocessing"] = run(cmd_pre, "Step 1: Preprocessing")
     else:
@@ -165,6 +177,8 @@ def main():
             args.checkpoint_path,
             "--rnn_type",
             args.rnn_type,
+            "--feature_set",
+            args.feature_set,
         ]
         if args.cpu:
             cmd_train.append("--cpu")
@@ -179,7 +193,6 @@ def main():
             cmd_train.extend(["--num_layers", str(args.num_layers)])
         if args.dropout is not None:
             cmd_train.extend(["--dropout", str(args.dropout)])
-
         if args.use_weights:
             cmd_train.append("--use_weights")
 

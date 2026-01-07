@@ -1,6 +1,14 @@
 import os
 import sys
 import argparse
+import logging
+from datetime import datetime
+
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    from backports.zoneinfo import ZoneInfo
+
 import torch
 import numpy as np
 from torch.utils.data import DataLoader
@@ -10,37 +18,89 @@ REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, os.pardir))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from config.defaults import PATHS, TRAINING
+from config.defaults import PATHS, PREPROCESSING, TRAINING
 from common.dataset import ShardedWindowsDataset
 from common.models import RNNForecaster
 from common.uncertainty import mc_dropout_predict, compute_adaptive_thresholds
 
 
+def setup_logging(mode="test"):
+    os.makedirs(PATHS.LOGS_DIR, exist_ok=True)
+
+    try:
+        tehran_tz = ZoneInfo("Asia/Tehran")
+    except Exception:
+        print("[WARN] Could not find 'Asia/Tehran' timezone. Using system time.")
+        tehran_tz = None
+
+    now = datetime.now(tehran_tz)
+    timestamp = now.strftime("%Y%m%d_%H%M%S")
+
+    log_filename = f"{mode}_{timestamp}.log"
+    log_path = os.path.join(PATHS.LOGS_DIR, log_filename)
+
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+    root_logger.handlers = []
+
+    file_handler = logging.FileHandler(log_path)
+    file_handler.setFormatter(
+        logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+    )
+    root_logger.addHandler(file_handler)
+
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(logging.Formatter("%(message)s"))
+    root_logger.addHandler(console_handler)
+
+    logging.info(f"=== {mode.upper()} SESSION STARTED ===")
+    logging.info(f"Log file: {log_path}")
+    logging.info(f"Timestamp (Tehran): {now}")
+    return log_path
+
+
 def evaluate(args):
+    log_path = setup_logging("test")
+
+    logging.info("\n--- Configuration Inputs ---")
+    for key, value in vars(args).items():
+        logging.info(f"{key:<20}: {value}")
+    logging.info("-" * 30)
+
     device = torch.device(
         "cuda" if torch.cuda.is_available() and not args.cpu else "cpu"
     )
+    logging.info(f"Device: {device}")
 
-    print(f"Loading checkpoint: {args.checkpoint_path}")
+    logging.info(f"Loading checkpoint: {args.checkpoint_path}")
+    if not os.path.exists(args.checkpoint_path):
+        logging.error(f"Checkpoint not found at {args.checkpoint_path}")
+        return
+
     checkpoint = torch.load(args.checkpoint_path, map_location=device)
-    ckpt_args = checkpoint["args"]
+    ckpt_args = checkpoint.get("args", {})
 
-    hidden_size = ckpt_args["hidden_size"]
-    num_layers = ckpt_args["num_layers"]
-    dropout = ckpt_args["dropout"]
-    horizon = ckpt_args["pred_horizon"]
-    rnn_type = ckpt_args["rnn_type"]
-    input_len = ckpt_args["input_len"]
+    hidden_size = ckpt_args.get("hidden_size", TRAINING.HIDDEN_SIZE)
+    num_layers = ckpt_args.get("num_layers", TRAINING.NUM_LAYERS)
+    dropout = ckpt_args.get("dropout", TRAINING.DROPOUT)
+    horizon = ckpt_args.get("pred_horizon", 5)
+    rnn_type = ckpt_args.get("rnn_type", "lstm")
+    input_len = ckpt_args.get("input_len", 60)
+    feature_set = ckpt_args.get("feature_set", "unknown")
 
+    logging.info(f"Model trained on feature_set: {feature_set}")
+
+    logging.info("\n--- Loading Test Dataset ---")
     test_ds = ShardedWindowsDataset(args.windows_dir, "test", input_len, horizon)
+    logging.info(f"Test samples: {len(test_ds)}")
 
     if len(test_ds) > 0:
         first_x, _ = test_ds[0]
         input_size = first_x.shape[-1] if first_x.ndim > 1 else 1
-        print(f"Inferred input_size={input_size} from test dataset.")
+        logging.info(f"Inferred input_size={input_size} from dataset.")
     else:
         input_size = ckpt_args.get("input_size", 1)
-        print(f"[WARN] Test dataset empty. Fallback input_size={input_size}.")
+        logging.warning(f"Test dataset empty. Fallback input_size={input_size}.")
 
     test_loader = DataLoader(
         test_ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers
@@ -56,23 +116,26 @@ def evaluate(args):
     ).to(device)
 
     model.load_state_dict(checkpoint["model_state_dict"])
-    model.eval()
 
-    mse_sum = 0
+    logging.info("\n--- Starting Inference (MC Dropout) ---")
+
+    mse_sum = 0.0
+    mae_sum = 0.0
     tp = fp = tn = fn = 0
     total_samples = 0
 
-    print("Starting evaluation with Adaptive Thresholds (MC Dropout)...")
+    start_time = datetime.now()
 
     for i, (x, y) in enumerate(test_loader):
         x, y = x.to(device), y.to(device)
 
         mu, sigma = mc_dropout_predict(model, x, repeats=args.inference_repeats)
 
-        mse_sum += ((mu - y) ** 2).sum().item()
+        diff = mu - y
+        mse_sum += (diff**2).sum().item()
+        mae_sum += diff.abs().sum().item()
 
         theta_base = torch.full(mu.shape, args.base_threshold, device=device)
-
         adaptive_thr = compute_adaptive_thresholds(
             theta_base,
             sigma,
@@ -92,23 +155,41 @@ def evaluate(args):
         total_samples += x.size(0)
 
         if i % 10 == 0:
-            print(f"Batch {i}/{len(test_loader)} processed...")
+            logging.info(f"Batch {i}/{len(test_loader)} processed...")
+
+    inference_time = (datetime.now() - start_time).total_seconds()
 
     if total_samples == 0:
-        print("No samples found.")
+        logging.warning("No samples found in test set.")
         return
 
     mse = mse_sum / (total_samples * horizon)
+    mae = mae_sum / (total_samples * horizon)
+
+    accuracy = (tp + tn) / (tp + tn + fp + fn + 1e-8)
     precision = tp / (tp + fp + 1e-8)
     recall = tp / (tp + fn + 1e-8)
     f1 = 2 * precision * recall / (precision + recall + 1e-8)
 
-    print("\n=== Test Results ===")
-    print(f"MSE: {mse:.6f}")
-    print(f"Adaptive Classification (k={args.k}):")
-    print(f"Precision: {precision:.4f}")
-    print(f"Recall:    {recall:.4f}")
-    print(f"F1 Score:  {f1:.4f}")
+    avg_inference_time = (inference_time / total_samples) * 1000
+
+    logging.info("\n=== Test Results ===")
+    logging.info(f"MSE:       {mse:.6f}")
+    logging.info(f"MAE:       {mae:.6f}")
+    logging.info("-" * 20)
+    logging.info(f"Adaptive Classification (k={args.k}):")
+    logging.info(f"Accuracy:  {accuracy:.4f}")
+    logging.info(f"Precision: {precision:.4f}")
+    logging.info(f"Recall:    {recall:.4f}")
+    logging.info(f"F1 Score:  {f1:.4f}")
+    logging.info("-" * 20)
+    logging.info(f"Confusion Matrix:")
+    logging.info(f"TP: {int(tp)}, FP: {int(fp)}")
+    logging.info(f"FN: {int(fn)}, TN: {int(tn)}")
+    logging.info("-" * 20)
+    logging.info(f"Total Inference Time: {inference_time:.2f}s")
+    logging.info(f"Latency per Sample:   {avg_inference_time:.2f}ms")
+    logging.info(f"Log Saved to: {log_path}")
 
 
 if __name__ == "__main__":
@@ -118,10 +199,14 @@ if __name__ == "__main__":
     p.add_argument("--batch_size", type=int, default=256)
     p.add_argument("--num_workers", type=int, default=4)
     p.add_argument("--cpu", action="store_true")
-    p.add_argument("--inference_repeats", type=int, default=10)
+    p.add_argument("--inference_repeats", type=int, default=TRAINING.INFERENCE_REPEATS)
     p.add_argument("--base_threshold", type=float, default=0.8)
-    p.add_argument("--k", type=float, default=2.0)
-    p.add_argument("--theta_min", type=float, default=0.60)
-    p.add_argument("--theta_max", type=float, default=0.90)
+    p.add_argument("--k", type=float, default=TRAINING.K_UNCERTAINTY)
+    p.add_argument("--theta_min", type=float, default=TRAINING.THETA_MIN)
+    p.add_argument("--theta_max", type=float, default=TRAINING.THETA_MAX)
 
-    evaluate(p.parse_args())
+    try:
+        evaluate(p.parse_args())
+    except Exception as e:
+        logging.error("Fatal Error during evaluation", exc_info=True)
+        sys.exit(1)

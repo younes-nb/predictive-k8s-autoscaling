@@ -23,7 +23,9 @@ def main():
     p = argparse.ArgumentParser(
         description="Ingest CSV trace files into Parquet (feature-set aware, per-table)."
     )
-    p.add_argument("--table", required=True, help="Dataset table name, e.g. msresource, node")
+    p.add_argument(
+        "--table", required=True, help="Dataset table name, e.g. msresource, node"
+    )
     p.add_argument(
         "--feature_set",
         type=str,
@@ -32,14 +34,21 @@ def main():
         help="Controls which feature columns are retained for this table.",
     )
     p.add_argument("--raw_dir", required=True, help="Directory with CSV/CSV.GZ files.")
-    p.add_argument("--out_dir", required=True, help="Output directory for Parquet files.")
+    p.add_argument(
+        "--out_dir", required=True, help="Output directory for Parquet files."
+    )
     p.add_argument(
         "--repartition",
         type=int,
         default=PREPROCESSING.REPARTITION,
         help="Approx number of Parquet parts to write.",
     )
-    p.add_argument("--keep_raw", action="store_true")
+    p.add_argument(
+        "--delete_raw",
+        action="store_false",
+        dest="keep_raw",
+        help="Delete raw CSV files after successful ingestion (default: keep them).",
+    )
     args = p.parse_args()
 
     if args.table not in DATASET_TABLES:
@@ -94,7 +103,9 @@ def main():
         if not batch_files:
             continue
 
-        print(f"\n[Part {part_idx}] files {start}..{end - 1} ({len(batch_files)} files)")
+        print(
+            f"\n[Part {part_idx}] files {start}..{end - 1} ({len(batch_files)} files)"
+        )
         writer = None
         total_rows = 0
         out_path = os.path.join(args.out_dir, f"part-{part_idx:05d}.parquet")
@@ -113,7 +124,9 @@ def main():
                 continue
 
             df = df.with_columns(
-                pl.from_epoch(pl.col("timestamp") / 1000, time_unit="s").alias("timestamp_dt")
+                pl.from_epoch(pl.col("timestamp") / 1000, time_unit="s").alias(
+                    "timestamp_dt"
+                )
             )
 
             select_cols = ["timestamp", "timestamp_dt", *key_cols, *feature_cols]

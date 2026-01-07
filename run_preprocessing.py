@@ -45,7 +45,12 @@ def main():
     ap.add_argument("--skip_fetch", action="store_true")
     ap.add_argument("--skip_ingest", action="store_true")
     ap.add_argument("--skip_windows", action="store_true")
-    ap.add_argument("--keep_raw", action="store_true")
+    ap.add_argument(
+        "--delete_raw",
+        action="store_false",
+        dest="keep_raw",
+        help="Delete raw files after ingestion.",
+    )
 
     args = ap.parse_args()
 
@@ -86,8 +91,8 @@ def main():
                 "--out_dir",
                 cfg["parquet_dir"],
             ]
-            if args.keep_raw:
-                cmd.append("--keep_raw")
+            if not args.keep_raw:
+                cmd.append("--delete_raw")
             run(cmd, f"Step 2: Ingest table={t}")
     else:
         print("\n=== Skipping ingest ===")
