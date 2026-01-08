@@ -161,8 +161,10 @@ def main():
 
         for i in range(0, X.shape[0], args.batch_size):
             end = i + args.batch_size
-            x_batch = torch.from_numpy(X[i:end]).float().to(device)
-            y_batch = torch.from_numpy(Y[i:end]).float().to(device)
+
+            x_batch = torch.from_numpy(X[i:end].copy()).float().to(device)
+            y_batch = torch.from_numpy(Y[i:end].copy()).float().to(device)
+
             sid_batch = sid[i:end]
 
             y_target = y_batch[:, -1]
