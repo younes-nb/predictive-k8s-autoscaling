@@ -85,7 +85,7 @@ def train(args):
         args.windows_dir, "train", args.input_len, args.pred_horizon, args.use_weights
     )
     val_ds = ShardedWindowsDataset(
-        args.windows_dir, "val", args.input_len, args.pred_horizon, args.use_weights
+        args.windows_dir, "val", args.input_len, args.pred_horizon, use_weights=False
     )
 
     logging.info(f"Train samples: {len(train_ds)}")
