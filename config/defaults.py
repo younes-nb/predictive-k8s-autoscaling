@@ -15,7 +15,7 @@ class Paths:
     PARQUET_MSRTMCRE: str = "/dataset/parquet/msrtmcre"
     WINDOWS_DIR: str = "/dataset/windows"
     MODELS_DIR: str = "/dataset/models"
-    LOGS_DIR: str = "/dataset/logs"
+    LOGS_DIR: str = "/proj/k8sautoscaledl-PG0/logs"
 
 
 PATHS = Paths()

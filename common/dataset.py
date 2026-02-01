@@ -39,7 +39,7 @@ class ShardedWindowsDataset(Dataset):
             Y = np.load(y_path, mmap_mode="r")
 
             W = None
-            if self.use_weights:
+            if self.use_weights and split == "train":
                 w_path = base + f"_w_{split}.npy"
                 if os.path.exists(w_path):
                     W = np.load(w_path, mmap_mode="r")
