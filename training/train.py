@@ -157,11 +157,7 @@ def train(args):
         val_loss_accum = 0.0
         with torch.no_grad():
             for batch in val_loader:
-                if args.use_weights:
-                    x, y, _ = batch
-                else:
-                    x, y = batch
-
+                x, y = batch
                 x, y = x.to(device), y.to(device)
                 preds = model(x)
                 loss = nn.MSELoss()(preds, y)
