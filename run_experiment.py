@@ -213,6 +213,11 @@ def main():
         ]
         if args.cpu:
             cmd_test.append("--cpu")
+        
+        if args.use_weights:
+            cmd_test.append("--adaptive_threshold")
+        else:
+            cmd_test.append("--static_threshold")
 
         total_times["testing"] = run(cmd_test, "Step 4: Test Model")
     else:

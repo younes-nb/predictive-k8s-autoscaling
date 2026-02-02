@@ -10,7 +10,6 @@ except ImportError:
     from backports.zoneinfo import ZoneInfo
 
 import torch
-import numpy as np
 from torch.utils.data import DataLoader
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -18,7 +17,7 @@ REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, os.pardir))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from config.defaults import PATHS, PREPROCESSING, TRAINING
+from config.defaults import PATHS, TRAINING
 from common.dataset import ShardedWindowsDataset
 from common.models import RNNForecaster
 from common.uncertainty import mc_dropout_predict, compute_adaptive_thresholds
@@ -59,6 +58,13 @@ def setup_logging(mode="test"):
     return log_path
 
 
+@torch.no_grad()
+def forward_predict(model: torch.nn.Module, x: torch.Tensor) -> torch.Tensor:
+    """Deterministic single forward pass (no MC Dropout)."""
+    model.eval()
+    return model(x)
+
+
 def evaluate(args):
     log_path = setup_logging("test")
 
@@ -72,11 +78,11 @@ def evaluate(args):
     )
     logging.info(f"Device: {device}")
 
-    logging.info(f"Loading checkpoint: {args.checkpoint_path}")
     if not os.path.exists(args.checkpoint_path):
         logging.error(f"Checkpoint not found at {args.checkpoint_path}")
         return
 
+    logging.info(f"Loading checkpoint: {args.checkpoint_path}")
     checkpoint = torch.load(args.checkpoint_path, map_location=device)
     ckpt_args = checkpoint.get("args", {})
 
@@ -90,6 +96,23 @@ def evaluate(args):
 
     logging.info(f"Model trained on feature_set: {feature_set}")
 
+    if args.static_threshold:
+        use_adaptive = False
+    elif args.adaptive_threshold:
+        use_adaptive = True
+    else:
+        use_adaptive = True
+
+    logging.info(
+        f"Threshold mode: {'adaptive (mc-dropout)' if use_adaptive else 'static (base_threshold)'}"
+    )
+    logging.info(f"base_threshold: {args.base_threshold}")
+    if use_adaptive:
+        logging.info(
+            f"adaptive params: repeats={args.inference_repeats}, k={args.k}, "
+            f"theta_min={args.theta_min}, theta_max={args.theta_max}"
+        )
+
     logging.info("\n--- Loading Test Dataset ---")
     test_ds = ShardedWindowsDataset(args.windows_dir, "test", input_len, horizon)
     logging.info(f"Test samples: {len(test_ds)}")
@@ -99,11 +122,15 @@ def evaluate(args):
         input_size = first_x.shape[-1] if first_x.ndim > 1 else 1
         logging.info(f"Inferred input_size={input_size} from dataset.")
     else:
-        input_size = ckpt_args.get("input_size", 1)
+        input_size = checkpoint.get("input_size", ckpt_args.get("input_size", 1))
         logging.warning(f"Test dataset empty. Fallback input_size={input_size}.")
 
     test_loader = DataLoader(
-        test_ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers
+        test_ds,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        pin_memory=(device.type == "cuda"),
     )
 
     model = RNNForecaster(
@@ -114,10 +141,9 @@ def evaluate(args):
         horizon=horizon,
         rnn_type=rnn_type,
     ).to(device)
-
     model.load_state_dict(checkpoint["model_state_dict"])
 
-    logging.info("\n--- Starting Inference (MC Dropout) ---")
+    logging.info("\n--- Starting Inference ---")
 
     mse_sum = 0.0
     mae_sum = 0.0
@@ -129,23 +155,27 @@ def evaluate(args):
     for i, (x, y) in enumerate(test_loader):
         x, y = x.to(device), y.to(device)
 
-        mu, sigma = mc_dropout_predict(model, x, repeats=args.inference_repeats)
+        if use_adaptive:
+            mu, sigma = mc_dropout_predict(model, x, repeats=args.inference_repeats)
+
+            theta_base = torch.full(mu.shape, args.base_threshold, device=device)
+            thr = compute_adaptive_thresholds(
+                theta_base,
+                sigma,
+                k=args.k,
+                theta_min=args.theta_min,
+                theta_max=args.theta_max,
+            )
+        else:
+            mu = forward_predict(model, x)
+            thr = torch.full(mu.shape, args.base_threshold, device=device)
 
         diff = mu - y
         mse_sum += (diff**2).sum().item()
         mae_sum += diff.abs().sum().item()
 
-        theta_base = torch.full(mu.shape, args.base_threshold, device=device)
-        adaptive_thr = compute_adaptive_thresholds(
-            theta_base,
-            sigma,
-            k=args.k,
-            theta_min=args.theta_min,
-            theta_max=args.theta_max,
-        )
-
-        y_true_cls = y.max(dim=1).values >= adaptive_thr.max(dim=1).values
-        y_pred_cls = mu.max(dim=1).values >= adaptive_thr.max(dim=1).values
+        y_true_cls = y.max(dim=1).values >= thr.max(dim=1).values
+        y_pred_cls = mu.max(dim=1).values >= thr.max(dim=1).values
 
         tp += (y_pred_cls & y_true_cls).sum().item()
         fp += (y_pred_cls & ~y_true_cls).sum().item()
@@ -171,24 +201,35 @@ def evaluate(args):
     recall = tp / (tp + fn + 1e-8)
     f1 = 2 * precision * recall / (precision + recall + 1e-8)
 
-    avg_inference_time = (inference_time / total_samples) * 1000
+    avg_inference_time_ms = (inference_time / total_samples) * 1000.0
 
     logging.info("\n=== Test Results ===")
+    logging.info(f"feature_set (from ckpt): {feature_set}")
+    logging.info(
+        f"Threshold mode: {'adaptive (mc-dropout)' if use_adaptive else 'static (base_threshold)'}"
+    )
+    logging.info(f"base_threshold: {args.base_threshold}")
+    if use_adaptive:
+        logging.info(
+            f"adaptive params: repeats={args.inference_repeats}, k={args.k}, "
+            f"theta_min={args.theta_min}, theta_max={args.theta_max}"
+        )
+
     logging.info(f"MSE:       {mse:.6f}")
     logging.info(f"MAE:       {mae:.6f}")
     logging.info("-" * 20)
-    logging.info(f"Adaptive Classification (k={args.k}):")
+    logging.info("Classification:")
     logging.info(f"Accuracy:  {accuracy:.4f}")
     logging.info(f"Precision: {precision:.4f}")
     logging.info(f"Recall:    {recall:.4f}")
     logging.info(f"F1 Score:  {f1:.4f}")
     logging.info("-" * 20)
-    logging.info(f"Confusion Matrix:")
+    logging.info("Confusion Matrix:")
     logging.info(f"TP: {int(tp)}, FP: {int(fp)}")
     logging.info(f"FN: {int(fn)}, TN: {int(tn)}")
     logging.info("-" * 20)
     logging.info(f"Total Inference Time: {inference_time:.2f}s")
-    logging.info(f"Latency per Sample:   {avg_inference_time:.2f}ms")
+    logging.info(f"Latency per Sample:   {avg_inference_time_ms:.2f}ms")
     logging.info(f"Log Saved to: {log_path}")
 
 
@@ -199,14 +240,24 @@ if __name__ == "__main__":
     p.add_argument("--batch_size", type=int, default=256)
     p.add_argument("--num_workers", type=int, default=4)
     p.add_argument("--cpu", action="store_true")
+    p.add_argument(
+        "--adaptive_threshold",
+        action="store_true",
+        help="Use MC Dropout + uncertainty-based adaptive thresholds.",
+    )
+    p.add_argument(
+        "--static_threshold",
+        action="store_true",
+        help="Use static base_threshold only (no uncertainty, no adaptive threshold).",
+    )
     p.add_argument("--inference_repeats", type=int, default=TRAINING.INFERENCE_REPEATS)
-    p.add_argument("--base_threshold", type=float, default=0.8)
+    p.add_argument("--base_threshold", type=float, default=TRAINING.THETA_BASE)
     p.add_argument("--k", type=float, default=TRAINING.K_UNCERTAINTY)
     p.add_argument("--theta_min", type=float, default=TRAINING.THETA_MIN)
     p.add_argument("--theta_max", type=float, default=TRAINING.THETA_MAX)
 
     try:
         evaluate(p.parse_args())
-    except Exception as e:
+    except Exception:
         logging.error("Fatal Error during evaluation", exc_info=True)
         sys.exit(1)

@@ -154,7 +154,7 @@ class PreprocessingDefaults:
     FREQ: str = "1m"
     MAX_SERVICES: int = 2000
     SUBSET_SEED: int = 42
-    FEATURE_SET: str = "cpu"
+    FEATURE_SET: str = "cpu_mem"
 
 
 @dataclass(frozen=True)
@@ -171,10 +171,10 @@ class TrainingDefaults:
     LOG_INTERVAL: int = 2000
     USE_WEIGHTS: bool = True
     MC_REPEATS: int = 25
-    TAU_BASE: float = 0.80
     K_UNCERTAINTY: float = 2.0
     GAMMA: float = 6.0
     DELTA: float = 0.05
+    THETA_BASE: float = 0.75
     THETA_MIN: float = 0.60
     THETA_MAX: float = 0.90
     INFERENCE_REPEATS: int = 100
