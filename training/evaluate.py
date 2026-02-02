@@ -95,6 +95,7 @@ def evaluate(args):
     feature_set = ckpt_args.get("feature_set", "unknown")
 
     logging.info(f"Model trained on feature_set: {feature_set}")
+    logging.info(f"RNN Type: {rnn_type}")
 
     if args.static_threshold:
         use_adaptive = False
@@ -205,6 +206,7 @@ def evaluate(args):
 
     logging.info("\n=== Test Results ===")
     logging.info(f"feature_set (from ckpt): {feature_set}")
+    logging.info(f"RNN Type: {rnn_type}")
     logging.info(
         f"Threshold mode: {'adaptive (mc-dropout)' if use_adaptive else 'static (base_threshold)'}"
     )

@@ -171,7 +171,7 @@ class TrainingDefaults:
     LOG_INTERVAL: int = 2000
     USE_WEIGHTS: bool = True
     MC_REPEATS: int = 25
-    K_UNCERTAINTY: float = 2.0
+    K_UNCERTAINTY: float = 3.0
     GAMMA: float = 6.0
     DELTA: float = 0.05
     THETA_BASE: float = 0.75
