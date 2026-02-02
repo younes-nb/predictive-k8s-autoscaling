@@ -210,8 +210,6 @@ def main():
             args.windows_dir,
             "--checkpoint_path",
             args.checkpoint_path,
-            "--feature_set",
-            args.feature_set,
         ]
         if args.cpu:
             cmd_test.append("--cpu")
