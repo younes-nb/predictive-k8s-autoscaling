@@ -62,7 +62,7 @@ def weighted_mse(preds, target, w=None):
     per_sample = ((preds - target) ** 2).mean(dim=1)
     if w is None:
         return per_sample.mean()
-    w = w.clamp(min=0.1, max=50.0)
+    w = w.clamp(min=0.1, max=15.0)
     return (w * per_sample).sum() / w.sum().clamp_min(1e-6)
 
 
