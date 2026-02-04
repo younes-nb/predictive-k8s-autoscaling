@@ -161,7 +161,7 @@ class PreprocessingDefaults:
 class TrainingDefaults:
     HIDDEN_SIZE: int = 96
     NUM_LAYERS: int = 3
-    DROPOUT: float = 0.15
+    DROPOUT: float = 0.3
     BATCH_SIZE: int = 512
     EPOCHS: int = 10
     LR: float = 1e-3
@@ -170,10 +170,10 @@ class TrainingDefaults:
     SEED: int = 42
     LOG_INTERVAL: int = 2000
     USE_WEIGHTS: bool = True
-    MC_REPEATS: int = 25
+    MC_REPEATS: int = 50
     K_UNCERTAINTY: float = 3.0
     GAMMA: float = 6.0
-    DELTA: float = 0.05
+    DELTA: float = 0.08
     THETA_BASE: float = 0.75
     THETA_MIN: float = 0.60
     THETA_MAX: float = 0.90

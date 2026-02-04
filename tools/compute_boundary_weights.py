@@ -94,18 +94,18 @@ def main():
     ap.add_argument("--horizon", type=int, default=PREPROCESSING.PRED_HORIZON)
 
     ap.add_argument(
-        "--tau_base", type=float, default=0.80, help="Quantile for service baseline"
+        "--tau_base", type=float, default=TRAINING.THETA_BASE, help="Quantile for service baseline"
     )
-    ap.add_argument("--mc_repeats", type=int, default=25)
-    ap.add_argument("--k", type=float, default=2.0, help="Uncertainty multiplier")
-    ap.add_argument("--gamma", type=float, default=6.0, help="Weight peak amplitude")
+    ap.add_argument("--mc_repeats", type=int, default=TRAINING.MC_REPEATS)
+    ap.add_argument("--k", type=float, default=TRAINING.K_UNCERTAINTY, help="Uncertainty multiplier")
+    ap.add_argument("--gamma", type=float, default=TRAINING.GAMMA, help="Weight peak amplitude")
     ap.add_argument(
-        "--delta", type=float, default=0.05, help="Width of boundary kernel"
+        "--delta", type=float, default=TRAINING.DELTA, help="Width of boundary kernel"
     )
-    ap.add_argument("--theta_min", type=float, default=0.60)
-    ap.add_argument("--theta_max", type=float, default=0.90)
+    ap.add_argument("--theta_min", type=float, default=TRAINING.THETA_MIN)
+    ap.add_argument("--theta_max", type=float, default=TRAINING.THETA_MAX)
 
-    ap.add_argument("--batch_size", type=int, default=2048)
+    ap.add_argument("--batch_size", type=int, default=TRAINING.BATCH_SIZE)
     ap.add_argument("--cpu", action="store_true")
 
     args = ap.parse_args()
