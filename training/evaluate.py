@@ -150,6 +150,7 @@ def evaluate(args):
     mae_sum = 0.0
     tp = fp = tn = fn = 0
     total_samples = 0
+    sigma_sum = 0.0
 
     start_time = datetime.now()
 
@@ -158,6 +159,7 @@ def evaluate(args):
 
         if use_adaptive:
             mu, sigma = mc_dropout_predict(model, x, repeats=args.inference_repeats)
+            sigma_sum += sigma.mean().item()
 
             theta_base = torch.full(mu.shape, args.base_threshold, device=device)
             thr = compute_adaptive_thresholds(
@@ -185,7 +187,7 @@ def evaluate(args):
 
         total_samples += x.size(0)
 
-        if i % 10 == 0:
+        if i % 100 == 0:
             logging.info(f"Batch {i}/{len(test_loader)} processed...")
 
     inference_time = (datetime.now() - start_time).total_seconds()
@@ -196,6 +198,7 @@ def evaluate(args):
 
     mse = mse_sum / (total_samples * horizon)
     mae = mae_sum / (total_samples * horizon)
+    avg_sigma = sigma_sum / len(test_loader) if use_adaptive else 0.0
 
     accuracy = (tp + tn) / (tp + tn + fp + fn + 1e-8)
     precision = tp / (tp + fp + 1e-8)
@@ -216,6 +219,7 @@ def evaluate(args):
             f"adaptive params: repeats={args.inference_repeats}, k={args.k}, "
             f"theta_min={args.theta_min}, theta_max={args.theta_max}"
         )
+        logging.info(f"Avg Sigma (Uncertainty): {avg_sigma:.6f} <--- DIAGNOSTIC")
 
     logging.info(f"MSE:       {mse:.6f}")
     logging.info(f"MAE:       {mae:.6f}")
