@@ -28,6 +28,7 @@ class RNNForecaster(nn.Module):
             batch_first=True,
             dropout=dropout if num_layers > 1 else 0.0,
         )
+        self.dropout_layer = nn.Dropout(dropout)
         self.fc = nn.Linear(hidden_size, horizon)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -38,4 +39,5 @@ class RNNForecaster(nn.Module):
 
         out, _ = self.rnn(x)
         last = out[:, -1, :]
+        last = self.dropout_layer(last)
         return self.fc(last)

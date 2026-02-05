@@ -58,10 +58,17 @@ def setup_logging(mode="train"):
     return log_path
 
 
-def weighted_mse(preds, target, w=None):
-    per_sample = ((preds - target) ** 2).mean(dim=1)
+def weighted_mse(preds, target, w=None, under_penalty=5.0):
+    diff = preds - target
+    sq_err = diff**2
+    under_mask = (preds < target).float()
+    asym_weight = 1.0 + (under_mask * (under_penalty - 1.0))
+    loss_matrix = sq_err * asym_weight
+    per_sample = loss_matrix.mean(dim=1)
+
     if w is None:
         return per_sample.mean()
+
     w = w.clamp(min=0.1, max=15.0)
     return (w * per_sample).sum() / w.sum().clamp_min(1e-6)
 
@@ -118,7 +125,9 @@ def train(args):
         rnn_type=args.rnn_type,
     ).to(device)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    optimizer = torch.optim.Adam(
+        model.parameters(), lr=args.lr, weight_decay=args.weight_decay
+    )
 
     logging.info("\n--- Starting Training Loop ---")
     best_score = float("inf")
@@ -142,7 +151,7 @@ def train(args):
 
             optimizer.zero_grad()
             preds = model(x)
-            loss = weighted_mse(preds, y, w)
+            loss = loss = weighted_mse(preds, y, w, under_penalty=args.under_penalty)
             loss.backward()
 
             if args.grad_clip:
@@ -212,6 +221,12 @@ if __name__ == "__main__":
     p.add_argument("--epochs", type=int, default=TRAINING.EPOCHS)
     p.add_argument("--lr", type=float, default=TRAINING.LR)
     p.add_argument("--grad_clip", type=float, default=TRAINING.GRAD_CLIP)
+    p.add_argument("--weight_decay", type=float, default=TRAINING.WEIGHT_DECAY)
+    p.add_argument(
+        "--under_penalty",
+        type=float,
+        default=TRAINING.UNDER_PENALTY,
+    )
     p.add_argument("--num_workers", type=int, default=TRAINING.NUM_WORKERS)
     p.add_argument("--seed", type=int, default=TRAINING.SEED)
     p.add_argument("--cpu", action="store_true")
