@@ -72,6 +72,11 @@ def main():
         dest="use_weights",
         help="Disable adaptive boundary weights (force standard training).",
     )
+    ap.add_argument(
+        "--global_threshold",
+        action="store_true",
+        help="Use a single global adaptive threshold for all microservices in a batch.",
+    )
     ap.set_defaults(use_weights=TRAINING.USE_WEIGHTS)
 
     args = ap.parse_args()
@@ -213,11 +218,14 @@ def main():
         ]
         if args.cpu:
             cmd_test.append("--cpu")
-        
+
         if args.use_weights:
             cmd_test.append("--adaptive_threshold")
         else:
             cmd_test.append("--static_threshold")
+
+        if args.global_threshold:
+            cmd_test.append("--global_threshold")
 
         total_times["testing"] = run(cmd_test, "Step 4: Test Model")
     else:

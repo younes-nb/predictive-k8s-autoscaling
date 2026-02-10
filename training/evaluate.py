@@ -113,6 +113,10 @@ def evaluate(args):
             f"adaptive params: repeats={args.inference_repeats}, k={args.k}, "
             f"theta_min={args.theta_min}, theta_max={args.theta_max}"
         )
+        if args.global_threshold:
+            logging.info(
+                ">> Global Threshold Mode: ENABLED (Averaging sigma per batch)"
+            )
 
     logging.info("\n--- Loading Test Dataset ---")
     test_ds = ShardedWindowsDataset(args.windows_dir, "test", input_len, horizon)
@@ -159,6 +163,11 @@ def evaluate(args):
 
         if use_adaptive:
             mu, sigma = mc_dropout_predict(model, x, repeats=args.inference_repeats)
+
+            if args.global_threshold:
+                sigma_global = sigma.mean()
+                sigma = torch.full_like(sigma, sigma_global)
+
             sigma_sum += sigma.mean().item()
 
             theta_base = torch.full(mu.shape, args.base_threshold, device=device)
@@ -219,6 +228,8 @@ def evaluate(args):
             f"adaptive params: repeats={args.inference_repeats}, k={args.k}, "
             f"theta_min={args.theta_min}, theta_max={args.theta_max}"
         )
+        if args.global_threshold:
+            logging.info(">> Global Threshold Mode: ENABLED")
         logging.info(f"Avg Sigma (Uncertainty): {avg_sigma:.6f} <--- DIAGNOSTIC")
 
     logging.info(f"MSE:       {mse:.6f}")
@@ -261,6 +272,13 @@ if __name__ == "__main__":
     p.add_argument("--k", type=float, default=TRAINING.K_UNCERTAINTY)
     p.add_argument("--theta_min", type=float, default=TRAINING.THETA_MIN)
     p.add_argument("--theta_max", type=float, default=TRAINING.THETA_MAX)
+
+    p.add_argument(
+        "--global_threshold",
+        action="store_true",
+        help="Use a single mean threshold for the whole batch.",
+    )
+    p.set_defaults(global_threshold=TRAINING.GLOBAL_THRESHOLD)
 
     try:
         evaluate(p.parse_args())

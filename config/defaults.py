@@ -173,13 +173,14 @@ class TrainingDefaults:
     LOG_INTERVAL: int = 2000
     USE_WEIGHTS: bool = True
     MC_REPEATS: int = 50
-    K_UNCERTAINTY: float = 4.0
+    K_UNCERTAINTY: float = 5.0
     GAMMA: float = 20.0
     DELTA: float = 0.08
     THETA_BASE: float = 0.75
     THETA_MIN: float = 0.60
     THETA_MAX: float = 0.90
     INFERENCE_REPEATS: int = 100
+    GLOBAL_THRESHOLD: bool = True
 
 
 PREPROCESSING = PreprocessingDefaults()
