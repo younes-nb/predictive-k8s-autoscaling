@@ -11,10 +11,12 @@ class RNNForecaster(nn.Module):
         dropout: float = 0.1,
         horizon: int = 5,
         rnn_type: str = "lstm",
+        bidirectional: bool = False,
     ):
         super().__init__()
         self.horizon = horizon
         self.rnn_type = rnn_type.lower()
+        self.bidirectional = bidirectional
 
         if self.rnn_type not in ("lstm", "gru"):
             raise ValueError(f"Unsupported rnn_type: {self.rnn_type}")
@@ -27,9 +29,13 @@ class RNNForecaster(nn.Module):
             num_layers=num_layers,
             batch_first=True,
             dropout=dropout if num_layers > 1 else 0.0,
+            bidirectional=self.bidirectional,
         )
+
         self.dropout_layer = nn.Dropout(dropout)
-        self.fc = nn.Linear(hidden_size, horizon)
+
+        fc_input_dim = hidden_size * 2 if self.bidirectional else hidden_size
+        self.fc = nn.Linear(fc_input_dim, horizon)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if x.dim() == 2:

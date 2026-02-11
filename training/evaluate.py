@@ -145,6 +145,7 @@ def evaluate(args):
         dropout=dropout,
         horizon=horizon,
         rnn_type=rnn_type,
+        bidirectional=args.bidirectional
     ).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
 
@@ -254,31 +255,20 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--windows_dir", required=True)
     p.add_argument("--checkpoint_path", required=True)
-    p.add_argument("--batch_size", type=int, default=256)
-    p.add_argument("--num_workers", type=int, default=4)
+    p.add_argument("--batch_size", type=int, default=TRAINING.BATCH_SIZE)
+    p.add_argument("--num_workers", type=int, default=TRAINING.NUM_WORKERS)
     p.add_argument("--cpu", action="store_true")
-    p.add_argument(
-        "--adaptive_threshold",
-        action="store_true",
-        help="Use MC Dropout + uncertainty-based adaptive thresholds.",
-    )
-    p.add_argument(
-        "--static_threshold",
-        action="store_true",
-        help="Use static base_threshold only (no uncertainty, no adaptive threshold).",
-    )
+    p.add_argument("--adaptive_threshold", action="store_true")
+    p.add_argument("--static_threshold", action="store_true")
     p.add_argument("--inference_repeats", type=int, default=TRAINING.INFERENCE_REPEATS)
     p.add_argument("--base_threshold", type=float, default=TRAINING.THETA_BASE)
     p.add_argument("--k", type=float, default=TRAINING.K_UNCERTAINTY)
     p.add_argument("--theta_min", type=float, default=TRAINING.THETA_MIN)
     p.add_argument("--theta_max", type=float, default=TRAINING.THETA_MAX)
-
     p.add_argument(
-        "--global_threshold",
-        action="store_true",
-        help="Use a single mean threshold for the whole batch.",
+        "--global_threshold", action="store_true", default=TRAINING.GLOBAL_THRESHOLD
     )
-    p.set_defaults(global_threshold=TRAINING.GLOBAL_THRESHOLD)
+    p.add_argument("--bidirectional", action="store_true", default=TRAINING.BIDIRECTIONAL)
 
     try:
         evaluate(p.parse_args())

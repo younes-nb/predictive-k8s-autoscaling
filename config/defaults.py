@@ -181,6 +181,7 @@ class TrainingDefaults:
     THETA_MAX: float = 0.90
     INFERENCE_REPEATS: int = 100
     GLOBAL_THRESHOLD: bool = True
+    BIDIRECTIONAL: bool = False
 
 
 PREPROCESSING = PreprocessingDefaults()

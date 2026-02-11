@@ -123,6 +123,7 @@ def train(args):
         dropout=args.dropout,
         horizon=args.pred_horizon,
         rnn_type=args.rnn_type,
+        bidirectional=args.bidirectional
     ).to(device)
 
     optimizer = torch.optim.Adam(
@@ -232,6 +233,7 @@ if __name__ == "__main__":
     p.add_argument("--cpu", action="store_true")
     p.add_argument("--rnn_type", default="lstm")
     p.add_argument("--feature_set", default=PREPROCESSING.FEATURE_SET)
+    p.add_argument("--bidirectional", action="store_true", default=TRAINING.BIDIRECTIONAL)
 
     try:
         train(p.parse_args())

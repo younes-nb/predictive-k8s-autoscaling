@@ -77,6 +77,7 @@ def main():
         action="store_true",
         help="Use a single global adaptive threshold for all microservices in a batch.",
     )
+    ap.add_argument("--bidirectional", action="store_true")
     ap.set_defaults(use_weights=TRAINING.USE_WEIGHTS)
 
     args = ap.parse_args()
@@ -144,9 +145,10 @@ def main():
                 cmd.extend(["--num_layers", str(args.num_layers)])
             if args.dropout:
                 cmd.extend(["--dropout", str(args.dropout)])
-
             if use_weights_flag:
                 cmd.append("--use_weights")
+            if args.bidirectional:
+                cmd.append("--bidirectional")
 
             return cmd
 
@@ -228,6 +230,8 @@ def main():
 
         if args.global_threshold:
             cmd_test.append("--global_threshold")
+        if args.bidirectional:
+            cmd_test.append("--bidirectional")
 
         total_times["testing"] = run(cmd_test, "Step 4: Test Model")
     else:
