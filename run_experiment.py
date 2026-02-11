@@ -186,6 +186,8 @@ def main():
                 cmd_weights.extend(["--dropout", str(args.dropout)])
             if args.pred_horizon:
                 cmd_weights.extend(["--horizon", str(args.pred_horizon)])
+            if args.global_threshold:
+                cmd_weights.append("--global_threshold")
 
             total_times["compute_weights"] = run(
                 cmd_weights, "Phase 2b: Compute Boundary Weights"

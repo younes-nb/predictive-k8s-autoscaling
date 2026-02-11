@@ -94,11 +94,18 @@ def main():
     ap.add_argument("--horizon", type=int, default=PREPROCESSING.PRED_HORIZON)
 
     ap.add_argument(
-        "--tau_base", type=float, default=TRAINING.THETA_BASE, help="Quantile for service baseline"
+        "--tau_base",
+        type=float,
+        default=TRAINING.THETA_BASE,
+        help="Quantile for service baseline",
     )
     ap.add_argument("--mc_repeats", type=int, default=TRAINING.MC_REPEATS)
-    ap.add_argument("--k", type=float, default=TRAINING.K_UNCERTAINTY, help="Uncertainty multiplier")
-    ap.add_argument("--gamma", type=float, default=TRAINING.GAMMA, help="Weight peak amplitude")
+    ap.add_argument(
+        "--k", type=float, default=TRAINING.K_UNCERTAINTY, help="Uncertainty multiplier"
+    )
+    ap.add_argument(
+        "--gamma", type=float, default=TRAINING.GAMMA, help="Weight peak amplitude"
+    )
     ap.add_argument(
         "--delta", type=float, default=TRAINING.DELTA, help="Width of boundary kernel"
     )
@@ -107,6 +114,13 @@ def main():
 
     ap.add_argument("--batch_size", type=int, default=TRAINING.BATCH_SIZE)
     ap.add_argument("--cpu", action="store_true")
+
+    ap.add_argument(
+        "--global_threshold",
+        action="store_true",
+        help="Use batch-averaged sigma for threshold calculation to match global inference mode.",
+    )
+    ap.set_defaults(global_threshold=TRAINING.GLOBAL_THRESHOLD)
 
     args = ap.parse_args()
     device = torch.device(
@@ -148,6 +162,11 @@ def main():
     model.load_state_dict(ckpt["model_state_dict"])
     print(f"Loaded model from {args.checkpoint_path}")
 
+    if args.global_threshold:
+        print(
+            ">> Global Threshold Mode ENABLED: Calculating weights using batch-averaged Sigma."
+        )
+
     print(f"Pass 2: Computing Gaussian boundary weights...")
     for x_path, y_path, sid_path, base in shards:
         X = np.load(x_path, mmap_mode="r")
@@ -170,6 +189,10 @@ def main():
             y_target = y_batch[:, -1]
 
             mu, sigma = mc_dropout_sigma(model, x_batch, args.mc_repeats, -1)
+
+            if args.global_threshold:
+                sigma_global = sigma.mean()
+                sigma = torch.full_like(sigma, sigma_global)
 
             tb = torch.tensor(
                 [theta_base.get(int(s), 0.7) for s in sid_batch], device=device
