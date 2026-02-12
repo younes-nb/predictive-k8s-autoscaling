@@ -1,0 +1,26 @@
+apiVersion: custompodautoscaler.com/v1
+kind: CustomPodAutoscaler
+metadata:
+  name: predictive-autoscaler
+  namespace: default
+spec:
+  template:
+    spec:
+      containers:
+      - name: predictive-autoscaler
+        image: your-docker-registry.com/k8s-custom-autoscaler:v1.0.0 
+        imagePullPolicy: Always
+        env:
+          - name: PROMETHEUS_URL
+            value: "http://prometheus-server.monitoring.svc.cluster.local"
+          - name: TARGET_NAMESPACE
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.namespace
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: php-apache 
+  config:
+    - name: interval
+      value: "60000"
