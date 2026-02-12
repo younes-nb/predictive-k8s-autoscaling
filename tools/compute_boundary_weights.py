@@ -85,14 +85,12 @@ def main():
     ap.add_argument("--windows_dir", default=PATHS.WINDOWS_DIR)
     ap.add_argument("--checkpoint_path", required=True)
     ap.add_argument("--split", default="train", choices=["train", "val"])
-
     ap.add_argument("--rnn_type", default="lstm")
     ap.add_argument("--input_len", type=int, default=PREPROCESSING.INPUT_LEN)
     ap.add_argument("--hidden_size", type=int, default=TRAINING.HIDDEN_SIZE)
     ap.add_argument("--num_layers", type=int, default=TRAINING.NUM_LAYERS)
     ap.add_argument("--dropout", type=float, default=TRAINING.DROPOUT)
     ap.add_argument("--horizon", type=int, default=PREPROCESSING.PRED_HORIZON)
-
     ap.add_argument(
         "--tau_base",
         type=float,
@@ -114,7 +112,11 @@ def main():
 
     ap.add_argument("--batch_size", type=int, default=TRAINING.BATCH_SIZE)
     ap.add_argument("--cpu", action="store_true")
-
+    ap.add_argument(
+        "--bidirectional", 
+        action="store_true", 
+        help="Use bidirectional RNN (must match the checkpoint)."
+    )
     ap.add_argument(
         "--global_threshold",
         action="store_true",
@@ -156,6 +158,7 @@ def main():
         dropout=args.dropout,
         horizon=args.horizon,
         rnn_type=args.rnn_type,
+        bidirectional=args.bidirectional,
     ).to(device)
 
     ckpt = torch.load(args.checkpoint_path, map_location=device)

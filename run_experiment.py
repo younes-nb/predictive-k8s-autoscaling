@@ -190,7 +190,9 @@ def main():
                 cmd_weights.extend(["--horizon", str(args.pred_horizon)])
             if args.global_threshold:
                 cmd_weights.append("--global_threshold")
-
+            if args.bidirectional:
+                cmd_weights.append("--bidirectional")
+            
             total_times["compute_weights"] = run(
                 cmd_weights, "Phase 2b: Compute Boundary Weights"
             )
