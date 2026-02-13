@@ -1,7 +1,7 @@
 #!/bin/bash
 
 NAMESPACE="online-boutique"
-IMAGE="docker.io/younesnb/predictive-k8s-autoscaling:v1.0.0"
+IMAGE="docker.io/younesnb/predictive-k8s-autoscaler:v1.0.0"
 PROMETHEUS_URL="http://prometheus-stack-kube-prom-prometheus.monitoring.svc.cluster.local:9090"
 
 for DEPLOYMENT in $(kubectl get deployments -n $NAMESPACE -o jsonpath='{.items[*].metadata.name}'); do
