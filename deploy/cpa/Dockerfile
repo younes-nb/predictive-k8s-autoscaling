@@ -2,13 +2,18 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-RUN pip install --no-cache-dir \
+RUN apt-get update && apt-get install -y curl tar && \
+    pip install --no-cache-dir \
     numpy \
     requests \
-    torch --index-url https://download.pytorch.org/whl/cpu
+    torch --index-url https://download.pytorch.org/whl/cpu && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
 
-ADD https://github.com/jthomperoo/custom-pod-autoscaler/releases/download/v2.12.2/custom-pod-autoscaler-linux-amd64 /custom-pod-autoscaler
-RUN chmod +x /custom-pod-autoscaler
+RUN curl -L https://github.com/jthomperoo/custom-pod-autoscaler/releases/download/v2.12.2/custom-pod-autoscaler-linux-amd64.tar.gz -o cpa.tar.gz && \
+    tar -xzf cpa.tar.gz && \
+    mv custom-pod-autoscaler /custom-pod-autoscaler && \
+    chmod +x /custom-pod-autoscaler && \
+    rm cpa.tar.gz
 
 RUN mkdir -p common
 
