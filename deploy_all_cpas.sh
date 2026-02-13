@@ -42,6 +42,8 @@ spec:
   config:
     - name: interval
       value: "60000"
+    - name: runMode
+      value: "all"
 EOF
 
 done
