@@ -27,4 +27,4 @@ COPY model.pt .
 RUN touch common/__init__.py
 RUN chmod +x metric.py evaluate.py
 
-ENTRYPOINT ["/custom-pod-autoscaler"]
+ENTRYPOINT ["/custom-pod-autoscaler", "--config=/config.yaml"]
