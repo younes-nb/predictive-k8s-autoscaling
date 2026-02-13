@@ -15,7 +15,7 @@ RUN curl -L https://github.com/jthomperoo/custom-pod-autoscaler/releases/downloa
     chmod +x /custom-pod-autoscaler && \
     rm cpa.tar.gz
 
-RUN echo '{"evaluate": {"type": "shell", "timeout": 5000, "shell": {"command": "python /app/evaluate.py"}}, "metric": {"type": "shell", "timeout": 5000, "shell": {"command": "python /app/metric.py"}}, "runMode": "all"}' > /config.yaml
+RUN echo '{"evaluate": {"type": "shell", "timeout": 5000, "shell": {"command": ["python", "/app/evaluate.py"]}}, "metric": {"type": "shell", "timeout": 5000, "shell": {"command": ["python", "/app/metric.py"]}}, "runMode": "all"}' > /config.yaml
 
 RUN mkdir -p common
 COPY deploy/cpa/config.py .
