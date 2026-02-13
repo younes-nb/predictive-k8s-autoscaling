@@ -31,6 +31,10 @@ spec:
             value: "${PROMETHEUS_URL}"
           - name: FEATURE_SET
             value: "cpu_mem"
+          - name: evaluate
+            value: "python /app/evaluate.py"
+          - name: metric
+            value: "python /app/metric.py"
           - name: TARGET_NAMESPACE
             valueFrom:
               fieldRef:
@@ -42,8 +46,6 @@ spec:
   config:
     - name: interval
       value: "60000"
-    - name: runMode
-      value: "all"
 EOF
 
 done
