@@ -15,7 +15,7 @@ RUN curl -L https://github.com/jthomperoo/custom-pod-autoscaler/releases/downloa
     chmod +x /custom-pod-autoscaler && \
     rm cpa.tar.gz
 
-RUN touch /config.yaml
+RUN echo "runMode: all" > /config.yaml
 
 RUN mkdir -p common
 
