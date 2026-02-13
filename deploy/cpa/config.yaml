@@ -1,21 +1,14 @@
-apiVersion: custompodautoscaler.com/v1
-kind: CustomPodAutoscalerConfig
 evaluate:
   type: "shell"
-  timeout: 10000
+  timeout: 15000
   shell:
-    entrypoint: "python"
-    command: ["/app/evaluate.py"]
+    command: 
+      - "python"
+      - "/app/evaluate.py"
 metric:
   type: "shell"
-  timeout: 10000
+  timeout: 15000
   shell:
-    entrypoint: "python"
-    command: ["/app/metric.py"]
-kubernetesMetricSpecs:
-  - type: Resource
-    resource:
-      name: cpu
-      target:
-        type: Utilization
-        averageUtilization: 50 
+    command: 
+      - "python"
+      - "/app/metric.py"
