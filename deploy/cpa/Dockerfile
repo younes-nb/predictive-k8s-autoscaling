@@ -11,7 +11,7 @@ RUN apt-get update && apt-get install -y curl tar && \
 
 RUN curl -L https://github.com/jthomperoo/custom-pod-autoscaler/releases/download/v2.12.2/custom-pod-autoscaler-linux-amd64.tar.gz -o cpa.tar.gz && \
     tar -xzf cpa.tar.gz && \
-    mv custom-pod-autoscaler /custom-pod-autoscaler && \
+    find . -name "custom-pod-autoscaler*" -type f -exec mv {} /custom-pod-autoscaler \; && \
     chmod +x /custom-pod-autoscaler && \
     rm cpa.tar.gz
 
