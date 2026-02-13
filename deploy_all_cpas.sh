@@ -41,5 +41,25 @@ spec:
   config:
     - name: interval
       value: "60000"
+    - name: evaluate
+      value: |
+        {
+          "type": "shell",
+          "timeout": 15000,
+          "shell": {
+            "entrypoint": "python",
+            "command": ["/app/evaluate.py"]
+          }
+        }
+    - name: metric
+      value: |
+        {
+          "type": "shell",
+          "timeout": 15000,
+          "shell": {
+            "entrypoint": "python",
+            "command": ["/app/metric.py"]
+          }
+        }
 EOF
 done
