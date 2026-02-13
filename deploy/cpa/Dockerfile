@@ -10,7 +10,7 @@ RUN pip install --no-cache-dir \
 RUN mkdir -p common
 
 COPY deploy/cpa/config.py .
-COPY deploy/cpa/cpa_utils.py .
+COPY deploy/cpa/utils.py .
 COPY deploy/cpa/metric.py .
 COPY deploy/cpa/evaluate.py .
 
