@@ -15,17 +15,15 @@ RUN curl -L https://github.com/jthomperoo/custom-pod-autoscaler/releases/downloa
     chmod +x /custom-pod-autoscaler && \
     rm cpa.tar.gz
 
-RUN echo "runMode: all" > /config.yaml
+RUN echo '{"evaluate": {"type": "shell", "timeout": 5000, "shell": {"command": "python /app/evaluate.py"}}, "metric": {"type": "shell", "timeout": 5000, "shell": {"command": "python /app/metric.py"}}, "runMode": "all"}' > /config.yaml
 
 RUN mkdir -p common
-
 COPY deploy/cpa/config.py .
 COPY deploy/cpa/utils.py .
 COPY deploy/cpa/metric.py .
 COPY deploy/cpa/evaluate.py .
 COPY common/models.py common/
 COPY model.pt .
-
 RUN touch common/__init__.py
 RUN chmod +x metric.py evaluate.py
 

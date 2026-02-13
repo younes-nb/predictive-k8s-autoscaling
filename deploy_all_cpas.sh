@@ -7,7 +7,6 @@ PROMETHEUS_URL="http://prometheus-stack-kube-prom-prometheus.monitoring.svc.clus
 for DEPLOYMENT in $(kubectl get deployments -n $NAMESPACE -o jsonpath='{.items[*].metadata.name}'); do
     
     if [ "$DEPLOYMENT" == "loadgenerator" ]; then
-        echo "Skipping loadgenerator..."
         continue
     fi
 
@@ -31,10 +30,6 @@ spec:
             value: "${PROMETHEUS_URL}"
           - name: FEATURE_SET
             value: "cpu_mem"
-          - name: evaluate
-            value: "python /app/evaluate.py"
-          - name: metric
-            value: "python /app/metric.py"
           - name: TARGET_NAMESPACE
             valueFrom:
               fieldRef:
@@ -47,7 +42,4 @@ spec:
     - name: interval
       value: "60000"
 EOF
-
 done
-
-echo "Done! All predictive autoscalers deployed."
