@@ -8,11 +8,13 @@ spec:
     spec:
       containers:
       - name: predictive-autoscaler
-        image: your-docker-registry.com/k8s-custom-autoscaler:v1.0.0 
+        image: docker.io/younesnb/predictive-k8s-autoscaler:v1.0.0
         imagePullPolicy: Always
         env:
+          - name: FEATURE_SET
+            value: "cpu_mem"
           - name: PROMETHEUS_URL
-            value: "http://prometheus-server.monitoring.svc.cluster.local"
+            value: "http://prometheus-stack-kube-p-prometheus.monitoring.svc.cluster.local:9090"
           - name: TARGET_NAMESPACE
             valueFrom:
               fieldRef:

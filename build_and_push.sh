@@ -1,7 +1,7 @@
 #!/bin/bash
 
-REGISTRY="your-docker-registry.com"
-IMAGE_NAME="k8s-custom-autoscaler"
+REGISTRY="docker.io/younesnb"
+IMAGE_NAME="predictive-k8s-autoscaler"
 TAG="v1.0.0"
 DOCKERFILE_PATH="deploy/cpa/Dockerfile"
 FULL_IMAGE_NAME="$REGISTRY/$IMAGE_NAME:$TAG"

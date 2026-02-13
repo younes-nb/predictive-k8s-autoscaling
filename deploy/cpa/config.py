@@ -1,8 +1,14 @@
 import os
 
-PROMETHEUS_URL = os.getenv("PROMETHEUS_URL", "http://prometheus-server.monitoring:80")
+PROMETHEUS_URL = os.getenv(
+    "PROMETHEUS_URL",
+    "http://prometheus-stack-kube-p-prometheus.monitoring.svc.cluster.local:9090",
+)
 NAMESPACE = os.getenv("TARGET_NAMESPACE", "default")
-DEPLOYMENT = os.getenv("HCPA_RESOURCE_NAME", os.getenv("TARGET_DEPLOYMENT", "fallback-name"))
+DEPLOYMENT = os.getenv(
+    "HCPA_RESOURCE_NAME", os.getenv("TARGET_DEPLOYMENT", "fallback-name")
+)
+FEATURE_SET = os.getenv("FEATURE_SET", "cpu")
 WINDOW_SIZE = 60
 STABILIZATION_WINDOW_SECONDS = 300
 UNCERTAINTY_INTERVAL_SECONDS = 600
@@ -12,7 +18,7 @@ MAX_THRESHOLD = 0.95
 MIN_REPLICAS = 1
 MAX_REPLICAS = 20
 MODEL_PATH = "/app/model.pt"
-INPUT_SIZE = 1
+INPUT_SIZE = 2 if FEATURE_SET == "cpu_mem" else 1
 HIDDEN_SIZE = 96
 NUM_LAYERS = 3
 DROPOUT = 0.4
