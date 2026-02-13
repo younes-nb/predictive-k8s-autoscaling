@@ -2,7 +2,7 @@ import os
 
 PROMETHEUS_URL = os.getenv(
     "PROMETHEUS_URL",
-    "http://prometheus-stack-kube-p-prometheus.monitoring.svc.cluster.local:9090",
+    "http://prometheus-stack-kube-prom-prometheus.monitoring.svc.cluster.local:9090",
 )
 NAMESPACE = os.getenv("TARGET_NAMESPACE", "default")
 DEPLOYMENT = os.getenv(
@@ -23,7 +23,7 @@ HIDDEN_SIZE = 96
 NUM_LAYERS = 3
 DROPOUT = 0.4
 HORIZON = 5
-BIDIRECTIONAL = False
+BIDIRECTIONAL = True
 MC_REPEATS = 50
 K_FACTOR = 5.0
 STATE_FILE = "/tmp/cpa_state.json"

@@ -14,7 +14,7 @@ spec:
           - name: FEATURE_SET
             value: "cpu_mem"
           - name: PROMETHEUS_URL
-            value: "http://prometheus-stack-kube-p-prometheus.monitoring.svc.cluster.local:9090"
+            value: "http://prometheus-stack-kube-prom-prometheus.monitoring.svc.cluster.local:9090"
           - name: TARGET_NAMESPACE
             valueFrom:
               fieldRef:
