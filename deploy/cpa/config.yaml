@@ -1,0 +1,14 @@
+evaluate:
+  type: "shell"
+  timeout: 15000
+  shell:
+    entrypoint: "python"
+    command: ["/app/evaluate.py"]
+metric:
+  type: "shell"
+  timeout: 15000
+  shell:
+    entrypoint: "python"
+    command: ["/app/metric.py"]
+runMode: "per-resource"
+interval: 60000
