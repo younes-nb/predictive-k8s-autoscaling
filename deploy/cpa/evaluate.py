@@ -6,29 +6,6 @@ import numpy as np
 import traceback
 import config
 import utils
-import datetime
-import os
-
-CSV_FILE = "/tmp/experiment_metrics.csv"
-
-
-def get_tehran_time():
-    utc_now = datetime.datetime.utcnow()
-    tehran_offset = datetime.timedelta(hours=3, minutes=30)
-    tehran_time = utc_now + tehran_offset
-    return tehran_time.strftime("%Y-%m-%d %H:%M:%S")
-
-
-def log_metrics(timestamp, curr_cpu, pred_cpu, threshold, inf_time, replicas):
-    if not os.path.exists(CSV_FILE):
-        with open(CSV_FILE, "w") as f:
-            f.write(
-                "timestamp_tehran,current_cpu_60th,predicted_cpu_max,threshold,inference_time_s,current_replicas\n"
-            )
-    with open(CSV_FILE, "a") as f:
-        f.write(
-            f"{timestamp},{curr_cpu:.4f},{pred_cpu:.4f},{threshold:.4f},{inf_time:.4f},{replicas}\n"
-        )
 
 
 def main():
@@ -56,6 +33,7 @@ def main():
 
         state = utils.load_state()
         adaptive_threshold = state["prev_threshold"]
+        model_sigma = state.get("prev_sigma", 0.0)
         rec_history = state["history"]
         last_uncertainty_time = state["last_uncertainty_time"]
 
@@ -78,7 +56,9 @@ def main():
                 predicted_load_max = torch.max(preds_tensor).item()
 
             if (now - last_uncertainty_time) >= config.UNCERTAINTY_INTERVAL_SECONDS:
-                adaptive_threshold = utils.get_adaptive_threshold(model, x_tensor)
+                adaptive_threshold, model_sigma = utils.get_adaptive_threshold(
+                    model, x_tensor
+                )
                 last_uncertainty_time = now
                 mode = "Predictive (New Threshold)"
             else:
@@ -86,13 +66,11 @@ def main():
 
         elif use_prediction:
             mode = "Predictive (Waiting for data)"
-            utils.log_to_file(f"WAITING: History length is {len(history_metrics)}")
         else:
             adaptive_threshold = config.BASE_THRESHOLD
-            utils.log_to_file("FALLBACK: use_prediction was False")
+            model_sigma = 0.0
 
         safe_threshold = adaptive_threshold if adaptive_threshold > 0 else 0.75
-
         load_to_scale_on = max(current_load, predicted_load_max)
 
         raw_desired = int(
@@ -108,28 +86,31 @@ def main():
         ]
         final_rec = raw_desired if raw_desired > current_replicas else max(window)
 
-        utils.save_state(rec_history, adaptive_threshold, last_uncertainty_time)
+        utils.save_state(
+            rec_history, adaptive_threshold, model_sigma, last_uncertainty_time
+        )
 
         t_end_eval = time.time()
         total_inference_time = metric_duration + (t_end_eval - t_start_eval)
-        log_metrics(
-            get_tehran_time(),
+
+        utils.log_metrics(
+            utils.get_tehran_time(),
             current_load,
             predicted_load_max,
             adaptive_threshold,
+            model_sigma,
             total_inference_time,
             current_replicas,
         )
 
         output = {
             "targetReplicas": int(final_rec),
-            "logs": f"Mode: {mode}, LoadScale: {load_to_scale_on:.2f}, PredMax: {predicted_load_max:.2f}, Thr: {adaptive_threshold:.3f}, Rec: {final_rec}",
+            "logs": f"Mode: {mode}, Load: {load_to_scale_on:.2f}, Pred: {predicted_load_max:.2f}, Thr: {adaptive_threshold:.3f}, Sigma: {model_sigma:.4f}",
         }
         sys.stdout.write(json.dumps(output))
 
     except Exception as e:
-        error_msg = f"CRITICAL EXCEPTION: {str(e)}\n{traceback.format_exc()}"
-        utils.log_to_file(error_msg)
+        utils.log_to_file(f"CRITICAL EXCEPTION: {str(e)}\n{traceback.format_exc()}")
         print(json.dumps({"targetReplicas": 1, "logs": f"Error: {str(e)}"}))
 
 

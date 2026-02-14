@@ -1,3 +1,4 @@
+import datetime
 import os
 import json
 import time
@@ -32,11 +33,12 @@ def load_state():
     return {
         "history": [],
         "prev_threshold": config.BASE_THRESHOLD,
+        "prev_sigma": 0.0,
         "last_uncertainty_time": 0,
     }
 
 
-def save_state(history, prev_threshold, last_time):
+def save_state(history, prev_threshold, prev_sigma, last_time):
     now = time.time()
     valid_history = [
         x
@@ -49,6 +51,7 @@ def save_state(history, prev_threshold, last_time):
                 {
                     "history": valid_history,
                     "prev_threshold": prev_threshold,
+                    "prev_sigma": prev_sigma,
                     "last_uncertainty_time": last_time,
                 },
                 f,
@@ -79,9 +82,15 @@ def get_adaptive_threshold(model, x_window):
     x_batch = x_window.repeat(config.MC_REPEATS, 1, 1)
     with torch.no_grad():
         preds = model(x_batch)
+
     sigma = preds[:, 0].std().item()
-    threshold = config.BASE_THRESHOLD - (config.K_FACTOR * sigma)
-    return max(config.MIN_THRESHOLD, min(config.MAX_THRESHOLD, threshold))
+
+    raw_threshold = config.BASE_THRESHOLD - (config.K_FACTOR * sigma)
+    clamped_threshold = max(
+        config.MIN_THRESHOLD, min(config.MAX_THRESHOLD, raw_threshold)
+    )
+
+    return clamped_threshold, sigma
 
 
 def log_to_file(msg):
@@ -90,3 +99,22 @@ def log_to_file(msg):
             f.write(f"{time.ctime()} - {msg}\n")
     except:
         pass
+
+
+def get_tehran_time():
+    utc_now = datetime.datetime.utcnow()
+    tehran_offset = datetime.timedelta(hours=3, minutes=30)
+    tehran_time = utc_now + tehran_offset
+    return tehran_time.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def log_metrics(timestamp, curr_cpu, pred_cpu, threshold, sigma, inf_time, replicas):
+    if not os.path.exists(config.EXPERIMENT_METRICS_FILE):
+        with open(config.EXPERIMENT_METRICS_FILE, "w") as f:
+            f.write(
+                "timestamp_tehran,current_cpu_60th,predicted_cpu_max,threshold,sigma,inference_time_s,current_replicas\n"
+            )
+    with open(config.EXPERIMENT_METRICS_FILE, "a") as f:
+        f.write(
+            f"{timestamp},{curr_cpu:.4f},{pred_cpu:.4f},{threshold:.4f},{sigma:.4f},{inf_time:.4f},{replicas}\n"
+        )
