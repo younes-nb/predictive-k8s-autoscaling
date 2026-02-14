@@ -30,6 +30,8 @@ spec:
             value: "${PROMETHEUS_URL}"
           - name: FEATURE_SET
             value: "cpu_mem"
+          - name: TARGET_DEPLOYMENT
+            value: "${DEPLOYMENT}"
           - name: TARGET_NAMESPACE
             valueFrom:
               fieldRef:

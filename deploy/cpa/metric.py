@@ -27,10 +27,7 @@ def get_aggregated_window():
     start_time = end_time - (config.WINDOW_SIZE * 60)
     grid_timestamps = [start_time + (i * 60) for i in range(config.WINDOW_SIZE)]
 
-    cpu_query = (
-        f"sum(rate(container_cpu_usage_seconds_total{{namespace='{config.NAMESPACE}', pod=~'{config.DEPLOYMENT}-.*'}}[1m])) by (pod) / "
-        f"sum(kube_pod_container_resource_limits{{namespace='{config.NAMESPACE}', pod=~'{config.DEPLOYMENT}-.*', resource='cpu'}}) by (pod)"
-    )
+    cpu_query = f"sum(rate(container_cpu_usage_seconds_total{{namespace='{config.NAMESPACE}', pod=~'{config.DEPLOYMENT}-.*', container!='POD'}}[1m])) by (pod)"
     cpu_buckets = fetch_metric_buckets(cpu_query, start_time, end_time, grid_timestamps)
 
     mem_buckets = None
