@@ -25,7 +25,6 @@ def log_metrics(timestamp, curr_cpu, pred_cpu, threshold, inf_time, replicas):
             f.write(
                 "timestamp_tehran,current_cpu_60th,predicted_cpu_max,threshold,inference_time_s,current_replicas\n"
             )
-
     with open(CSV_FILE, "a") as f:
         f.write(
             f"{timestamp},{curr_cpu:.4f},{pred_cpu:.4f},{threshold:.4f},{inf_time:.4f},{replicas}\n"
@@ -36,7 +35,6 @@ def main():
     t_start_eval = time.time()
     try:
         raw_input = sys.stdin.read()
-
         if not raw_input:
             utils.log_to_file("ERROR: Empty input received from stdin")
             print(json.dumps({"targetReplicas": 1, "logs": "Empty input"}))
@@ -54,7 +52,6 @@ def main():
         use_prediction = data.get("use_prediction", False)
         current_load = float(data.get("current_load", 0.0))
         current_replicas = int(data.get("current_replicas", 1))
-
         metric_duration = float(data.get("duration_seconds", 0.0))
 
         state = utils.load_state()
@@ -64,49 +61,39 @@ def main():
 
         now = time.time()
         mode = "Reactive"
-
         predicted_load_max = 0.0
 
-        if use_prediction:
+        if use_prediction and len(history_metrics) >= 60:
+            x_tensor = (
+                torch.tensor(history_metrics).float().view(1, 60, config.INPUT_SIZE)
+            )
+            model = utils.load_model()
+
+            with torch.no_grad():
+                model.eval()
+                raw_preds = model(x_tensor)
+                preds_tensor = (
+                    raw_preds[0] if isinstance(raw_preds, tuple) else raw_preds
+                )
+                predicted_load_max = torch.max(preds_tensor).item()
+
             if (now - last_uncertainty_time) >= config.UNCERTAINTY_INTERVAL_SECONDS:
-                if len(history_metrics) >= 60:
-                    x_tensor = (
-                        torch.tensor(history_metrics)
-                        .float()
-                        .view(1, 60, config.INPUT_SIZE)
-                    )
-                    model = utils.load_model()
-
-                    adaptive_threshold = utils.get_adaptive_threshold(model, x_tensor)
-
-                    with torch.no_grad():
-                        raw_preds = model(x_tensor)
-                        if isinstance(raw_preds, tuple):
-                            preds_tensor = raw_preds[0]
-                        else:
-                            preds_tensor = raw_preds
-
-                        predicted_load_max = torch.max(preds_tensor).item()
-
-                    last_uncertainty_time = now
-                    mode = "Predictive (Updated)"
-                else:
-                    mode = "Predictive (Waiting for data)"
-                    utils.log_to_file(
-                        f"WAITING: History length is {len(history_metrics)}"
-                    )
+                adaptive_threshold = utils.get_adaptive_threshold(model, x_tensor)
+                last_uncertainty_time = now
+                mode = "Predictive (New Threshold)"
             else:
-                mode = "Predictive (Cached)"
+                mode = "Predictive (Cached Threshold)"
+
+        elif use_prediction:
+            mode = "Predictive (Waiting for data)"
+            utils.log_to_file(f"WAITING: History length is {len(history_metrics)}")
         else:
             adaptive_threshold = config.BASE_THRESHOLD
             utils.log_to_file("FALLBACK: use_prediction was False")
 
         safe_threshold = adaptive_threshold if adaptive_threshold > 0 else 0.75
 
-        if mode.startswith("Predictive") and predicted_load_max > 0:
-            load_to_scale_on = max(current_load, predicted_load_max)
-        else:
-            load_to_scale_on = current_load
+        load_to_scale_on = max(current_load, predicted_load_max)
 
         raw_desired = int(
             np.ceil(current_replicas * (load_to_scale_on / safe_threshold))
@@ -114,34 +101,30 @@ def main():
         raw_desired = max(config.MIN_REPLICAS, min(config.MAX_REPLICAS, raw_desired))
 
         rec_history.append({"time": now, "replicas": raw_desired})
-
         window = [
             x["replicas"]
             for x in rec_history
             if x["time"] > (now - config.STABILIZATION_WINDOW_SECONDS)
         ]
-
         final_rec = raw_desired if raw_desired > current_replicas else max(window)
 
         utils.save_state(rec_history, adaptive_threshold, last_uncertainty_time)
 
         t_end_eval = time.time()
         total_inference_time = metric_duration + (t_end_eval - t_start_eval)
-
         log_metrics(
-            timestamp=get_tehran_time(),
-            curr_cpu=current_load,
-            pred_cpu=predicted_load_max,
-            threshold=adaptive_threshold,
-            inf_time=total_inference_time,
-            replicas=current_replicas,
+            get_tehran_time(),
+            current_load,
+            predicted_load_max,
+            adaptive_threshold,
+            total_inference_time,
+            current_replicas,
         )
 
         output = {
             "targetReplicas": int(final_rec),
-            "logs": f"Mode: {mode}, Load: {load_to_scale_on:.2f}, PredMax: {predicted_load_max:.2f}, Thr: {adaptive_threshold:.3f}, Rec: {final_rec}",
+            "logs": f"Mode: {mode}, LoadScale: {load_to_scale_on:.2f}, PredMax: {predicted_load_max:.2f}, Thr: {adaptive_threshold:.3f}, Rec: {final_rec}",
         }
-
         sys.stdout.write(json.dumps(output))
 
     except Exception as e:
