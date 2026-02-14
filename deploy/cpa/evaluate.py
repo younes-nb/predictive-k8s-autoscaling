@@ -64,6 +64,10 @@ def main():
         )
     )
 
+    sys.stderr.write(
+        f"DEBUG: Mode={mode}, Threshold={adaptive_threshold:.4f}, Load={current_load:.4f}\n"
+    )
+
 
 if __name__ == "__main__":
     main()
