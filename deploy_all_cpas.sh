@@ -43,5 +43,7 @@ spec:
   config:
     - name: interval
       value: "60000"
+    - name: logVerbosity
+      value: "3"
 EOF
 done
