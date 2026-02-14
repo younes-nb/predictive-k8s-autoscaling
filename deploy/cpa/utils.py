@@ -59,12 +59,13 @@ def save_state(history, prev_threshold, last_time):
 
 def load_model():
     model = RNNForecaster(
-        config.INPUT_SIZE,
-        config.HIDDEN_SIZE,
-        config.NUM_LAYERS,
-        config.DROPOUT,
-        config.HORIZON,
-        config.BIDIRECTIONAL,
+        input_size=config.INPUT_SIZE,
+        hidden_size=config.HIDDEN_SIZE,
+        num_layers=config.NUM_LAYERS,
+        dropout=config.DROPOUT,
+        horizon=config.HORIZON,
+        rnn_type=config.RNN_TYPE,
+        bidirectional=config.BIDIRECTIONAL,
     )
     if os.path.exists(config.MODEL_PATH):
         checkpoint = torch.load(config.MODEL_PATH, map_location="cpu")
@@ -81,3 +82,11 @@ def get_adaptive_threshold(model, x_window):
     sigma = preds[:, 0].std().item()
     threshold = config.BASE_THRESHOLD - (config.K_FACTOR * sigma)
     return max(config.MIN_THRESHOLD, min(config.MAX_THRESHOLD, threshold))
+
+
+def log_to_file(msg):
+    try:
+        with open("/tmp/cpa_debug.log", "a") as f:
+            f.write(f"{time.ctime()} - {msg}\n")
+    except:
+        pass
