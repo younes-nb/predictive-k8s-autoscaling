@@ -27,13 +27,16 @@ def get_aggregated_window():
     start_time = end_time - (config.WINDOW_SIZE * 60)
     grid_timestamps = [start_time + (i * 60) for i in range(config.WINDOW_SIZE)]
 
-    cpu_query = f"sum(rate(container_cpu_usage_seconds_total{{namespace='{config.NAMESPACE}', pod=~'{config.DEPLOYMENT}-.*', container!='POD'}}[1m])) by (pod)"
+    cpu_query = (
+        f"sum(rate(container_cpu_usage_seconds_total{{namespace='{config.NAMESPACE}', pod=~'{config.DEPLOYMENT}-.*', container!='POD'}}[1m])) by (pod) / "
+        f"sum(kube_pod_container_resource_limits{{namespace='{config.NAMESPACE}', pod=~'{config.DEPLOYMENT}-.*', resource='cpu'}}) by (pod)"
+    )
     cpu_buckets = fetch_metric_buckets(cpu_query, start_time, end_time, grid_timestamps)
 
     mem_buckets = None
     if config.FEATURE_SET == "cpu_mem":
         mem_query = (
-            f"sum(container_memory_working_set_bytes{{namespace='{config.NAMESPACE}', pod=~'{config.DEPLOYMENT}-.*'}}) by (pod) / "
+            f"sum(container_memory_working_set_bytes{{namespace='{config.NAMESPACE}', pod=~'{config.DEPLOYMENT}-.*', container!='POD'}}) by (pod) / "
             f"sum(kube_pod_container_resource_limits{{namespace='{config.NAMESPACE}', pod=~'{config.DEPLOYMENT}-.*', resource='memory'}}) by (pod)"
         )
         mem_buckets = fetch_metric_buckets(
@@ -45,14 +48,14 @@ def get_aggregated_window():
 
     for i in range(config.WINDOW_SIZE):
         c_vals = cpu_buckets[i]
-
-        if not c_vals or (mem_buckets and not mem_buckets[i]):
+        if not c_vals or (
+            config.FEATURE_SET == "cpu_mem" and (not mem_buckets or not mem_buckets[i])
+        ):
             use_prediction = False
             row = [0.0, 0.0] if config.FEATURE_SET == "cpu_mem" else 0.0
             final_window.append(row)
         else:
             avg_cpu = sum(c_vals) / len(c_vals)
-
             if config.FEATURE_SET == "cpu_mem":
                 m_vals = mem_buckets[i]
                 avg_mem = sum(m_vals) / len(m_vals)
@@ -71,7 +74,7 @@ def main():
     current_replicas = int(res_rep[0]["value"][1]) if res_rep else 1
 
     q_load = (
-        f"sum(rate(container_cpu_usage_seconds_total{{namespace='{config.NAMESPACE}', pod=~'{config.DEPLOYMENT}-.*'}}[1m])) / "
+        f"sum(rate(container_cpu_usage_seconds_total{{namespace='{config.NAMESPACE}', pod=~'{config.DEPLOYMENT}-.*', container!='POD'}}[1m])) / "
         f"sum(kube_pod_container_resource_limits{{namespace='{config.NAMESPACE}', pod=~'{config.DEPLOYMENT}-.*', resource='cpu'}})"
     )
     res_load = utils.query_prometheus(q_load)
@@ -80,10 +83,7 @@ def main():
         current_load = float(res_load[0]["value"][1])
     else:
         last_point = history[-1] if history else 0.0
-        if isinstance(last_point, list):
-            current_load = last_point[0]
-        else:
-            current_load = last_point
+        current_load = last_point[0] if isinstance(last_point, list) else last_point
 
     print(
         json.dumps(
