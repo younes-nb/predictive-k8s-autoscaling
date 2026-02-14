@@ -9,21 +9,32 @@ import utils
 
 
 def log_to_file(msg):
-    with open("/tmp/cpa_debug.log", "a") as f:
-        f.write(f"{time.ctime()} - {msg}\n")
+    try:
+        with open("/tmp/cpa_debug.log", "a") as f:
+            f.write(f"{time.ctime()} - {msg}\n")
+    except:
+        pass
 
 
 def main():
     try:
         raw_input = sys.stdin.read()
-        log_to_file(f"RAW INPUT RECEIVED: {raw_input[:100]}...")  # Log first 100 chars
+        log_to_file(f"RAW INPUT RECEIVED: {raw_input[:150]}...")
 
         if not raw_input:
-            log_to_file("ERROR: Empty input received")
-            print(json.dumps({"targetReplicas": 1}))
+            log_to_file("ERROR: Empty input received from stdin")
+            print(json.dumps({"targetReplicas": 1, "logs": "Empty input"}))
             return
 
-        data = json.loads(raw_input)
+        envelope = json.loads(raw_input)
+
+        metrics_list = envelope.get("metrics", [])
+        if not metrics_list:
+            raise ValueError("No metrics found in CPA envelope")
+
+        inner_json_str = metrics_list[0].get("value", "{}")
+
+        data = json.loads(inner_json_str)
 
         history_metrics = data.get("metrics", [])
         use_prediction = data.get("use_prediction", False)
@@ -31,7 +42,7 @@ def main():
         current_replicas = int(data.get("current_replicas", 1))
 
         log_to_file(
-            f"PARSED DATA: Load={current_load}, Reps={current_replicas}, Pred={use_prediction}"
+            f"PARSED SUCCESS: Load={current_load}, Reps={current_replicas}, Pred={use_prediction}"
         )
 
         state = utils.load_state()
@@ -66,9 +77,11 @@ def main():
         safe_threshold = adaptive_threshold if adaptive_threshold > 0 else 0.75
 
         raw_desired = int(np.ceil(current_replicas * (current_load / safe_threshold)))
+
         raw_desired = max(config.MIN_REPLICAS, min(config.MAX_REPLICAS, raw_desired))
 
         rec_history.append({"time": now, "replicas": raw_desired})
+
         window = [
             x["replicas"]
             for x in rec_history
@@ -88,8 +101,9 @@ def main():
         print(json.dumps(output))
 
     except Exception as e:
-        log_to_file(f"CRITICAL EXCEPTION: {str(e)}\n{traceback.format_exc()}")
-        print(json.dumps({"targetReplicas": 1}))
+        error_msg = f"CRITICAL EXCEPTION: {str(e)}\n{traceback.format_exc()}"
+        log_to_file(error_msg)
+        print(json.dumps({"targetReplicas": 1, "logs": f"Error: {str(e)}"}))
 
 
 if __name__ == "__main__":
