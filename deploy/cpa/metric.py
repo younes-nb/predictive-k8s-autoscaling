@@ -67,6 +67,7 @@ def get_aggregated_window():
 
 
 def main():
+    t_start = time.time()
     history, use_prediction = get_aggregated_window()
 
     q_replicas = f"count(kube_pod_status_phase{{namespace='{config.NAMESPACE}', pod=~'{config.DEPLOYMENT}-.*', phase='Running'}})"
@@ -85,6 +86,8 @@ def main():
         last_point = history[-1] if history else 0.0
         current_load = last_point[0] if isinstance(last_point, list) else last_point
 
+    t_end = time.time()
+
     print(
         json.dumps(
             {
@@ -92,6 +95,7 @@ def main():
                 "use_prediction": use_prediction,
                 "current_load": current_load,
                 "current_replicas": current_replicas,
+                "duration_seconds": t_end - t_start,
             }
         )
     )

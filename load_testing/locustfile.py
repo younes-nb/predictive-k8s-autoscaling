@@ -35,17 +35,17 @@ class WebsiteUser(FastHttpUser):
     wait_time = between(1, 5)
 
 
-class DoubleSpikeShape(LoadTestShape):
+class HourLongShape(LoadTestShape):
     stages = [
-        {"duration": 120, "users": 20, "spawn_rate": 1},
         {"duration": 300, "users": 20, "spawn_rate": 1},
-        {
-            "duration": 360,
-            "users": 150,
-            "spawn_rate": 20,
-        },
-        {"duration": 480, "users": 150, "spawn_rate": 1},
-        {"duration": 600, "users": 10, "spawn_rate": 10},
+        {"duration": 900, "users": 20, "spawn_rate": 1},
+        {"duration": 1200, "users": 100, "spawn_rate": 5},
+        {"duration": 1800, "users": 100, "spawn_rate": 1},
+        {"duration": 2100, "users": 40, "spawn_rate": 2},
+        {"duration": 2700, "users": 40, "spawn_rate": 1},
+        {"duration": 3000, "users": 200, "spawn_rate": 10},
+        {"duration": 3600, "users": 200, "spawn_rate": 1},
+        {"duration": 3900, "users": 10, "spawn_rate": 10},
     ]
 
     def tick(self):
