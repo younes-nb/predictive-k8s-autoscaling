@@ -180,6 +180,8 @@ class TrainingDefaults:
     THETA_MIN: float = 0.60
     THETA_MAX: float = 0.90
     INFERENCE_REPEATS: int = 100
+    TEST_BATCH_SIZE: int = 256
+    TEST_NUM_WORKERS: int = 4
     GLOBAL_THRESHOLD: bool = True
     BIDIRECTIONAL: bool = False
 
