@@ -1,5 +1,6 @@
 import os
 import sys
+import glob
 import torch
 import optuna
 import numpy as np
@@ -26,28 +27,51 @@ def weighted_mse(preds, target, w, under_penalty=5.0):
 
 
 def get_service_baselines():
-    print("📊 Pre-computing service-level quantiles...")
-    ds = ShardedWindowsDataset(
-        PATHS.WINDOWS_DIR, "train", PREPROCESSING.INPUT_LEN, PREPROCESSING.PRED_HORIZON
-    )
+    """Directly loads shards to get Service IDs and Utilization without unpacking errors."""
+    print("📊 Pre-computing service-level quantiles from shards...")
+    x_files = sorted(glob.glob(os.path.join(PATHS.WINDOWS_DIR, "part-*_X_train.npy")))
 
     service_vals = {}
-    limit = min(len(ds), 50000)
-    for i in range(0, limit, 10):
-        x, _, sid = ds[i]
-        s = int(sid)
-        val = x[-1, -1].item()
-        if s not in service_vals:
-            service_vals[s] = []
-        service_vals[s].append(val)
+    for x_path in x_files[:2]:
+        sid_path = x_path.replace("_X_train.npy", "_sid_train.npy")
+        if not os.path.exists(sid_path):
+            continue
+
+        X = np.load(x_path, mmap_mode="r")
+        SIDs = np.load(sid_path, mmap_mode="r")
+
+        u_now = X[:, -1, -1] if X.ndim == 3 else X[:, -1]
+
+        for i in range(0, len(SIDs), 10):
+            s = int(SIDs[i])
+            if s not in service_vals:
+                service_vals[s] = []
+            service_vals[s].append(u_now[i])
 
     baselines = {
         s: np.quantile(v, TRAINING.THETA_BASE) for s, v in service_vals.items()
     }
+    print(f"✅ Computed baselines for {len(baselines)} services.")
     return baselines
 
 
 SERVICE_BASELINES = get_service_baselines()
+
+print("⏳ Initializing Datasets...")
+train_ds = ShardedWindowsDataset(
+    PATHS.WINDOWS_DIR,
+    "train",
+    PREPROCESSING.INPUT_LEN,
+    PREPROCESSING.PRED_HORIZON,
+    use_weights=True,
+)
+val_ds = ShardedWindowsDataset(
+    PATHS.WINDOWS_DIR,
+    "val",
+    PREPROCESSING.INPUT_LEN,
+    PREPROCESSING.PRED_HORIZON,
+    use_weights=False,
+)
 
 
 @torch.no_grad()
@@ -59,9 +83,7 @@ def get_adaptive_weights(model, x_batch, y_batch, sid_batch, device, gamma, delt
 
     preds_stack = torch.cat(preds, dim=0)
     sigma = preds_stack.std(dim=0)[:, -1]
-
     sigma_global = sigma.mean()
-
     y_target = y_batch[:, -1]
 
     tb = torch.tensor(
@@ -88,13 +110,6 @@ def objective(trial):
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    train_ds = ShardedWindowsDataset(
-        PATHS.WINDOWS_DIR, "train", PREPROCESSING.INPUT_LEN, PREPROCESSING.PRED_HORIZON
-    )
-    val_ds = ShardedWindowsDataset(
-        PATHS.WINDOWS_DIR, "val", PREPROCESSING.INPUT_LEN, PREPROCESSING.PRED_HORIZON
-    )
-
     train_loader = DataLoader(
         train_ds,
         batch_size=TRAINING.BATCH_SIZE,
@@ -112,6 +127,7 @@ def objective(trial):
         num_layers=num_layers,
         dropout=dropout,
         horizon=PREPROCESSING.PRED_HORIZON,
+        rnn_type="lstm",
     ).to(device)
 
     optimizer = torch.optim.Adam(
@@ -120,14 +136,15 @@ def objective(trial):
 
     for epoch in range(2):
         model.train()
-        for x, y, _ in train_loader:
+        for batch in train_loader:
+            x, y, _ = batch
             x, y = x.to(device), y.to(device)
             optimizer.zero_grad()
             loss = nn.MSELoss()(model(x), y)
             loss.backward()
             optimizer.step()
 
-    for epoch in range(2, 10):
+    for epoch in range(2, 8):
         model.train()
         for x, y, sid in train_loader:
             x, y = x.to(device), y.to(device)
@@ -138,9 +155,7 @@ def objective(trial):
 
             optimizer.zero_grad()
             preds = model(x)
-            
             loss = weighted_mse(preds, y, w, under_penalty=under_penalty)
-            
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), TRAINING.GRAD_CLIP)
             optimizer.step()
@@ -148,13 +163,12 @@ def objective(trial):
         model.eval()
         val_loss = 0.0
         with torch.no_grad():
-            for x, y, _ in val_loader:
+            for x, y in val_loader:
                 x, y = x.to(device), y.to(device)
                 val_loss += nn.MSELoss()(model(x), y).item()
 
         avg_val = val_loss / len(val_loader)
         trial.report(avg_val, epoch)
-
         if trial.should_prune():
             raise optuna.exceptions.TrialPruned()
 
@@ -164,9 +178,8 @@ def objective(trial):
 if __name__ == "__main__":
     study = optuna.create_study(
         direction="minimize",
-        pruner=optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=3),
+        pruner=optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=2),
     )
-    
     study.optimize(objective, n_trials=20)
 
     print("\n🏆 Best Trial Results:")
