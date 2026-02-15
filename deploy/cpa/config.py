@@ -26,6 +26,6 @@ HORIZON = 5
 RNN_TYPE = "lstm"
 BIDIRECTIONAL = False
 MC_REPEATS = 50
-K_FACTOR = 5.0
+K_FACTOR = 2.0
 STATE_FILE = "/tmp/cpa_state.json"
 EXPERIMENT_METRICS_FILE = "/tmp/experiment_metrics.csv"

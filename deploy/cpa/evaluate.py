@@ -70,9 +70,14 @@ def main():
             adaptive_threshold = config.BASE_THRESHOLD
             model_sigma = 0.0
 
+        is_predicting = mode.startswith("Predictive") and predicted_load_max > 0
         safe_threshold = adaptive_threshold if adaptive_threshold > 0 else 0.75
-        load_to_scale_on = max(current_load, predicted_load_max)
-
+        
+        if is_predicting:
+            load_to_scale_on = predicted_load_max
+        else:
+            load_to_scale_on = current_load
+            
         raw_desired = int(
             np.ceil(current_replicas * (load_to_scale_on / safe_threshold))
         )
