@@ -13,7 +13,6 @@ from common.dataset import ShardedWindowsDataset
 from common.models import RNNForecaster
 
 
-# --- 1. LOSS FUNCTION ---
 def weighted_mse(preds, target, w, under_penalty=5.0):
     diff = preds - target
     sq_err = diff**2
@@ -83,9 +82,9 @@ def objective(trial):
     num_layers = trial.suggest_int("num_layers", 2, 3)
     lr = trial.suggest_float("lr", 5e-4, 3e-3, log=True)
     dropout = trial.suggest_float("dropout", 0.1, 0.4)
-
     gamma = trial.suggest_float("gamma", 15.0, 25.0)
     delta = trial.suggest_float("delta", 0.05, 0.12)
+    under_penalty = trial.suggest_float("under_penalty", 2.0, 10.0)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -130,7 +129,6 @@ def objective(trial):
 
     for epoch in range(2, 10):
         model.train()
-        train_loss = 0.0
         for x, y, sid in train_loader:
             x, y = x.to(device), y.to(device)
 
@@ -138,14 +136,14 @@ def objective(trial):
                 model, x, y, sid, device, gamma, delta, TRAINING.K_UNCERTAINTY
             )
 
-            model.train()
             optimizer.zero_grad()
             preds = model(x)
-            loss = weighted_mse(preds, y, w, under_penalty=TRAINING.UNDER_PENALTY)
+            
+            loss = weighted_mse(preds, y, w, under_penalty=under_penalty)
+            
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), TRAINING.GRAD_CLIP)
             optimizer.step()
-            train_loss += loss.item()
 
         model.eval()
         val_loss = 0.0
@@ -168,7 +166,8 @@ if __name__ == "__main__":
         direction="minimize",
         pruner=optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=3),
     )
-    study.optimize(objective, n_trials=15)
+    
+    study.optimize(objective, n_trials=20)
 
     print("\n🏆 Best Trial Results:")
     for k, v in study.best_trial.params.items():
