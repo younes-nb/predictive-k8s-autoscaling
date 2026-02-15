@@ -77,7 +77,7 @@ def load_and_filter_data(data_dir, start_str, end_str):
                 filtered_df["cpu_pred_norm"] = (
                     filtered_df["predicted_cpu_max"] / total_capacity
                 ).clip(upper=1.0)
-
+                filtered_df["cpu_pred_norm"] = filtered_df["cpu_pred_norm"].shift(5)
                 filtered_df["deployment"] = deployment_name
                 deployment_data[deployment_name] = filtered_df
                 global_df = pd.concat([global_df, filtered_df], ignore_index=True)
