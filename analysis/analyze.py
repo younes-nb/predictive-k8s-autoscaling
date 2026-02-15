@@ -7,6 +7,20 @@ import glob
 import os
 import argparse
 
+DEPLOYMENT_LIMITS = {
+    "adservice": 0.3,
+    "cartservice": 0.3,
+    "checkoutservice": 0.2,
+    "currencyservice": 0.2,
+    "emailservice": 0.2,
+    "frontend": 0.2,
+    "paymentservice": 0.2,
+    "productcatalogservice": 0.2,
+    "recommendationservice": 0.2,
+    "shippingservice": 0.2,
+    "redis-cart": 0.125,
+}
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Analyze CPA Experiment Results")
@@ -20,6 +34,10 @@ def parse_args():
         "--data_dir", type=str, default="./data", help="Directory containing CSV files"
     )
     return parser.parse_args()
+
+
+def get_limit(deployment_name):
+    return DEPLOYMENT_LIMITS.get(deployment_name, 1.0)
 
 
 def load_and_filter_data(data_dir, start_str, end_str):
@@ -36,7 +54,6 @@ def load_and_filter_data(data_dir, start_str, end_str):
         deployment_name = os.path.basename(filename).replace(".csv", "")
         try:
             df = pd.read_csv(filename)
-
             if "timestamp_tehran" not in df.columns:
                 print(
                     f"⚠️  Skipping {deployment_name}: 'timestamp_tehran' column missing."
@@ -44,11 +61,23 @@ def load_and_filter_data(data_dir, start_str, end_str):
                 continue
 
             df["timestamp"] = pd.to_datetime(df["timestamp_tehran"])
-
             mask = (df["timestamp"] >= start_ts) & (df["timestamp"] <= end_ts)
             filtered_df = df.loc[mask].copy()
 
             if not filtered_df.empty:
+                limit_per_pod = get_limit(deployment_name)
+
+                safe_replicas = filtered_df["current_replicas"].replace(0, 1)
+
+                total_capacity = safe_replicas * limit_per_pod
+
+                filtered_df["cpu_actual_norm"] = (
+                    filtered_df["current_cpu_60th"] / total_capacity
+                )
+                filtered_df["cpu_pred_norm"] = (
+                    filtered_df["predicted_cpu_max"] / total_capacity
+                )
+
                 filtered_df["deployment"] = deployment_name
                 deployment_data[deployment_name] = filtered_df
                 global_df = pd.concat([global_df, filtered_df], ignore_index=True)
@@ -74,8 +103,8 @@ def calculate_metrics(global_df):
         print("⚠️ No valid predictions (>0) found.")
         mse, mae = 0, 0
     else:
-        y_true = valid_preds["current_cpu_60th"]
-        y_pred = valid_preds["predicted_cpu_max"]
+        y_true = valid_preds["cpu_actual_norm"]
+        y_pred = valid_preds["cpu_pred_norm"]
 
         mse = np.mean((y_true - y_pred) ** 2)
         mae = np.mean(np.abs(y_true - y_pred))
@@ -83,19 +112,15 @@ def calculate_metrics(global_df):
     inf_times = global_df["inference_time_s"]
     avg_inf = inf_times.mean()
     p95_inf = inf_times.quantile(0.95)
-
-    if "sigma" in global_df.columns:
-        avg_sigma = global_df["sigma"].mean()
-    else:
-        avg_sigma = 0.0
+    avg_sigma = global_df["sigma"].mean() if "sigma" in global_df.columns else 0.0
 
     print("=" * 40)
-    print("📊  GLOBAL EXPERIMENT METRICS")
+    print("📊  GLOBAL EXPERIMENT METRICS (NORMALIZED)")
     print("=" * 40)
     print(f"Total Data Points:    {len(global_df)}")
     print("-" * 20)
     print(f"Prediction MSE:       {mse:.5f}")
-    print(f"Prediction MAE:       {mae:.5f}")
+    print(f"Prediction MAE:       {mae:.5f} ({(mae*100):.2f}%)")
     print("-" * 20)
     print(f"Avg Inference Time:   {avg_inf:.4f} s")
     print(f"P95 Inference Time:   {p95_inf:.4f} s")
@@ -122,15 +147,15 @@ def plot_deployments(deployment_data):
 
         ax.plot(
             df["timestamp"],
-            df["current_cpu_60th"],
-            label="Actual CPU",
+            df["cpu_actual_norm"],
+            label="Actual Load (%)",
             color="blue",
             alpha=0.6,
         )
         ax.plot(
             df["timestamp"],
-            df["predicted_cpu_max"],
-            label="Predicted Max",
+            df["cpu_pred_norm"],
+            label="Predicted Load (%)",
             color="orange",
             linestyle="--",
         )
@@ -143,9 +168,14 @@ def plot_deployments(deployment_data):
             alpha=0.5,
         )
 
-        ax.set_title(f"Deployment: {name}", fontweight="bold")
-        ax.set_ylabel("CPU Load")
+        ax.set_title(
+            f"Deployment: {name} (Limit: {get_limit(name)}m per pod)", fontweight="bold"
+        )
+        ax.set_ylabel("CPU Utilization (0.0 - 1.0)")
+        ax.set_ylim(0, 1.2)
         ax.grid(True, alpha=0.3)
+
+        ax.axhline(y=1.0, color="gray", linestyle="--", alpha=0.3, linewidth=1)
 
         ax.xaxis.set_major_locator(mdates.MinuteLocator(interval=5))
         ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
@@ -181,7 +211,7 @@ def plot_deployments(deployment_data):
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     plt.subplots_adjust(hspace=0.6)
 
-    output_file = "experiment_results_plot.png"
+    output_file = "experiment_results_plot_normalized.png"
     plt.savefig(output_file, dpi=300)
     print(f"\n✅ Plot saved to {output_file}")
     plt.show()
