@@ -1,6 +1,7 @@
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
+import matplotlib.ticker as ticker
 import numpy as np
 import glob
 import os
@@ -113,7 +114,7 @@ def plot_deployments(deployment_data):
     if rows == 0:
         rows = 1
 
-    fig, axes = plt.subplots(rows, cols, figsize=(15, 4 * rows), sharex=True)
+    fig, axes = plt.subplots(rows, cols, figsize=(18, 5 * rows), sharex=False)
     axes = axes.flatten()
 
     for i, (name, df) in enumerate(deployment_data.items()):
@@ -142,9 +143,14 @@ def plot_deployments(deployment_data):
             alpha=0.5,
         )
 
-        ax.set_title(f"Deployment: {name}")
+        ax.set_title(f"Deployment: {name}", fontweight="bold")
         ax.set_ylabel("CPU Load")
         ax.grid(True, alpha=0.3)
+
+        ax.xaxis.set_major_locator(mdates.MinuteLocator(interval=5))
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+
+        plt.setp(ax.get_xticklabels(), rotation=30, ha="right")
 
         ax2 = ax.twinx()
         ax2.step(
@@ -157,19 +163,21 @@ def plot_deployments(deployment_data):
         )
         ax2.set_ylabel("Replicas")
 
+        ax2.yaxis.set_major_locator(ticker.MaxNLocator(integer=True))
+
         if i == 0:
             lines_1, labels_1 = ax.get_legend_handles_labels()
             lines_2, labels_2 = ax2.get_legend_handles_labels()
             ax.legend(lines_1 + lines_2, labels_1 + labels_2, loc="upper left")
 
-        ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
-
     for j in range(i + 1, len(axes)):
         axes[j].axis("off")
 
-    plt.tight_layout()
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    plt.subplots_adjust(hspace=0.4)
+
     output_file = "experiment_results_plot.png"
-    plt.savefig(output_file)
+    plt.savefig(output_file, dpi=300)
     print(f"\n✅ Plot saved to {output_file}")
     plt.show()
 
