@@ -149,7 +149,6 @@ def plot_deployments(deployment_data):
 
         ax.xaxis.set_major_locator(mdates.MinuteLocator(interval=5))
         ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
-
         plt.setp(ax.get_xticklabels(), rotation=30, ha="right")
 
         ax2 = ax.twinx()
@@ -164,6 +163,12 @@ def plot_deployments(deployment_data):
         ax2.set_ylabel("Replicas")
 
         ax2.yaxis.set_major_locator(ticker.MaxNLocator(integer=True))
+        ax2.yaxis.set_major_formatter(ticker.FormatStrFormatter("%d"))
+
+        rep_min = df["current_replicas"].min()
+        rep_max = df["current_replicas"].max()
+        if rep_min == rep_max:
+            ax2.set_ylim(rep_min - 1, rep_max + 1)
 
         if i == 0:
             lines_1, labels_1 = ax.get_legend_handles_labels()
@@ -174,7 +179,7 @@ def plot_deployments(deployment_data):
         axes[j].axis("off")
 
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-    plt.subplots_adjust(hspace=0.4)
+    plt.subplots_adjust(hspace=0.6)
 
     output_file = "experiment_results_plot.png"
     plt.savefig(output_file, dpi=300)
