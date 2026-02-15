@@ -83,6 +83,11 @@ def calculate_metrics(global_df):
     avg_inf = inf_times.mean()
     p95_inf = inf_times.quantile(0.95)
 
+    if "sigma" in global_df.columns:
+        avg_sigma = global_df["sigma"].mean()
+    else:
+        avg_sigma = 0.0
+
     print("=" * 40)
     print("📊  GLOBAL EXPERIMENT METRICS")
     print("=" * 40)
@@ -93,6 +98,8 @@ def calculate_metrics(global_df):
     print("-" * 20)
     print(f"Avg Inference Time:   {avg_inf:.4f} s")
     print(f"P95 Inference Time:   {p95_inf:.4f} s")
+    print("-" * 20)
+    print(f"Avg Sigma (Uncertainty): {avg_sigma:.5f}")
     print("=" * 40)
 
 
@@ -103,6 +110,8 @@ def plot_deployments(deployment_data):
     n_deployments = len(deployment_data)
     cols = 2
     rows = (n_deployments + 1) // cols
+    if rows == 0:
+        rows = 1
 
     fig, axes = plt.subplots(rows, cols, figsize=(15, 4 * rows), sharex=True)
     axes = axes.flatten()
