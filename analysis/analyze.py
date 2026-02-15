@@ -73,10 +73,10 @@ def load_and_filter_data(data_dir, start_str, end_str):
 
                 filtered_df["cpu_actual_norm"] = (
                     filtered_df["current_cpu_60th"] / total_capacity
-                )
+                ).clip(upper=1.0)
                 filtered_df["cpu_pred_norm"] = (
                     filtered_df["predicted_cpu_max"] / total_capacity
-                )
+                ).clip(upper=1.0)
 
                 filtered_df["deployment"] = deployment_name
                 deployment_data[deployment_name] = filtered_df
@@ -115,7 +115,7 @@ def calculate_metrics(global_df):
     avg_sigma = global_df["sigma"].mean() if "sigma" in global_df.columns else 0.0
 
     print("=" * 40)
-    print("📊  GLOBAL EXPERIMENT METRICS (NORMALIZED)")
+    print("📊  GLOBAL EXPERIMENT METRICS")
     print("=" * 40)
     print(f"Total Data Points:    {len(global_df)}")
     print("-" * 20)
@@ -172,7 +172,8 @@ def plot_deployments(deployment_data):
             f"Deployment: {name} (Limit: {get_limit(name)}m per pod)", fontweight="bold"
         )
         ax.set_ylabel("CPU Utilization (0.0 - 1.0)")
-        ax.set_ylim(0, 1.2)
+        ax.set_ylim(0, 1.0)
+        ax.set_yticks(np.arange(0, 1.1, 0.2))
         ax.grid(True, alpha=0.3)
 
         ax.axhline(y=1.0, color="gray", linestyle="--", alpha=0.3, linewidth=1)
@@ -211,7 +212,7 @@ def plot_deployments(deployment_data):
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     plt.subplots_adjust(hspace=0.6)
 
-    output_file = "experiment_results_plot_normalized.png"
+    output_file = "experiment_results_plot.png"
     plt.savefig(output_file, dpi=300)
     print(f"\n✅ Plot saved to {output_file}")
     plt.show()
