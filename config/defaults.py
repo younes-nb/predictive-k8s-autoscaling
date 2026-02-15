@@ -182,7 +182,7 @@ class TrainingDefaults:
     INFERENCE_REPEATS: int = 100
     TEST_BATCH_SIZE: int = 256
     TEST_NUM_WORKERS: int = 4
-    GLOBAL_THRESHOLD: bool = True
+    GLOBAL_THRESHOLD: bool = False
     BIDIRECTIONAL: bool = False
 
 
