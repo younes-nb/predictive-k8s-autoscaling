@@ -224,14 +224,6 @@ def main():
         ]
         if args.cpu:
             cmd_test.append("--cpu")
-
-        if args.use_weights:
-            cmd_test.append("--adaptive_threshold")
-        else:
-            cmd_test.append("--static_threshold")
-
-        if args.global_threshold:
-            cmd_test.append("--global_threshold")
         if args.bidirectional:
             cmd_test.append("--bidirectional")
 

@@ -2,6 +2,7 @@ import os
 import sys
 import argparse
 import logging
+import time
 from datetime import datetime
 
 try:
@@ -20,7 +21,6 @@ if REPO_ROOT not in sys.path:
 from config.defaults import PATHS, TRAINING
 from common.dataset import ShardedWindowsDataset
 from common.models import RNNForecaster
-from common.uncertainty import mc_dropout_predict, compute_adaptive_thresholds
 
 
 def setup_logging(mode="test"):
@@ -60,7 +60,6 @@ def setup_logging(mode="test"):
 
 @torch.no_grad()
 def forward_predict(model: torch.nn.Module, x: torch.Tensor) -> torch.Tensor:
-    """Deterministic single forward pass (no MC Dropout)."""
     model.eval()
     return model(x)
 
@@ -97,27 +96,6 @@ def evaluate(args):
     logging.info(f"Model trained on feature_set: {feature_set}")
     logging.info(f"RNN Type: {rnn_type}")
 
-    if args.static_threshold:
-        use_adaptive = False
-    elif args.adaptive_threshold:
-        use_adaptive = True
-    else:
-        use_adaptive = True
-
-    logging.info(
-        f"Threshold mode: {'adaptive (mc-dropout)' if use_adaptive else 'static (base_threshold)'}"
-    )
-    logging.info(f"base_threshold: {args.base_threshold}")
-    if use_adaptive:
-        logging.info(
-            f"adaptive params: repeats={args.inference_repeats}, k={args.k}, "
-            f"theta_min={args.theta_min}, theta_max={args.theta_max}"
-        )
-        if args.global_threshold:
-            logging.info(
-                ">> Global Threshold Mode: ENABLED (Averaging sigma per batch)"
-            )
-
     logging.info("\n--- Loading Test Dataset ---")
     test_ds = ShardedWindowsDataset(args.windows_dir, "test", input_len, horizon)
     logging.info(f"Test samples: {len(test_ds)}")
@@ -145,62 +123,35 @@ def evaluate(args):
         dropout=dropout,
         horizon=horizon,
         rnn_type=rnn_type,
-        bidirectional=args.bidirectional
+        bidirectional=args.bidirectional,
     ).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
 
-    logging.info("\n--- Starting Inference ---")
+    logging.info("\n--- Starting Deterministic Inference ---")
 
     mse_sum = 0.0
     mae_sum = 0.0
-    tp = fp = tn = fn = 0
     total_samples = 0
-    sigma_sum = 0.0
 
-    start_time = datetime.now()
+    start_time = time.time()
+    total_batches = len(test_loader)
 
     for i, (x, y) in enumerate(test_loader):
         x, y = x.to(device), y.to(device)
 
-        if use_adaptive:
-            mu, sigma = mc_dropout_predict(model, x, repeats=args.inference_repeats)
-
-            if args.global_threshold:
-                sigma_global = sigma.mean()
-                sigma = torch.full_like(sigma, sigma_global)
-
-            sigma_sum += sigma.mean().item()
-
-            theta_base = torch.full(mu.shape, args.base_threshold, device=device)
-            thr = compute_adaptive_thresholds(
-                theta_base,
-                sigma,
-                k=args.k,
-                theta_min=args.theta_min,
-                theta_max=args.theta_max,
-            )
-        else:
-            mu = forward_predict(model, x)
-            thr = torch.full(mu.shape, args.base_threshold, device=device)
+        mu = forward_predict(model, x)
 
         diff = mu - y
         mse_sum += (diff**2).sum().item()
         mae_sum += diff.abs().sum().item()
 
-        y_true_cls = y.max(dim=1).values >= thr.max(dim=1).values
-        y_pred_cls = mu.max(dim=1).values >= thr.max(dim=1).values
-
-        tp += (y_pred_cls & y_true_cls).sum().item()
-        fp += (y_pred_cls & ~y_true_cls).sum().item()
-        tn += (~y_pred_cls & ~y_true_cls).sum().item()
-        fn += (~y_pred_cls & y_true_cls).sum().item()
-
         total_samples += x.size(0)
 
-        if i % 100 == 0:
-            logging.info(f"Batch {i}/{len(test_loader)} processed...")
+        print(f"Batch {i+1}/{total_batches} processed...", end="\r", flush=True)
 
-    inference_time = (datetime.now() - start_time).total_seconds()
+    print(" " * 50, end="\r")
+
+    inference_time = time.time() - start_time
 
     if total_samples == 0:
         logging.warning("No samples found in test set.")
@@ -208,46 +159,18 @@ def evaluate(args):
 
     mse = mse_sum / (total_samples * horizon)
     mae = mae_sum / (total_samples * horizon)
-    avg_sigma = sigma_sum / len(test_loader) if use_adaptive else 0.0
-
-    accuracy = (tp + tn) / (tp + tn + fp + fn + 1e-8)
-    precision = tp / (tp + fp + 1e-8)
-    recall = tp / (tp + fn + 1e-8)
-    f1 = 2 * precision * recall / (precision + recall + 1e-8)
-
     avg_inference_time_ms = (inference_time / total_samples) * 1000.0
 
-    logging.info("\n=== Test Results ===")
-    logging.info(f"feature_set (from ckpt): {feature_set}")
-    logging.info(f"RNN Type: {rnn_type}")
-    logging.info(
-        f"Threshold mode: {'adaptive (mc-dropout)' if use_adaptive else 'static (base_threshold)'}"
-    )
-    logging.info(f"base_threshold: {args.base_threshold}")
-    if use_adaptive:
-        logging.info(
-            f"adaptive params: repeats={args.inference_repeats}, k={args.k}, "
-            f"theta_min={args.theta_min}, theta_max={args.theta_max}"
-        )
-        if args.global_threshold:
-            logging.info(">> Global Threshold Mode: ENABLED")
-        logging.info(f"Avg Sigma (Uncertainty): {avg_sigma:.6f} <--- DIAGNOSTIC")
-
-    logging.info(f"MSE:       {mse:.6f}")
-    logging.info(f"MAE:       {mae:.6f}")
-    logging.info("-" * 20)
-    logging.info("Classification:")
-    logging.info(f"Accuracy:  {accuracy:.4f}")
-    logging.info(f"Precision: {precision:.4f}")
-    logging.info(f"Recall:    {recall:.4f}")
-    logging.info(f"F1 Score:  {f1:.4f}")
-    logging.info("-" * 20)
-    logging.info("Confusion Matrix:")
-    logging.info(f"TP: {int(tp)}, FP: {int(fp)}")
-    logging.info(f"FN: {int(fn)}, TN: {int(tn)}")
-    logging.info("-" * 20)
-    logging.info(f"Total Inference Time: {inference_time:.2f}s")
-    logging.info(f"Latency per Sample:   {avg_inference_time_ms:.2f}ms")
+    logging.info("\n=== Test Results (Error & Latency) ===")
+    logging.info(f"feature_set: {feature_set}")
+    logging.info(f"RNN Type:    {rnn_type}")
+    logging.info("-" * 30)
+    logging.info(f"MSE:                   {mse:.6f}")
+    logging.info(f"MAE:                   {mae:.6f}")
+    logging.info("-" * 30)
+    logging.info(f"Total Inference Time:  {inference_time:.2f}s")
+    logging.info(f"Avg Latency per Sample:{avg_inference_time_ms:.4f} ms")
+    logging.info("-" * 30)
     logging.info(f"Log Saved to: {log_path}")
 
 
@@ -258,17 +181,9 @@ if __name__ == "__main__":
     p.add_argument("--batch_size", type=int, default=TRAINING.TEST_BATCH_SIZE)
     p.add_argument("--num_workers", type=int, default=TRAINING.TEST_NUM_WORKERS)
     p.add_argument("--cpu", action="store_true")
-    p.add_argument("--adaptive_threshold", action="store_true")
-    p.add_argument("--static_threshold", action="store_true")
-    p.add_argument("--inference_repeats", type=int, default=TRAINING.INFERENCE_REPEATS)
-    p.add_argument("--base_threshold", type=float, default=TRAINING.THETA_BASE)
-    p.add_argument("--k", type=float, default=TRAINING.K_UNCERTAINTY)
-    p.add_argument("--theta_min", type=float, default=TRAINING.THETA_MIN)
-    p.add_argument("--theta_max", type=float, default=TRAINING.THETA_MAX)
     p.add_argument(
-        "--global_threshold", action="store_true", default=TRAINING.GLOBAL_THRESHOLD
+        "--bidirectional", action="store_true", default=TRAINING.BIDIRECTIONAL
     )
-    p.add_argument("--bidirectional", action="store_true", default=TRAINING.BIDIRECTIONAL)
 
     try:
         evaluate(p.parse_args())
