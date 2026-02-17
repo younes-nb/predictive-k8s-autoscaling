@@ -49,14 +49,9 @@ def build_table_agg(
     return out
 
 
-def compute_quantile_threshold(df: pl.DataFrame, service_col: str, quantile: float):
-    cpu_values = df[service_col].to_numpy()
-    return np.percentile(cpu_values, quantile * 100)
-
-
 def main():
     p = argparse.ArgumentParser(
-        description="Build windows with adaptive threshold (quantile-based)."
+        description="Build windows with per-feature [0, 1] normalization."
     )
 
     p.add_argument("--out_dir", required=True)
@@ -105,8 +100,6 @@ def main():
     if args.max_services > 0:
         base_dir = DATASET_TABLES[base_table]["parquet_dir"]
         base_parts = list_parquet_parts(base_dir)
-        print(f"Scanning {len(base_parts)} parts for unique services...")
-
         all_services = set()
         for part in base_parts:
             try:
@@ -170,14 +163,10 @@ def main():
         if df_base.height == 0:
             continue
 
-        if df_base[args.time_col].dtype != pl.Datetime:
-            df_base = df_base.with_columns(pl.col(args.time_col).cast(pl.Datetime))
-
-        min_t, max_t = df_base[args.time_col].min(), df_base[args.time_col].max()
-
         joined = build_table_agg(
             df_base, args.time_col, base_id_cols, args.freq, table_exprs[base_table]
         )
+        min_t, max_t = df_base[args.time_col].min(), df_base[args.time_col].max()
         del df_base
         gc.collect()
 
@@ -189,37 +178,26 @@ def main():
             need_cols = list(
                 set([args.time_col, *t_id_cols, *[raw for _, raw in table_exprs[t]]])
             )
-
             try:
-                lf_t = pl.scan_parquet(table_parts[t])
-                lf_t = lf_t.filter(
-                    (pl.col(args.time_col).cast(pl.Datetime) >= min_t)
-                    & (pl.col(args.time_col).cast(pl.Datetime) <= max_t)
-                ).select(need_cols)
+                lf_t = (
+                    pl.scan_parquet(table_parts[t])
+                    .filter(
+                        (pl.col(args.time_col).cast(pl.Datetime) >= min_t)
+                        & (pl.col(args.time_col).cast(pl.Datetime) <= max_t)
+                    )
+                    .select(need_cols)
+                )
                 df_t_agg = build_table_agg(
                     lf_t, args.time_col, t_id_cols, args.freq, table_exprs[t]
                 ).collect(engine="streaming")
-            except Exception as e:
-                print(f"  Error joining table '{t}': {e}. Skipping.")
+                join_on = ["_t"] + FEATURE_SETS[args.feature_set].get(
+                    "join_keys", {}
+                ).get(t, list(set(joined.columns).intersection(df_t_agg.columns)))
+                joined = joined.join(df_t_agg, on=join_on, how="left")
+                del df_t_agg
+                gc.collect()
+            except:
                 continue
-
-            spec_join_keys = FEATURE_SETS[args.feature_set].get("join_keys", {})
-            join_on = ["_t"] + spec_join_keys.get(
-                t, list(set(joined.columns).intersection(df_t_agg.columns))
-            )
-
-            missing_keys = [
-                k
-                for k in join_on
-                if k not in joined.columns or k not in df_t_agg.columns
-            ]
-            if missing_keys:
-                print(f"  Skipping '{t}': missing keys {missing_keys}")
-                continue
-
-            joined = joined.join(df_t_agg, on=join_on, how="left")
-            del df_t_agg
-            gc.collect()
 
         joined = joined.drop_nulls(feature_names).sort(
             list(set(args.id_cols).intersection(joined.columns)) + ["_t"]
@@ -228,7 +206,6 @@ def main():
             continue
 
         shard_data = {"train": ([], [], []), "val": ([], [], []), "test": ([], [], [])}
-
         group_cols = [c for c in args.id_cols if c in joined.columns]
 
         for _, g in joined.group_by(group_cols, maintain_order=True):
@@ -242,12 +219,20 @@ def main():
             valid_group = True
 
             for j in range(len(feature_names)):
-                s_norm = moving_average(feat_raw[:, j], args.smoothing_window)
+                vals = moving_average(feat_raw[:, j], args.smoothing_window)
 
-                if j == target_idx and s_norm is None:
-                    valid_group = False
-                    break
-                feat_norm[:, j] = 0.0 if s_norm is None else s_norm
+                if vals is None:
+                    if j == target_idx:
+                        valid_group = False
+                        break
+                    feat_norm[:, j] = 0.0
+                    continue
+
+                v_min, v_max = np.min(vals), np.max(vals)
+                if v_max > v_min:
+                    feat_norm[:, j] = (vals - v_min) / (v_max - v_min)
+                else:
+                    feat_norm[:, j] = 0.0
 
             if not valid_group:
                 continue
@@ -259,6 +244,7 @@ def main():
                 args.pred_horizon,
                 args.stride,
             )
+
             n_w = len(X_all)
             if n_w == 0:
                 continue
@@ -268,18 +254,15 @@ def main():
                 max(int(n_w * (args.train_frac + args.val_frac)), cut_tr + 1), n_w - 1
             )
 
-            if X_all[:cut_tr].size:
-                shard_data["train"][0].append(X_all[:cut_tr])
-                shard_data["train"][1].append(Y_all[:cut_tr])
-                shard_data["train"][2].append(S_all[:cut_tr])
-            if X_all[cut_tr:cut_val].size:
-                shard_data["val"][0].append(X_all[cut_tr:cut_val])
-                shard_data["val"][1].append(Y_all[cut_tr:cut_val])
-                shard_data["val"][2].append(S_all[cut_tr:cut_val])
-            if X_all[cut_val:].size:
-                shard_data["test"][0].append(X_all[cut_val:])
-                shard_data["test"][1].append(Y_all[cut_val:])
-                shard_data["test"][2].append(S_all[cut_val:])
+            for split, start, end in [
+                ("train", 0, cut_tr),
+                ("val", cut_tr, cut_val),
+                ("test", cut_val, None),
+            ]:
+                if X_all[start:end].size:
+                    shard_data[split][0].append(X_all[start:end])
+                    shard_data[split][1].append(Y_all[start:end])
+                    shard_data[split][2].append(S_all[start:end])
 
         base = os.path.join(args.out_dir, f"part-{shard_idx:04d}")
         for split, (Xs, Ys, Ss) in shard_data.items():

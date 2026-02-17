@@ -24,7 +24,9 @@ def main():
         description="Ingest CSV trace files into Parquet (feature-set aware, per-table)."
     )
     p.add_argument(
-        "--table", required=True, help="Dataset table name, e.g. msresource, node"
+        "--table",
+        required=True,
+        help="Dataset table name, e.g. msresource, node, msrtmcre",
     )
     p.add_argument(
         "--feature_set",
@@ -58,7 +60,7 @@ def main():
     key_cols = list(cfg.get("key_cols", []))
     if not key_cols:
         raise SystemExit(
-            f"DATASET_TABLES['{args.table}'] must define key_cols (e.g., ['msname','msinstanceid'] or ['nodeid'])."
+            f"DATASET_TABLES['{args.table}'] must define key_cols (e.g., ['msname','msinstanceid'])."
         )
 
     needed_by_table = table_to_raw_columns(args.feature_set)
@@ -67,6 +69,18 @@ def main():
         raise SystemExit(
             f"feature_set='{args.feature_set}' does not require any columns from table='{args.table}'."
         )
+
+    is_msrtmcre = args.table == "msrtmcre"
+    calculating_total_mcr = is_msrtmcre and ("total_mcr" in feature_cols)
+    mcr_components = ["http_mcr", "providerrpc_mcr", "providermq_mcr"]
+
+    base_needed = {"timestamp", *key_cols}
+
+    if calculating_total_mcr:
+        other_features = [f for f in feature_cols if f != "total_mcr"]
+        needed = base_needed | set(other_features) | set(mcr_components)
+    else:
+        needed = base_needed | set(feature_cols)
 
     os.makedirs(args.out_dir, exist_ok=True)
 
@@ -80,13 +94,12 @@ def main():
     n_files = len(files)
     npart = max(1, min(int(args.repartition), n_files))
 
-    base_needed = {"timestamp", *key_cols}
-    needed = base_needed | set(feature_cols)
-
     print(f"Table: {args.table}")
     print(f"Feature set: {args.feature_set}")
     print(f"Key columns: {key_cols}")
-    print(f"Keeping feature columns: {feature_cols}")
+    print(f"Targeting feature columns: {feature_cols}")
+    if calculating_total_mcr:
+        print(f"Notice: Will calculate 'total_mcr' from {mcr_components}")
     print(f"Found {n_files} files, writing ~{npart} parquet parts")
 
     scan_kwargs = dict(
@@ -122,6 +135,15 @@ def main():
             df = df.drop_nulls(subset=list(needed))
             if df.height == 0:
                 continue
+
+            if calculating_total_mcr:
+                df = df.with_columns(
+                    (
+                        pl.col("http_mcr")
+                        + pl.col("providerrpc_mcr")
+                        + pl.col("providermq_mcr")
+                    ).alias("total_mcr")
+                )
 
             df = df.with_columns(
                 pl.from_epoch(pl.col("timestamp") / 1000, time_unit="s").alias(

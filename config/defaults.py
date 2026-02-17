@@ -52,6 +52,7 @@ FEATURES: Dict[str, Dict[str, str]] = {
     "memory_utilization": {"table": "msresource", "column": "memory_utilization"},
     "node_cpu_utilization": {"table": "node", "column": "cpu_utilization"},
     "node_memory_utilization": {"table": "node", "column": "memory_utilization"},
+    "total_mcr": {"table": "msrtmcre", "column": "total_mcr"},
 }
 
 
@@ -76,6 +77,15 @@ FEATURE_SETS: Dict[str, Dict[str, Any]] = {
         "target": "cpu_utilization",
         "base_table": "msresource",
         "join_keys": {"msresource": ["nodeid"], "node": ["nodeid"]},
+    },
+    "cpu_mem_traffic": {
+        "features": ["cpu_utilization", "memory_utilization", "total_mcr"],
+        "target": "cpu_utilization",
+        "base_table": "msresource",
+        "join_keys": {
+            "msresource": ["msname", "msinstanceid"],
+            "msrtmcre": ["msname", "msinstanceid"],
+        },
     },
 }
 
