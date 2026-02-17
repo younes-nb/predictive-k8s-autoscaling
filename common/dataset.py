@@ -34,9 +34,15 @@ class ShardedWindowsDataset(Dataset):
         for x_path in x_files:
             base = x_path.replace(f"_X_{split}.npy", "")
             y_path = base + f"_y_{split}.npy"
+            sid_path = base + f"_sid_{split}.npy"
 
             X = np.load(x_path, mmap_mode="r")
             Y = np.load(y_path, mmap_mode="r")
+
+            if os.path.exists(sid_path):
+                SIDs = np.load(sid_path, mmap_mode="r")
+            else:
+                raise RuntimeError(f"Service IDs missing: {sid_path}")
 
             W = None
             if self.use_weights and split == "train":
@@ -46,7 +52,7 @@ class ShardedWindowsDataset(Dataset):
                 else:
                     raise RuntimeError(f"Weights requested but missing: {w_path}")
 
-            self.shards.append((X, Y, W))
+            self.shards.append((X, Y, SIDs, W))
             total += X.shape[0]
             self.cum_lengths.append(total)
 
@@ -65,21 +71,24 @@ class ShardedWindowsDataset(Dataset):
                 prev_cum = 0 if shard_idx == 0 else self.cum_lengths[shard_idx - 1]
                 local_idx = idx - prev_cum
 
-                X, Y, W = self.shards[shard_idx]
+                X, Y, SIDs, W = self.shards[shard_idx]
 
                 x_arr = np.array(X[local_idx], copy=True)
                 y_arr = np.array(Y[local_idx], copy=True)
+                sid_val = int(SIDs[local_idx])
 
                 if x_arr.ndim == 1:
                     x_arr = x_arr[:, None]
 
                 x_t = torch.from_numpy(x_arr).float()
                 y_t = torch.from_numpy(y_arr).float()
+                sid_t = torch.tensor(sid_val, dtype=torch.long)
 
                 if W is not None:
                     w_val = float(W[local_idx])
-                    return x_t, y_t, torch.tensor(w_val, dtype=torch.float32)
+                    w_t = torch.tensor(w_val, dtype=torch.float32)
+                    return x_t, y_t, w_t, sid_t
 
-                return x_t, y_t
+                return x_t, y_t, sid_t
 
         raise IndexError(idx)
