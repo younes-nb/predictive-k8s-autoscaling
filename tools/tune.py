@@ -128,7 +128,7 @@ def objective(trial):
                 gamma,
                 delta,
                 theta_min=TRAINING.THETA_MIN,
-                theta_mode=TRAINING.WEIGHT_MODE,
+                theta_mode=TRAINING.THETA_MODE,
             )
 
             optimizer.zero_grad()
