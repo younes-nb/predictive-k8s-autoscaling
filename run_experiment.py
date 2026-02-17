@@ -65,12 +65,17 @@ def main():
         dest="keep_raw",
         help="Delete raw files during preprocessing.",
     )
-
     ap.add_argument(
         "--no_weights",
         action="store_false",
         dest="use_weights",
         help="Disable adaptive boundary weights (force standard training).",
+    )
+    ap.add_argument(
+        "--theta_mode",
+        choices=["adaptive", "static"],
+        default=TRAINING.THETA_MODE,
+        help="Threshold logic: adaptive or static.",
     )
     ap.add_argument(
         "--global_threshold",
@@ -120,96 +125,58 @@ def main():
 
     if not args.skip_training:
 
-        def get_train_cmd(checkpoint_target, use_weights_flag):
-            cmd = [
-                sys.executable,
-                train_script,
-                "--windows_dir",
-                args.windows_dir,
-                "--checkpoint_path",
-                checkpoint_target,
-                "--rnn_type",
-                args.rnn_type,
-                "--feature_set",
-                args.feature_set,
-            ]
-            if args.cpu:
-                cmd.append("--cpu")
-            if args.input_len:
-                cmd.extend(["--input_len", str(args.input_len)])
-            if args.pred_horizon:
-                cmd.extend(["--pred_horizon", str(args.pred_horizon)])
-            if args.hidden_size:
-                cmd.extend(["--hidden_size", str(args.hidden_size)])
-            if args.num_layers:
-                cmd.extend(["--num_layers", str(args.num_layers)])
-            if args.dropout:
-                cmd.extend(["--dropout", str(args.dropout)])
-            if use_weights_flag:
-                cmd.append("--use_weights")
-            if args.bidirectional:
-                cmd.append("--bidirectional")
-
-            return cmd
-
         if args.use_weights:
-            print("\n>>> Adaptive Weights Pipeline Triggered <<<")
-
-            base_checkpoint_path = args.checkpoint_path.replace(".pt", "_base.pt")
-            if base_checkpoint_path == args.checkpoint_path:
-                base_checkpoint_path += ".base"
-
-            print(
-                f"--- Phase 2a: Training Base Model (target: {os.path.basename(base_checkpoint_path)}) ---"
-            )
-            cmd_train_base = get_train_cmd(base_checkpoint_path, use_weights_flag=False)
-            total_times["train_base"] = run(
-                cmd_train_base, "Phase 2a: Train Base Model"
-            )
-
-            print(f"--- Phase 2b: Computing Weights using Base Model ---")
+            print(f"\n>>> Weights Enabled: Mode = {args.theta_mode} <<<")
             cmd_weights = [
                 sys.executable,
                 compute_weights_script,
                 "--windows_dir",
                 args.windows_dir,
-                "--checkpoint_path",
-                base_checkpoint_path,
-                "--rnn_type",
-                args.rnn_type,
+                "--weight_mode",
+                args.theta_mode,
+                "--theta_base",
+                str(TRAINING.THETA_BASE),
+                "--theta_min",
+                str(TRAINING.THETA_MIN),
+                "--gamma",
+                str(TRAINING.GAMMA),
+                "--delta",
+                str(TRAINING.DELTA),
             ]
-            if args.input_len:
-                cmd_weights.extend(["--input_len", str(args.input_len)])
-            if args.hidden_size:
-                cmd_weights.extend(["--hidden_size", str(args.hidden_size)])
-            if args.num_layers:
-                cmd_weights.extend(["--num_layers", str(args.num_layers)])
-            if args.dropout:
-                cmd_weights.extend(["--dropout", str(args.dropout)])
-            if args.pred_horizon:
-                cmd_weights.extend(["--horizon", str(args.pred_horizon)])
-            if args.global_threshold:
-                cmd_weights.append("--global_threshold")
-            if args.bidirectional:
-                cmd_weights.append("--bidirectional")
-            
             total_times["compute_weights"] = run(
-                cmd_weights, "Phase 2b: Compute Boundary Weights"
+                cmd_weights, "Step 2a: Compute Boundary Weights"
             )
 
-            print(
-                f"--- Phase 2c: Training Final Model (target: {os.path.basename(args.checkpoint_path)}) ---"
-            )
-            cmd_train_final = get_train_cmd(args.checkpoint_path, use_weights_flag=True)
-            total_times["train_final"] = run(
-                cmd_train_final, "Phase 2c: Train Final Model"
-            )
+        cmd_train = [
+            sys.executable,
+            train_script,
+            "--windows_dir",
+            args.windows_dir,
+            "--checkpoint_path",
+            args.checkpoint_path,
+            "--rnn_type",
+            args.rnn_type,
+            "--feature_set",
+            args.feature_set,
+        ]
+        if args.cpu:
+            cmd_train.append("--cpu")
+        if args.input_len:
+            cmd_train.extend(["--input_len", str(args.input_len)])
+        if args.pred_horizon:
+            cmd_train.extend(["--pred_horizon", str(args.pred_horizon)])
+        if args.hidden_size:
+            cmd_train.extend(["--hidden_size", str(args.hidden_size)])
+        if args.num_layers:
+            cmd_train.extend(["--num_layers", str(args.num_layers)])
+        if args.dropout:
+            cmd_train.extend(["--dropout", str(args.dropout)])
+        if args.use_weights:
+            cmd_train.append("--use_weights")
+        if args.bidirectional:
+            cmd_train.append("--bidirectional")
 
-        else:
-            print("\n>>> Standard Training Pipeline (No Weights) <<<")
-            cmd_train = get_train_cmd(args.checkpoint_path, use_weights_flag=False)
-            total_times["training"] = run(cmd_train, "Step 2: Train Model (Standard)")
-
+        total_times["training"] = run(cmd_train, "Step 2b: Training Model")
     else:
         print("\n=== Skipping training step ===")
 
