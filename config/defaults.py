@@ -172,17 +172,12 @@ class TrainingDefaults:
     SEED: int = 42
     LOG_INTERVAL: int = 2000
     USE_WEIGHTS: bool = True
-    THETA_MODE: str = "adaptive"
-    MC_REPEATS: int = 50
-    K_UNCERTAINTY: float = 5.0
     GAMMA: float = 20.0
     DELTA: float = 0.08
     THETA_MODE: str = "adaptive"
     THETA_BASE: float = 0.75
     THETA_MIN: float = 0.60
     INFERENCE_REPEATS: int = 100
-    TEST_BATCH_SIZE: int = 256
-    TEST_NUM_WORKERS: int = 4
     GLOBAL_THRESHOLD: bool = False
     BIDIRECTIONAL: bool = False
 
