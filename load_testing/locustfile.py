@@ -1,5 +1,7 @@
+import math
 import random
-from locust import FastHttpUser, TaskSet, between, LoadTestShape
+import time
+from locust import FastHttpUser, TaskSet, LoadTestShape
 from faker import Faker
 
 fake = Faker()
@@ -32,26 +34,29 @@ class UserBehavior(TaskSet):
 
 class WebsiteUser(FastHttpUser):
     tasks = [UserBehavior]
-    wait_time = between(1, 5)
+    
+    def wait_time(self):
+        return random.expovariate(1.0 / 3.0)
 
 
-class HourLongShape(LoadTestShape):
-    stages = [
-        {"duration": 300, "users": 20, "spawn_rate": 1},
-        {"duration": 900, "users": 20, "spawn_rate": 1},
-        {"duration": 1200, "users": 100, "spawn_rate": 5},
-        {"duration": 1800, "users": 100, "spawn_rate": 1},
-        {"duration": 2100, "users": 40, "spawn_rate": 2},
-        {"duration": 2700, "users": 40, "spawn_rate": 1},
-        {"duration": 3000, "users": 200, "spawn_rate": 10},
-        {"duration": 3600, "users": 200, "spawn_rate": 1},
-        {"duration": 3900, "users": 10, "spawn_rate": 10},
-    ]
+class StatisticalLoadShape(LoadTestShape):
+    avg_users = 100
+    amplitude = 80
+    cycle_length = 3600 
+    noise_factor = 0.1 
 
     def tick(self):
         run_time = self.get_run_time()
-        for stage in self.stages:
-            if run_time < stage["duration"]:
-                tick_data = (stage["users"], stage["spawn_rate"])
-                return tick_data
-        return None
+
+        base_tick_users = self.avg_users + (
+            self.amplitude * math.sin(2 * math.pi * run_time / self.cycle_length)
+        )
+
+        std_dev = math.sqrt(base_tick_users) * self.noise_factor
+        stochastic_users = int(random.gauss(base_tick_users, std_dev))
+
+        final_user_count = max(1, stochastic_users)
+
+        spawn_rate = max(1, int(final_user_count / 10))
+
+        return (final_user_count, spawn_rate)
