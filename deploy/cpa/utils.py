@@ -83,12 +83,9 @@ def get_adaptive_threshold(model, x_window):
     with torch.no_grad():
         preds = model(x_batch)
 
-    sigma = preds[:, 0].std().item()
-
+    sigma = preds[:, -1].std().item()
     raw_threshold = config.BASE_THRESHOLD - (config.K_FACTOR * sigma)
-    clamped_threshold = max(
-        config.MIN_THRESHOLD, min(config.MAX_THRESHOLD, raw_threshold)
-    )
+    clamped_threshold = max(config.MIN_THRESHOLD, raw_threshold)
 
     return clamped_threshold, sigma
 

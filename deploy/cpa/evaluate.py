@@ -39,7 +39,7 @@ def main():
 
         now = time.time()
         mode = "Reactive"
-        predicted_load_max = 0.0
+        predicted_load_final = 0.0
 
         if use_prediction and len(history_metrics) >= 60:
             x_tensor = (
@@ -53,16 +53,20 @@ def main():
                 preds_tensor = (
                     raw_preds[0] if isinstance(raw_preds, tuple) else raw_preds
                 )
-                predicted_load_max = torch.max(preds_tensor).item()
+                predicted_load_final = preds_tensor[-1].item()
 
-            if (now - last_uncertainty_time) >= config.UNCERTAINTY_INTERVAL_SECONDS:
+            if config.THRESHOLD_MODE == "static":
+                adaptive_threshold = config.BASE_THRESHOLD
+                model_sigma = 0.0
+                mode = "Predictive (Static Threshold)"
+            elif (now - last_uncertainty_time) >= config.UNCERTAINTY_INTERVAL_SECONDS:
                 adaptive_threshold, model_sigma = utils.get_adaptive_threshold(
                     model, x_tensor
                 )
                 last_uncertainty_time = now
-                mode = "Predictive (New Threshold)"
+                mode = "Predictive (New Adaptive Threshold)"
             else:
-                mode = "Predictive (Cached Threshold)"
+                mode = "Predictive (Cached Adaptive Threshold)"
 
         elif use_prediction:
             mode = "Predictive (Waiting for data)"
@@ -70,14 +74,14 @@ def main():
             adaptive_threshold = config.BASE_THRESHOLD
             model_sigma = 0.0
 
-        is_predicting = mode.startswith("Predictive") and predicted_load_max > 0
+        is_predicting = mode.startswith("Predictive") and predicted_load_final > 0
         safe_threshold = adaptive_threshold if adaptive_threshold > 0 else 0.75
-        
+
         if is_predicting:
-            load_to_scale_on = predicted_load_max
+            load_to_scale_on = predicted_load_final
         else:
             load_to_scale_on = current_load
-            
+
         raw_desired = int(
             np.ceil(current_replicas * (load_to_scale_on / safe_threshold))
         )
@@ -101,7 +105,7 @@ def main():
         utils.log_metrics(
             utils.get_tehran_time(),
             current_load,
-            predicted_load_max,
+            predicted_load_final,
             adaptive_threshold,
             model_sigma,
             total_inference_time,
@@ -110,7 +114,7 @@ def main():
 
         output = {
             "targetReplicas": int(final_rec),
-            "logs": f"Mode: {mode}, Load: {load_to_scale_on:.2f}, Pred: {predicted_load_max:.2f}, Thr: {adaptive_threshold:.3f}, Sigma: {model_sigma:.4f}",
+            "logs": f"Mode: {mode}, Load: {load_to_scale_on:.2f}, Pred: {predicted_load_final:.2f}, Thr: {adaptive_threshold:.3f}, Sigma: {model_sigma:.4f}",
         }
         sys.stdout.write(json.dumps(output))
 
