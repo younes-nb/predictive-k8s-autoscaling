@@ -111,7 +111,13 @@ def calculate_metrics(global_df):
     inf_times = global_df["inference_time_s"]
     avg_inf = inf_times.mean()
     p95_inf = inf_times.quantile(0.95)
-    avg_sigma = global_df["sigma"].mean() if "sigma" in global_df.columns else 0.0
+
+    if "sigma" in global_df.columns:
+        avg_sigma = global_df["sigma"].mean()
+        p95_sigma = global_df["sigma"].quantile(0.95)
+    else:
+        avg_sigma = 0.0
+        p95_sigma = 0.0
 
     print("=" * 40)
     print("📊  GLOBAL EXPERIMENT METRICS")
@@ -124,7 +130,8 @@ def calculate_metrics(global_df):
     print(f"Avg Inference Time:   {avg_inf:.4f} s")
     print(f"P95 Inference Time:   {p95_inf:.4f} s")
     print("-" * 20)
-    print(f"Avg Sigma (Uncertainty): {avg_sigma:.5f}")
+    print(f"Avg Uncertainty: {avg_sigma:.5f}")
+    print(f"P95 Uncertainty: {p95_sigma:.5f}")
     print("=" * 40)
 
 
