@@ -160,11 +160,11 @@ def main():
         print("\n❌ No valid saturation points found.")
         return
 
-    avg_val, p05_val = np.mean(results), np.percentile(results, 5)
+    avg_val = np.mean(results)
     print(
         "\n"
         + "=" * 45
-        + f"\nRecommended BASE_THRESHOLD: {avg_val:.2f}\nRecommended MIN_THRESHOLD:  {p05_val:.2f}\n"
+        + f"\nRecommended BASE_THRESHOLD: {avg_val:.2f}\n"
         + "=" * 45
     )
 
