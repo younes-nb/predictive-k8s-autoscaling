@@ -53,6 +53,12 @@ FEATURES: Dict[str, Dict[str, str]] = {
     "node_cpu_utilization": {"table": "node", "column": "cpu_utilization"},
     "node_memory_utilization": {"table": "node", "column": "memory_utilization"},
     "total_mcr": {"table": "msrtmcre", "column": "total_mcr"},
+    "providerrpc_rt": {"table": "msrtmcre", "column": "providerrpc_rt"},
+    "providerrpc_mcr": {"table": "msrtmcre", "column": "providerrpc_mcr"},
+    "http_rt": {"table": "msrtmcre", "column": "http_rt"},
+    "http_mcr": {"table": "msrtmcre", "column": "http_mcr"},
+    "providermq_rt": {"table": "msrtmcre", "column": "providermq_rt"},
+    "providermq_mcr": {"table": "msrtmcre", "column": "providermq_mcr"},
 }
 
 
@@ -80,6 +86,23 @@ FEATURE_SETS: Dict[str, Dict[str, Any]] = {
     },
     "cpu_mem_traffic": {
         "features": ["cpu_utilization", "memory_utilization", "total_mcr"],
+        "target": "cpu_utilization",
+        "base_table": "msresource",
+        "join_keys": {
+            "msresource": ["msname", "msinstanceid"],
+            "msrtmcre": ["msname", "msinstanceid"],
+        },
+    },
+    "threshold_analysis": {
+        "features": [
+            "cpu_utilization",
+            "providerrpc_rt",
+            "providerrpc_mcr",
+            "http_rt",
+            "http_mcr",
+            "providermq_rt",
+            "providermq_mcr",
+        ],
         "target": "cpu_utilization",
         "base_table": "msresource",
         "join_keys": {
