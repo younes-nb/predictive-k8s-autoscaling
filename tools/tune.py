@@ -64,7 +64,7 @@ val_ds = ShardedWindowsDataset(PATHS.WINDOWS_DIR, "val", PREPROCESSING.INPUT_LEN
 
 def objective(trial):
     hidden_size = trial.suggest_categorical("hidden_size", [128])
-    num_layers = trial.suggest_int("num_layers", 3) 
+    num_layers = trial.suggest_categorical("num_layers", [3])
     lr = trial.suggest_float("lr", 8e-4, 2e-3, log=True)
     dropout = trial.suggest_float("dropout", 0.25, 0.4)
     gamma = trial.suggest_float("gamma", 10.0, 50.0) 
