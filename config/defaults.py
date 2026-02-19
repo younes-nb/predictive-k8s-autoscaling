@@ -192,12 +192,12 @@ class PreprocessingDefaults:
 
 @dataclass(frozen=True)
 class TrainingDefaults:
-    HIDDEN_SIZE: int = 96
+    HIDDEN_SIZE: int = 128
     NUM_LAYERS: int = 3
-    DROPOUT: float = 0.4
+    DROPOUT: float = 0.3
     BATCH_SIZE: int = 512
     EPOCHS: int = 10
-    LR: float = 1e-3
+    LR: float = 0.00127
     GRAD_CLIP: float = 1.0
     WEIGHT_DECAY: float = 1e-4
     UNDER_PENALTY: float = 5.0
