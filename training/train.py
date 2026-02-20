@@ -142,10 +142,10 @@ def train(args):
 
         for batch in train_loader:
             if args.use_weights:
-                x, y, w = batch
+                x, y, sid, w = batch
                 w = w.to(device)
             else:
-                x, y = batch
+                x, y, sid = batch
                 w = None
 
             x, y = x.to(device), y.to(device)
@@ -167,7 +167,7 @@ def train(args):
         val_loss_accum = 0.0
         with torch.no_grad():
             for batch in val_loader:
-                x, y = batch
+                x, y, *_ = batch
                 x, y = x.to(device), y.to(device)
                 preds = model(x)
                 loss = nn.MSELoss()(preds, y)
