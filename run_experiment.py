@@ -132,7 +132,7 @@ def main():
                 compute_weights_script,
                 "--windows_dir",
                 args.windows_dir,
-                "--weight_mode",
+                "--theta_mode",
                 args.theta_mode,
                 "--theta_base",
                 str(TRAINING.THETA_BASE),
