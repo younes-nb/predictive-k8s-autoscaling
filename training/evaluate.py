@@ -101,7 +101,7 @@ def evaluate(args):
     logging.info(f"Test samples: {len(test_ds)}")
 
     if len(test_ds) > 0:
-        first_x, _ = test_ds[0]
+        first_x, *_ = test_ds[0]
         input_size = first_x.shape[-1] if first_x.ndim > 1 else 1
         logging.info(f"Inferred input_size={input_size} from dataset.")
     else:
@@ -136,7 +136,7 @@ def evaluate(args):
     start_time = time.time()
     total_batches = len(test_loader)
 
-    for i, (x, y) in enumerate(test_loader):
+    for i, (x, y, *_) in enumerate(test_loader):
         x, y = x.to(device), y.to(device)
 
         mu = forward_predict(model, x)
