@@ -45,7 +45,7 @@ class ShardedWindowsDataset(Dataset):
                 raise RuntimeError(f"Service IDs missing: {sid_path}")
 
             W = None
-            if self.use_weights and split == "train":
+            if self.use_weights and split != "test":
                 w_path = base + f"_w_{split}.npy"
                 if os.path.exists(w_path):
                     W = np.load(w_path, mmap_mode="r")
