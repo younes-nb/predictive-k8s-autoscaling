@@ -40,11 +40,18 @@ class WebsiteUser(FastHttpUser):
 
 
 class StatisticalLoadShape(LoadTestShape):
+    warmup_duration = 300
+    warmup_users = 20
+
     avg_users = 100
-    amplitude = 80
-    cycle_length = 3600
-    noise_factor = 0.1
-    time_limit = 3600
+    macro_amplitude = 60
+    macro_cycle = 1200
+
+    micro_amplitude = 40
+    micro_cycle = 180
+
+    noise_factor = 0.35
+    time_limit = 3900
 
     def tick(self):
         run_time = self.get_run_time()
@@ -52,14 +59,26 @@ class StatisticalLoadShape(LoadTestShape):
         if run_time > self.time_limit:
             return None
 
-        base_tick_users = self.avg_users + (
-            self.amplitude * math.sin(2 * math.pi * run_time / self.cycle_length)
+        if run_time < self.warmup_duration:
+            return (self.warmup_users, max(1, int(self.warmup_users / 5)))
+
+        test_time = run_time - self.warmup_duration
+
+        macro_trend = self.avg_users + (
+            self.macro_amplitude * math.sin(2 * math.pi * test_time / self.macro_cycle)
         )
 
-        std_dev = math.sqrt(max(1, base_tick_users)) * self.noise_factor
+        micro_trend = self.micro_amplitude * math.sin(
+            2 * math.pi * test_time / self.micro_cycle
+        )
+
+        base_tick_users = max(10, macro_trend + micro_trend)
+
+        std_dev = math.sqrt(base_tick_users) * self.noise_factor
         stochastic_users = int(random.gauss(base_tick_users, std_dev))
 
         final_user_count = max(1, stochastic_users)
-        spawn_rate = max(1, int(final_user_count / 10))
+
+        spawn_rate = max(1, int(final_user_count / 3))
 
         return (final_user_count, spawn_rate)
