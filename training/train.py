@@ -92,7 +92,11 @@ def train(args):
         args.windows_dir, "train", args.input_len, args.pred_horizon, args.use_weights
     )
     val_ds = ShardedWindowsDataset(
-        args.windows_dir, "val", args.input_len, args.pred_horizon, use_weights=False
+        args.windows_dir,
+        "val",
+        args.input_len,
+        args.pred_horizon,
+        use_weights=args.use_weights,
     )
 
     logging.info(f"Train samples: {len(train_ds)}")
@@ -123,7 +127,7 @@ def train(args):
         dropout=args.dropout,
         horizon=args.pred_horizon,
         rnn_type=args.rnn_type,
-        bidirectional=args.bidirectional
+        bidirectional=args.bidirectional,
     ).to(device)
 
     optimizer = torch.optim.Adam(
@@ -142,10 +146,10 @@ def train(args):
 
         for batch in train_loader:
             if args.use_weights:
-                x, y, sid, w = batch
+                x, y, _, w = batch
                 w = w.to(device)
             else:
-                x, y, sid = batch
+                x, y, _ = batch
                 w = None
 
             x, y = x.to(device), y.to(device)
@@ -167,10 +171,17 @@ def train(args):
         val_loss_accum = 0.0
         with torch.no_grad():
             for batch in val_loader:
-                x, y, *_ = batch
+                if args.use_weights:
+                    x, y, _, w = batch
+                    w = w.to(device)
+                else:
+                    x, y, _ = batch
+                    w = None
+
                 x, y = x.to(device), y.to(device)
                 preds = model(x)
-                loss = nn.MSELoss()(preds, y)
+
+                loss = weighted_mse(preds, y, w, under_penalty=args.under_penalty)
                 val_loss_accum += loss.item() * x.size(0)
 
         avg_val_loss = val_loss_accum / len(val_ds) if len(val_ds) > 0 else 0.0
@@ -233,7 +244,9 @@ if __name__ == "__main__":
     p.add_argument("--cpu", action="store_true")
     p.add_argument("--rnn_type", default="lstm")
     p.add_argument("--feature_set", default=PREPROCESSING.FEATURE_SET)
-    p.add_argument("--bidirectional", action="store_true", default=TRAINING.BIDIRECTIONAL)
+    p.add_argument(
+        "--bidirectional", action="store_true", default=TRAINING.BIDIRECTIONAL
+    )
 
     try:
         train(p.parse_args())

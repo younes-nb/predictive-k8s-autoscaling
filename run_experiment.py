@@ -127,7 +127,7 @@ def main():
 
         if args.use_weights:
             print(f"\n>>> Weights Enabled: Mode = {args.theta_mode} <<<")
-            cmd_weights = [
+            base_cmd_weights = [
                 sys.executable,
                 compute_weights_script,
                 "--windows_dir",
@@ -143,9 +143,17 @@ def main():
                 "--delta",
                 str(TRAINING.DELTA),
             ]
-            total_times["compute_weights"] = run(
-                cmd_weights, "Step 2a: Compute Boundary Weights"
+
+            t_train = run(
+                base_cmd_weights + ["--split", "train"],
+                "Step 2a: Compute Weights (TRAIN)",
             )
+
+            t_val = run(
+                base_cmd_weights + ["--split", "val"], "Step 2b: Compute Weights (VAL)"
+            )
+
+            total_times["compute_weights"] = t_train + t_val
 
         cmd_train = [
             sys.executable,
