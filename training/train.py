@@ -146,10 +146,10 @@ def train(args):
 
         for batch in train_loader:
             if args.use_weights:
-                x, y, sid, w = batch
+                x, y, w, _ = batch
                 w = w.to(device)
             else:
-                x, y, sid = batch
+                x, y, _ = batch
                 w = None
 
             x, y = x.to(device), y.to(device)
@@ -172,10 +172,10 @@ def train(args):
         with torch.no_grad():
             for batch in val_loader:
                 if args.use_weights:
-                    x, y, sid, w = batch
+                    x, y, w, _ = batch
                     w = w.to(device)
                 else:
-                    x, y, sid = batch
+                    x, y, _ = batch
                     w = None
 
                 x, y = x.to(device), y.to(device)
