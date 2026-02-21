@@ -34,7 +34,7 @@ class UserBehavior(TaskSet):
 
 class WebsiteUser(FastHttpUser):
     tasks = [UserBehavior]
-    
+
     def wait_time(self):
         return random.expovariate(1.0 / 3.0)
 
@@ -42,21 +42,24 @@ class WebsiteUser(FastHttpUser):
 class StatisticalLoadShape(LoadTestShape):
     avg_users = 100
     amplitude = 80
-    cycle_length = 3600 
-    noise_factor = 0.1 
+    cycle_length = 3600
+    noise_factor = 0.1
+    time_limit = 3600
 
     def tick(self):
         run_time = self.get_run_time()
+
+        if run_time > self.time_limit:
+            return None
 
         base_tick_users = self.avg_users + (
             self.amplitude * math.sin(2 * math.pi * run_time / self.cycle_length)
         )
 
-        std_dev = math.sqrt(base_tick_users) * self.noise_factor
+        std_dev = math.sqrt(max(1, base_tick_users)) * self.noise_factor
         stochastic_users = int(random.gauss(base_tick_users, std_dev))
 
         final_user_count = max(1, stochastic_users)
-
         spawn_rate = max(1, int(final_user_count / 10))
 
         return (final_user_count, spawn_rate)
