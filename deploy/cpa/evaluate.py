@@ -53,7 +53,7 @@ def main():
                 preds_tensor = (
                     raw_preds[0] if isinstance(raw_preds, tuple) else raw_preds
                 )
-                predicted_load_final = preds_tensor[-1].item()
+                predicted_load_final = preds_tensor[0, -1].item()
 
             if config.THRESHOLD_MODE == "static":
                 adaptive_threshold = config.BASE_THRESHOLD
