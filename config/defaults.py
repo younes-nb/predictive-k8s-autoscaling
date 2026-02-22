@@ -13,6 +13,8 @@ class Paths:
     PARQUET_NODE: str = "/dataset/parquet/node"
     RAW_MSRTMCRE: str = "/dataset/raw/msrtmcre"
     PARQUET_MSRTMCRE: str = "/dataset/parquet/msrtmcre"
+    PARQUET_THRESHOLD_MSRESOURCE: str = "/dataset/threshold/msresource"
+    PARQUET_THRESHOLD_MSRTMCRE: str = "/dataset/threshold/msrtmcre"
     WINDOWS_DIR: str = "/dataset/windows"
     MODELS_DIR: str = "/dataset/models"
     LOGS_DIR: str = "/proj/k8sautoscaledl-PG0/logs"

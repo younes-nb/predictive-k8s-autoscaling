@@ -21,9 +21,9 @@ def run_ingestion():
         {
             "table": "msresource",
             "raw": Paths.RAW_MSRESOURCE,
-            "out": Paths.PARQUET_MSRESOURCE,
+            "out": Paths.PARQUET_THRESHOLD_MSRESOURCE,
         },
-        {"table": "msrtmcre", "raw": Paths.RAW_MSRTMCRE, "out": Paths.PARQUET_MSRTMCRE},
+        {"table": "msrtmcre", "raw": Paths.RAW_MSRTMCRE, "out": Paths.PARQUET_THRESHOLD_MSRTMCRE},
     ]
 
     for task in tasks:
@@ -90,8 +90,8 @@ def main():
     if not args.skip_ingest:
         run_ingestion()
 
-    q_rt = pl.scan_parquet(Paths.PARQUET_MSRTMCRE)
-    q_cpu = pl.scan_parquet(Paths.PARQUET_MSRESOURCE)
+    q_rt = pl.scan_parquet(Paths.PARQUET_THRESHOLD_MSRTMCRE)
+    q_cpu = pl.scan_parquet(Paths.PARQUET_THRESHOLD_MSRESOURCE)
 
     ms_names = q_rt.select("msname").unique().collect().get_column("msname").to_list()
     selected_ms = (

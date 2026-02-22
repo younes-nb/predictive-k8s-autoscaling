@@ -23,9 +23,9 @@ def run_ingestion():
         {
             "table": "msresource",
             "raw": Paths.RAW_MSRESOURCE,
-            "out": Paths.PARQUET_MSRESOURCE,
+            "out": Paths.PARQUET_THRESHOLD_MSRESOURCE,
         },
-        {"table": "msrtmcre", "raw": Paths.RAW_MSRTMCRE, "out": Paths.PARQUET_MSRTMCRE},
+        {"table": "msrtmcre", "raw": Paths.RAW_MSRTMCRE, "out": Paths.PARQUET_THRESHOLD_MSRTMCRE},
     ]
 
     for task in tasks:
@@ -105,8 +105,8 @@ def main():
     parser = argparse.ArgumentParser(
         description="Empirical Saturation Analysis with Auto-Ingest"
     )
-    parser.add_argument("--rt_mcr", type=str, default=Paths.PARQUET_MSRTMCRE)
-    parser.add_argument("--cpu", type=str, default=Paths.PARQUET_MSRESOURCE)
+    parser.add_argument("--rt_mcr", type=str, default=Paths.PARQUET_THRESHOLD_MSRTMCRE)
+    parser.add_argument("--cpu", type=str, default=Paths.PARQUET_THRESHOLD_MSRESOURCE)
     parser.add_argument("--count", type=int, default=None)
     parser.add_argument("--out", type=str, default="threshold_distribution.png")
     parser.add_argument(
