@@ -84,22 +84,36 @@ def get_base_threshold_for_ms(df_ms):
 
     analysis_data = (
         df_ms.group_by("cpu_bin")
-        .agg(pl.col("agg_rt").quantile(0.95).alias("p95_rt"))
+        .agg([
+            pl.col("agg_rt").quantile(0.95).alias("p95_rt"),
+            pl.len().alias("sample_count")
+        ])
+        .filter(pl.col("sample_count") >= 10)
         .sort("cpu_bin")
     )
+    
     x, y = analysis_data["cpu_bin"].to_numpy(), analysis_data["p95_rt"].to_numpy()
 
     if len(x) < 5:
         return None
 
     try:
-        kneedle = KneeLocator(x, y, S=1.0, curve="convex", direction="increasing")
+        kneedle = KneeLocator(
+            x, y, 
+            S=3.0,
+            curve="convex", 
+            direction="increasing",
+            interp_method="polynomial"
+        )
+        
         if kneedle.knee:
-            return round(kneedle.knee - 0.05, 2)
-    except:
+            actual_knee = max(kneedle.knee, 0.40)
+            return round(actual_knee, 2)
+    except Exception as e:
+        print(f"Knee detection failed: {e}")
         pass
+        
     return None
-
 
 def main():
     parser = argparse.ArgumentParser(
