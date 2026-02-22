@@ -21,23 +21,21 @@ from training.evaluate import setup_logging
 
 @torch.no_grad()
 def main():
-    p = argparse.ArgumentParser(
-        description="Residual Calibration for Deterministic RNN"
-    )
+    p = argparse.ArgumentParser(description="MC Dropout K-Factor Calibration")
     p.add_argument("--windows_dir", required=True)
     p.add_argument("--checkpoint_path", required=True)
-    p.add_argument("--batch_size", type=int, default=TRAINING.BATCH_SIZE)
-    p.add_argument("--num_workers", type=int, default=TRAINING.NUM_WORKERS)
-    p.add_argument("--cpu", action="store_true")
-    p.add_argument("--coverage", type=float, default=0.95)
-    p.add_argument("--out", type=str, default="k_factor_analysis.png")
+    p.add_argument("--batch_size", type=int, default=1)  # Small batch for MC repeats
+    p.add_argument(
+        "--coverage", type=float, default=0.95, help="Target confidence (e.g. 0.95)"
+    )
+    p.add_argument(
+        "--mc_repeats", type=int, default=25, help="Must match deployment config"
+    )
+    p.add_argument("--out", type=str, default="k_mc_calibration.png")
 
     args = p.parse_args()
-    setup_logging("k_factor_calc")
-
-    device = torch.device(
-        "cuda" if torch.cuda.is_available() and not args.cpu else "cpu"
-    )
+    setup_logging("k_mc_calibration")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     checkpoint = torch.load(args.checkpoint_path, map_location=device)
     ckpt_args = checkpoint.get("args", {})
@@ -48,58 +46,58 @@ def main():
         ckpt_args.get("input_len", 60),
         ckpt_args.get("pred_horizon", 5),
     )
-    first_x, _ = test_ds[0]
-    input_size = first_x.shape[-1] if first_x.ndim > 1 else 1
 
     model = RNNForecaster(
-        input_size=input_size,
-        hidden_size=ckpt_args.get("hidden_size", TRAINING.HIDDEN_SIZE),
-        num_layers=ckpt_args.get("num_layers", TRAINING.NUM_LAYERS),
-        dropout=ckpt_args.get("dropout", TRAINING.DROPOUT),
+        input_size=ckpt_args.get("input_size", 1),
+        hidden_size=ckpt_args.get("hidden_size", 128),
+        num_layers=ckpt_args.get("num_layers", 3),
+        dropout=ckpt_args.get("dropout", 0.3),
         horizon=ckpt_args.get("pred_horizon", 5),
-        rnn_type=ckpt_args.get("rnn_type", "lstm"),
-        bidirectional=ckpt_args.get("bidirectional", TRAINING.BIDIRECTIONAL),
     ).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
-    model.eval()
 
-    test_loader = DataLoader(
-        test_ds, batch_size=args.batch_size, num_workers=args.num_workers
+    model.train()
+
+    test_loader = DataLoader(test_ds, batch_size=1)
+
+    z_scores = []
+
+    logging.info(
+        f"Calibrating K using {args.mc_repeats} MC passes on {len(test_ds)} samples..."
     )
 
-    all_y_true = []
-    all_y_pred = []
+    for i, (x, y) in enumerate(test_loader):
+        x = x.to(device)
+        y_true = y[0, -1].item()
 
-    logging.info(f"Running inference for K-calibration on {len(test_ds)} samples...")
-    for x, y in test_loader:
-        x, y = x.to(device), y.to(device)
-        mu = model(x)
+        x_repeated = x.repeat(args.mc_repeats, 1, 1)
 
-        all_y_true.append(y.cpu().numpy().flatten())
-        all_y_pred.append(mu.cpu().numpy().flatten())
+        preds = model(x_repeated)
 
-    y_true = np.concatenate(all_y_true)
-    y_pred = np.concatenate(all_y_pred)
+        final_step_preds = preds[:, -1].cpu().numpy()
 
-    residuals = y_true - y_pred
-    abs_residuals = np.abs(residuals)
+        mu_mc = np.mean(final_step_preds)
+        sigma_mc = np.std(final_step_preds)
 
-    rmse = np.sqrt(np.mean(residuals**2))
+        error = np.abs(y_true - mu_mc)
 
-    z_scores = abs_residuals / (rmse + 1e-6)
+        if sigma_mc > 1e-6:
+            z = error / sigma_mc
+            z_scores.append(z)
+
+        if i % 100 == 0:
+            logging.info(f"Processed {i}/{len(test_ds)} samples...")
 
     k_emp = np.percentile(z_scores, args.coverage * 100)
-
     k_theory = norm.ppf(1 - (1 - args.coverage) / 2)
 
     logging.info("\n" + "=" * 45)
-    logging.info("🛡️  K-FACTOR CALIBRATION RESULTS")
+    logging.info("🛡️  MC DROPOUT K-CALIBRATION RESULTS")
     logging.info("=" * 45)
-    logging.info(f"Model RMSE (Global Sigma): {rmse:.6f}")
-    logging.info(f"Empirical K-Factor:        {k_emp:.4f}")
-    logging.info(f"Theoretical K (Normal):    {k_theory:.4f}")
-    logging.info("-" * 45)
-    logging.info(f"Final Coverage Margin:     ±{k_emp:.2f} * RMSE")
+    logging.info(f"Target Coverage:       {args.coverage*100}%")
+    logging.info(f"Empirical K-Factor:    {k_emp:.4f}")
+    logging.info(f"Theoretical K (Norm):  {k_theory:.4f}")
+    logging.info(f"Usage: Thr = Base - ({k_emp:.2f} * sigma_mc)")
     logging.info("=" * 45)
 
     plt.figure(figsize=(10, 6))
@@ -108,23 +106,19 @@ def main():
         bins=100,
         density=True,
         alpha=0.7,
-        color="teal",
-        label="Empirical standardized residuals",
+        color="royalblue",
+        label="Empirical Z-scores ($|Error| / \sigma_{MC}$)",
     )
-
-    x_plot = np.linspace(0, max(6, k_emp + 1), 200)
-    plt.plot(
-        x_plot, 2 * norm.pdf(x_plot, 0, 1), "r--", lw=2, label="Theoretical Half-Normal"
+    plt.axvline(
+        k_emp, color="orange", linestyle="--", lw=3, label=f"Calibrated K={k_emp:.2f}"
     )
-
-    plt.axvline(k_emp, color="gold", lw=3, label=f"Empirical K ({k_emp:.2f})")
-    plt.title(f"Residual Distribution Calibration (Target: {args.coverage*100}%)")
-    plt.xlabel("Z-score (|Error| / RMSE)")
+    plt.title(f"Standardized Residuals via MC Dropout ({args.coverage*100}% Coverage)")
+    plt.xlabel("Z-Score")
     plt.ylabel("Density")
     plt.legend()
-    plt.grid(alpha=0.2)
+    plt.grid(alpha=0.3)
     plt.savefig(args.out)
-    logging.info(f"Calibration plot saved to {args.out}")
+    logging.info(f"Plot saved to {args.out}")
 
 
 if __name__ == "__main__":
