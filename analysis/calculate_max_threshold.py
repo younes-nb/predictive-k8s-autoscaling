@@ -25,7 +25,11 @@ def run_ingestion():
             "raw": Paths.RAW_MSRESOURCE,
             "out": Paths.PARQUET_THRESHOLD_MSRESOURCE,
         },
-        {"table": "msrtmcre", "raw": Paths.RAW_MSRTMCRE, "out": Paths.PARQUET_THRESHOLD_MSRTMCRE},
+        {
+            "table": "msrtmcre",
+            "raw": Paths.RAW_MSRTMCRE,
+            "out": Paths.PARQUET_THRESHOLD_MSRTMCRE,
+        },
     ]
 
     for task in tasks:
@@ -84,36 +88,47 @@ def get_base_threshold_for_ms(df_ms):
 
     analysis_data = (
         df_ms.group_by("cpu_bin")
-        .agg([
-            pl.col("agg_rt").quantile(0.95).alias("p95_rt"),
-            pl.len().alias("sample_count")
-        ])
+        .agg(
+            [
+                pl.col("agg_rt").quantile(0.95).alias("p95_rt"),
+                pl.len().alias("sample_count"),
+            ]
+        )
         .filter(pl.col("sample_count") >= 10)
         .sort("cpu_bin")
     )
-    
+
     x, y = analysis_data["cpu_bin"].to_numpy(), analysis_data["p95_rt"].to_numpy()
 
     if len(x) < 5:
         return None
 
+    baseline_rt = np.mean(y[:3]) if len(y) >= 3 else y[0]
+    max_rt = np.max(y)
+
+    if max_rt < (baseline_rt * 1.5):
+        return None
+
+    window = 3
+    if len(y) >= window:
+        y_smoothed = np.convolve(y, np.ones(window) / window, mode="valid")
+        x_smoothed = x[window - 1 :]
+    else:
+        y_smoothed, x_smoothed = y, x
+
     try:
         kneedle = KneeLocator(
-            x, y, 
-            S=3.0,
-            curve="convex", 
-            direction="increasing",
-            interp_method="polynomial"
+            x_smoothed, y_smoothed, S=1.0, curve="convex", direction="increasing"
         )
-        
+
         if kneedle.knee:
-            actual_knee = max(kneedle.knee, 0.40)
-            return round(actual_knee, 2)
+            return round(kneedle.knee, 2)
+
     except Exception as e:
-        print(f"Knee detection failed: {e}")
         pass
-        
+
     return None
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -158,34 +173,57 @@ def main():
     )
 
     results = []
+    skipped_count = 0
+
     for i, name in enumerate(selected_ms):
-        print(f"[{i+1}/{len(selected_ms)}] Processing {name}...", end="\r")
+        print(f"[{i+1}/{len(selected_ms)}] Processing {name}... ", end="")
         ms_cpu = q_cpu.filter(pl.col("msname") == name)
         ms_rt = q_rt.filter(pl.col("msname") == name)
         combined = ms_rt.join(
             ms_cpu, on=["timestamp", "msinstanceid", "msname"]
         ).collect()
+
         if not combined.is_empty():
             threshold = get_base_threshold_for_ms(combined)
             if threshold:
                 results.append(threshold)
+                print(f"Found threshold: {threshold:.2f}")
+            else:
+                skipped_count += 1
+                print("Skipped (no clear saturation)")
+        else:
+            print("Skipped (empty data)")
 
     if not results:
         print("\n❌ No valid saturation points found.")
         return
 
     avg_val = np.mean(results)
-    print(
-        "\n"
-        + "=" * 45
-        + f"\nRecommended BASE_THRESHOLD: {avg_val:.2f}\n"
-        + "=" * 45
-    )
+
+    print("\n" + "=" * 45)
+    print("📊 SATURATION ANALYSIS RESULTS")
+    print("=" * 45)
+    print(f"Total Processed: {len(selected_ms)}")
+    print(f"Successfully Calibrated: {len(results)}")
+    print(f"Skipped (No Saturation): {skipped_count}")
+    print("-" * 45)
+    print(f"Recommended MAX_THRESHOLD: {avg_val:.2f}")
+    print("=" * 45)
 
     plt.figure(figsize=(10, 6))
     plt.hist(results, bins=20, color="skyblue", edgecolor="black", alpha=0.7)
-    plt.axvline(avg_val, color="red", linestyle="dashed", label=f"Mean ({avg_val:.2f})")
+    plt.axvline(
+        avg_val,
+        color="red",
+        linestyle="dashed",
+        label=f"Mean Saturation ({avg_val:.2f})",
+    )
+
     plt.title("Distribution of Optimal CPU Thresholds")
+    plt.xlabel("CPU Utilization Threshold (Ratio)")
+    plt.ylabel("Number of Microservices")
+
+    plt.legend()
     plt.savefig(args.out)
 
 
