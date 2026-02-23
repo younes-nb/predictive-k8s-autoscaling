@@ -16,44 +16,6 @@ if REPO_ROOT not in sys.path:
 from config.defaults import Paths
 
 
-def run_ingestion():
-    ingest_script = os.path.join(REPO_ROOT, "preprocessing", "ingest_traces_parquet.py")
-
-    tasks = [
-        {
-            "table": "msresource",
-            "raw": Paths.RAW_MSRESOURCE,
-            "out": Paths.PARQUET_THRESHOLD_MSRESOURCE,
-        },
-        {
-            "table": "msrtmcre",
-            "raw": Paths.RAW_MSRTMCRE,
-            "out": Paths.PARQUET_THRESHOLD_MSRTMCRE,
-        },
-    ]
-
-    for task in tasks:
-        print(f"🛠  Running Ingestion for {task['table']}...")
-        cmd = [
-            sys.executable,
-            ingest_script,
-            "--table",
-            task["table"],
-            "--feature_set",
-            "threshold_analysis",
-            "--raw_dir",
-            task["raw"],
-            "--out_dir",
-            task["out"],
-        ]
-
-        result = subprocess.run(cmd, capture_output=False)
-        if result.returncode != 0:
-            print(f"❌ Ingestion failed for {task['table']}. Exiting.")
-            sys.exit(1)
-    print("✅ Ingestion complete.\n")
-
-
 def get_base_threshold_for_ms(df_ms):
     if df_ms["cpu_utilization"].max() > 1.0:
         df_ms = df_ms.with_columns(pl.col("cpu_utilization") / 100.0)
@@ -77,7 +39,7 @@ def get_base_threshold_for_ms(df_ms):
 
     df_ms = df_ms.filter(pl.col("total_mcr") > 0)
     if df_ms.height == 0:
-        return None
+        return None, None
 
     df_ms = df_ms.with_columns(
         (pl.col("weighted_rt_sum") / pl.col("total_mcr")).alias("agg_rt")
@@ -99,74 +61,43 @@ def get_base_threshold_for_ms(df_ms):
     )
 
     x, y = analysis_data["cpu_bin"].to_numpy(), analysis_data["p95_rt"].to_numpy()
-
     if len(x) < 5:
-        return None
+        return None, None
 
     baseline_rt = np.mean(y[:3]) if len(y) >= 3 else y[0]
-    max_rt = np.max(y)
-
-    if max_rt < (baseline_rt * 1.5):
-        return None
+    if np.max(y) < (baseline_rt * 1.5):
+        return None, None
 
     window = 3
-    if len(y) >= window:
-        y_smoothed = np.convolve(y, np.ones(window) / window, mode="valid")
-        x_smoothed = x[window - 1 :]
-    else:
-        y_smoothed, x_smoothed = y, x
+    y_smoothed = (
+        np.convolve(y, np.ones(window) / window, mode="valid")
+        if len(y) >= window
+        else y
+    )
+    x_smoothed = x[window - 1 :] if len(y) >= window else x
 
     try:
         kneedle = KneeLocator(
             x_smoothed, y_smoothed, S=1.0, curve="convex", direction="increasing"
         )
-
         if kneedle.knee:
-            if kneedle.knee < 0.50:
-                return None
-
-            return round(kneedle.knee, 2)
-
-    except Exception as e:
+            val = round(kneedle.knee, 2)
+            if 0.50 <= val <= 0.95:
+                return val, {"x": x, "y": y, "knee": val}
+    except:
         pass
-
-    return None
+    return None, None
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Empirical Saturation Analysis with Auto-Ingest"
-    )
-    parser.add_argument("--rt_mcr", type=str, default=Paths.PARQUET_THRESHOLD_MSRTMCRE)
-    parser.add_argument("--cpu", type=str, default=Paths.PARQUET_THRESHOLD_MSRESOURCE)
+    parser = argparse.ArgumentParser()
     parser.add_argument("--count", type=int, default=None)
-    parser.add_argument("--out", type=str, default="threshold_distribution.png")
-    parser.add_argument(
-        "--skip_ingest", action="store_true", help="Skip the preprocessing/ingest step"
-    )
-
+    parser.add_argument("--skip_ingest", action="store_true")
     args = parser.parse_args()
 
-    if not args.skip_ingest:
-        run_ingestion()
-    else:
-        print("⏭  Skipping ingest step as requested.")
-
     print("🚀 Initializing Lazy DataFrames...")
-    try:
-        q_rt = (
-            pl.scan_parquet(args.rt_mcr)
-            if not args.rt_mcr.endswith(".csv")
-            else pl.scan_csv(args.rt_mcr)
-        )
-        q_cpu = (
-            pl.scan_parquet(args.cpu)
-            if not args.cpu.endswith(".csv")
-            else pl.scan_csv(args.cpu)
-        )
-    except Exception as e:
-        print(f"❌ Error loading data: {e}")
-        sys.exit(1)
+    q_rt = pl.scan_parquet(Paths.PARQUET_THRESHOLD_MSRTMCRE)
+    q_cpu = pl.scan_parquet(Paths.PARQUET_THRESHOLD_MSRESOURCE)
 
     ms_names = q_rt.select("msname").unique().collect().get_column("msname").to_list()
     selected_ms = (
@@ -175,8 +106,7 @@ def main():
         else ms_names
     )
 
-    results = []
-    skipped_count = 0
+    results_data = []
 
     for i, name in enumerate(selected_ms):
         print(f"[{i+1}/{len(selected_ms)}] Processing {name}... ", end="")
@@ -187,47 +117,58 @@ def main():
         ).collect()
 
         if not combined.is_empty():
-            threshold = get_base_threshold_for_ms(combined)
+            threshold, plot_info = get_base_threshold_for_ms(combined)
             if threshold:
-                results.append(threshold)
-                print(f"Found threshold: {threshold:.2f}")
+                results_data.append(
+                    {"name": name, "threshold": threshold, "plot": plot_info}
+                )
+                print(f"✅ Found: {threshold}")
             else:
-                skipped_count += 1
-                print("Skipped (no clear saturation)")
+                print("Skipped")
         else:
-            print("Skipped (empty data)")
+            print("Empty")
 
-    if not results:
-        print("\n❌ No valid saturation points found.")
+    if not results_data:
+        print("No results.")
         return
 
-    avg_val = np.mean(results)
+    thresholds = [r["threshold"] for r in results_data]
+    avg_val = np.mean(thresholds)
 
-    print("\n" + "=" * 45)
-    print("📊 SATURATION ANALYSIS RESULTS")
-    print("=" * 45)
-    print(f"Total Processed: {len(selected_ms)}")
-    print(f"Successfully Calibrated: {len(results)}")
-    print(f"Skipped (No Saturation): {skipped_count}")
-    print("-" * 45)
-    print(f"Recommended MAX_THRESHOLD: {avg_val:.2f}")
-    print("=" * 45)
+    min_case = min(results_data, key=lambda x: x["threshold"])
+    max_case = max(results_data, key=lambda x: x["threshold"])
+    avg_case = min(results_data, key=lambda x: abs(x["threshold"] - avg_val))
+
+    print(f"\nRecommended MAX_THRESHOLD: {avg_val:.2f}")
+
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    cases = [
+        (min_case, "Lowest Threshold"),
+        (avg_case, "Average Threshold"),
+        (max_case, "Highest Threshold"),
+    ]
+
+    for ax, (case, title) in zip(axes, cases):
+        d = case["plot"]
+        ax.plot(
+            d["x"], d["y"], marker="o", linestyle="-", alpha=0.6, label="P95 Latency"
+        )
+        ax.axvline(d["knee"], color="red", linestyle="--", label=f"Knee: {d['knee']}")
+        ax.set_title(f"{title}\n{case['name']}")
+        ax.set_xlabel("CPU Utilization")
+        ax.set_ylabel("Latency (ms)")
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig("saturation_examples.png")
+    print("📊 Example curves saved to saturation_examples.png")
 
     plt.figure(figsize=(10, 6))
-    plt.hist(results, bins=20, color="skyblue", edgecolor="black", alpha=0.7)
-    plt.axvline(
-        avg_val,
-        color="red",
-        linestyle="dashed",
-        label=f"Mean Saturation ({avg_val:.2f})",
-    )
-
+    plt.hist(thresholds, bins=20, color="skyblue", edgecolor="black")
+    plt.axvline(avg_val, color="red", linestyle="dashed", label=f"Mean: {avg_val:.2f}")
     plt.title("Distribution of Optimal CPU Thresholds")
-    plt.xlabel("CPU Utilization Threshold (Ratio)")
-    plt.ylabel("Number of Microservices")
-
-    plt.legend()
-    plt.savefig(args.out)
+    plt.savefig("threshold_distribution.png")
 
 
 if __name__ == "__main__":
