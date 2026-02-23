@@ -45,7 +45,6 @@ def get_base_threshold_for_ms(df_ms):
     df_ms = df_ms.with_columns(
         (pl.col("weighted_rt_sum") / pl.col("total_mcr")).alias("agg_rt")
     )
-
     df_ms = df_ms.with_columns((pl.col("cpu_utilization") * 100).round(0) / 100).rename(
         {"cpu_utilization": "cpu_bin"}
     )
@@ -66,22 +65,25 @@ def get_base_threshold_for_ms(df_ms):
     if len(x) < 7:
         return None, None
 
-    baseline_rt = np.mean(y[:3]) if len(y) >= 3 else y[0]
-    if np.max(y) < (baseline_rt * 2.0):
+    baseline_rt = np.mean(y[:3])
+    if np.max(y) < (baseline_rt * 1.5):
         return None, None
 
     y_filtered = medfilt(y, kernel_size=3)
 
+    y_min, y_max = np.min(y_filtered), np.max(y_filtered)
+    y_norm = (y_filtered - y_min) / (y_max - y_min) if y_max > y_min else y_filtered
+
     window = 5
-    if len(y_filtered) >= window:
-        y_smoothed = np.convolve(y_filtered, np.ones(window) / window, mode="valid")
+    if len(y_norm) >= window:
+        y_smoothed = np.convolve(y_norm, np.ones(window) / window, mode="valid")
         x_smoothed = x[window - 1 :]
     else:
-        y_smoothed, x_smoothed = y_filtered, x
+        y_smoothed, x_smoothed = y_norm, x
 
     try:
         kneedle = KneeLocator(
-            x_smoothed, y_smoothed, S=2.0, curve="convex", direction="increasing"
+            x_smoothed, y_smoothed, S=1.0, curve="convex", direction="increasing"
         )
 
         if kneedle.knee:
@@ -95,22 +97,14 @@ def get_base_threshold_for_ms(df_ms):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Stricter Saturation Analysis")
-    parser.add_argument(
-        "--count", type=int, default=None, help="Number of services to sample"
-    )
-    parser.add_argument(
-        "--skip_ingest", action="store_true", help="Skip the preprocessing step"
-    )
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--count", type=int, default=None)
+    parser.add_argument("--skip_ingest", action="store_true")
     args = parser.parse_args()
 
     print("🚀 Initializing Lazy DataFrames...")
-    try:
-        q_rt = pl.scan_parquet(Paths.PARQUET_THRESHOLD_MSRTMCRE)
-        q_cpu = pl.scan_parquet(Paths.PARQUET_THRESHOLD_MSRESOURCE)
-    except Exception as e:
-        print(f"❌ Error loading data: {e}")
-        sys.exit(1)
+    q_rt = pl.scan_parquet(Paths.PARQUET_THRESHOLD_MSRTMCRE)
+    q_cpu = pl.scan_parquet(Paths.PARQUET_THRESHOLD_MSRESOURCE)
 
     ms_names = q_rt.select("msname").unique().collect().get_column("msname").to_list()
     selected_ms = (
@@ -120,15 +114,17 @@ def main():
     )
 
     results_data = []
-    skipped_count = 0
 
     for i, name in enumerate(selected_ms):
         print(f"[{i+1}/{len(selected_ms)}] Processing {name}... ", end="")
-        ms_cpu = q_cpu.filter(pl.col("msname") == name)
-        ms_rt = q_rt.filter(pl.col("msname") == name)
-        combined = ms_rt.join(
-            ms_cpu, on=["timestamp", "msinstanceid", "msname"]
-        ).collect()
+        combined = (
+            q_rt.filter(pl.col("msname") == name)
+            .join(
+                q_cpu.filter(pl.col("msname") == name),
+                on=["timestamp", "msinstanceid", "msname"],
+            )
+            .collect()
+        )
 
         if not combined.is_empty():
             threshold, plot_info = get_base_threshold_for_ms(combined)
@@ -136,15 +132,14 @@ def main():
                 results_data.append(
                     {"name": name, "threshold": threshold, "plot": plot_info}
                 )
-                print(f"✅ Found knee at: {threshold}")
+                print(f"✅ Knee at: {threshold}")
             else:
-                skipped_count += 1
-                print("Skipped (insufficient saturation/noisy)")
+                print("Skipped")
         else:
-            print("Skipped (empty data)")
+            print("Empty")
 
     if not results_data:
-        print("\n❌ No valid saturation points found after applying filters.")
+        print("\n❌ No valid knees found.")
         return
 
     thresholds = [r["threshold"] for r in results_data]
@@ -154,64 +149,24 @@ def main():
     max_case = max(results_data, key=lambda x: x["threshold"])
     avg_case = min(results_data, key=lambda x: abs(x["threshold"] - avg_val))
 
-    print("\n" + "=" * 45)
-    print("📊 REFINED SATURATION RESULTS")
-    print("=" * 45)
-    print(f"Total Processed: {len(selected_ms)}")
-    print(f"Successfully Calibrated: {len(results_data)}")
-    print(f"Skipped/Filtered Out: {skipped_count}")
-    print("-" * 45)
-    print(f"Recommended MAX_THRESHOLD: {avg_val:.2f}")
-    print("=" * 45)
-
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
-    cases = [
-        (min_case, "Lowest Saturation Point"),
-        (avg_case, "Average Saturation Point"),
-        (max_case, "Highest Saturation Point"),
-    ]
-
-    for ax, (case, title) in zip(axes, cases):
+    for ax, (case, title) in zip(
+        axes, [(min_case, "Low"), (avg_case, "Avg"), (max_case, "High")]
+    ):
         d = case["plot"]
-        ax.plot(
-            d["x"],
-            d["y"],
-            marker="o",
-            linestyle="-",
-            color="#3498db",
-            alpha=0.5,
-            label="Raw P95 RT",
-        )
-        ax.axvline(
-            d["knee"],
-            color="#e74c3c",
-            linestyle="--",
-            linewidth=2,
-            label=f"Knee: {d['knee']}",
-        )
-        ax.set_title(f"{title}\n{case['name']}")
-        ax.set_xlabel("CPU Utilization (Ratio)")
-        ax.set_ylabel("Latency (ms)")
+        ax.plot(d["x"], d["y"], "o-", alpha=0.4, label="Raw P95 RT")
+        ax.axvline(d["knee"], color="red", linestyle="--", label=f"Knee: {d['knee']}")
+        ax.set_title(f"{title} Threshold: {case['name']}")
         ax.legend()
-        ax.grid(True, alpha=0.3)
 
     plt.tight_layout()
     plt.savefig("saturation_examples.png")
 
     plt.figure(figsize=(10, 6))
-    plt.hist(thresholds, bins=15, color="skyblue", edgecolor="black", alpha=0.7)
-    plt.axvline(
-        avg_val, color="red", linestyle="dashed", label=f"Global Mean: {avg_val:.2f}"
-    )
-    plt.title("Distribution of Valid CPU Saturation Thresholds")
-    plt.xlabel("CPU Threshold (Ratio)")
-    plt.ylabel("Microservice Count")
-    plt.legend()
+    plt.hist(thresholds, bins=15, color="skyblue", edgecolor="black")
+    plt.axvline(avg_val, color="red", linestyle="--", label=f"Mean: {avg_val:.2f}")
+    plt.title("Distribution of Detected Knees")
     plt.savefig("threshold_distribution.png")
-
-    print(
-        "📈 Visuals saved to 'saturation_examples.png' and 'threshold_distribution.png'"
-    )
 
 
 if __name__ == "__main__":
