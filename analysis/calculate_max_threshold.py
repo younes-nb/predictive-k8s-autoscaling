@@ -122,6 +122,9 @@ def get_base_threshold_for_ms(df_ms):
         )
 
         if kneedle.knee:
+            if kneedle.knee < 0.50:
+                return None
+
             return round(kneedle.knee, 2)
 
     except Exception as e:
