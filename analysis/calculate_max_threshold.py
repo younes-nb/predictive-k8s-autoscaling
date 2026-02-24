@@ -71,8 +71,10 @@ def get_base_threshold_for_ms(df_ms):
 
     y_filtered = medfilt(y, kernel_size=3)
 
-    y_min, y_max = np.min(y_filtered), np.max(y_filtered)
-    y_norm = (y_filtered - y_min) / (y_max - y_min) if y_max > y_min else y_filtered
+    y_monotonic = np.maximum.accumulate(y_filtered)
+
+    y_min, y_max = np.min(y_monotonic), np.max(y_monotonic)
+    y_norm = (y_monotonic - y_min) / (y_max - y_min) if y_max > y_min else y_monotonic
 
     window = 5
     if len(y_norm) >= window:
@@ -88,7 +90,7 @@ def get_base_threshold_for_ms(df_ms):
 
         if kneedle.knee:
             val = round(kneedle.knee, 2)
-            if 0.50 <= val <= 0.95:
+            if 0.40 <= val <= 0.95:
                 return val, {"x": x, "y": y, "knee": val}
     except:
         pass
@@ -114,6 +116,7 @@ def main():
     )
 
     results_data = []
+    skipped_count = 0
 
     for i, name in enumerate(selected_ms):
         print(f"[{i+1}/{len(selected_ms)}] Processing {name}... ", end="")
@@ -134,9 +137,11 @@ def main():
                 )
                 print(f"✅ Knee at: {threshold}")
             else:
-                print("Skipped")
+                skipped_count += 1
+                print("Skipped (Invalid Curve)")
         else:
-            print("Empty")
+            skipped_count += 1
+            print("Empty Data")
 
     if not results_data:
         print("\n❌ No valid knees found.")
@@ -144,6 +149,16 @@ def main():
 
     thresholds = [r["threshold"] for r in results_data]
     avg_val = np.mean(thresholds)
+
+    print("\n" + "=" * 45)
+    print("📊 REFINED SATURATION RESULTS")
+    print("=" * 45)
+    print(f"Total Processed: {len(selected_ms)}")
+    print(f"Successfully Calibrated: {len(results_data)}")
+    print(f"Skipped/Filtered Out: {skipped_count}")
+    print("-" * 45)
+    print(f"Recommended MAX_THRESHOLD: {avg_val:.2f}")
+    print("=" * 45)
 
     min_case = min(results_data, key=lambda x: x["threshold"])
     max_case = max(results_data, key=lambda x: x["threshold"])
@@ -155,17 +170,31 @@ def main():
     ):
         d = case["plot"]
         ax.plot(d["x"], d["y"], "o-", alpha=0.4, label="Raw P95 RT")
-        ax.axvline(d["knee"], color="red", linestyle="--", label=f"Knee: {d['knee']}")
+        ax.axvline(
+            d["knee"],
+            color="red",
+            linestyle="--",
+            linewidth=2,
+            label=f"Knee: {d['knee']}",
+        )
         ax.set_title(f"{title} Threshold: {case['name']}")
+        ax.set_xlabel("CPU Utilization")
+        ax.set_ylabel("Latency (ms)")
+        ax.grid(True, alpha=0.3)
         ax.legend()
 
     plt.tight_layout()
     plt.savefig("saturation_examples.png")
 
     plt.figure(figsize=(10, 6))
-    plt.hist(thresholds, bins=15, color="skyblue", edgecolor="black")
-    plt.axvline(avg_val, color="red", linestyle="--", label=f"Mean: {avg_val:.2f}")
-    plt.title("Distribution of Detected Knees")
+    plt.hist(thresholds, bins=20, color="skyblue", edgecolor="black", alpha=0.8)
+    plt.axvline(
+        avg_val, color="red", linestyle="--", linewidth=2, label=f"Mean: {avg_val:.2f}"
+    )
+    plt.title("Distribution of Detected CPU Saturation Knees")
+    plt.xlabel("CPU Threshold")
+    plt.ylabel("Count")
+    plt.legend()
     plt.savefig("threshold_distribution.png")
 
 
