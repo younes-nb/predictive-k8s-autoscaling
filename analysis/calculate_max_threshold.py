@@ -2,10 +2,10 @@ import os
 import random
 import argparse
 import sys
-import subprocess
 import polars as pl
 import numpy as np
 import matplotlib.pyplot as plt
+from scipy.signal import medfilt
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, os.pardir))
@@ -74,20 +74,21 @@ def get_base_threshold_for_ms(df_ms):
     if np.max(y) < degradation_threshold:
         return None, None
 
+    y_smoothed = medfilt(y, kernel_size=3)
     breach_count = 0
-    required_consecutive_breaches = 2
+    required_consecutive_breaches = 4
 
     for i in range(len(x)):
-        if x[i] < 0.20:
+        if x[i] < 0.50:
             continue
 
-        if y[i] >= degradation_threshold:
+        if y_smoothed[i] >= degradation_threshold:
             breach_count += 1
             if breach_count >= required_consecutive_breaches:
                 knee_idx = i - required_consecutive_breaches + 1
                 val = round(x[knee_idx], 2)
 
-                if 0.30 <= val <= 0.95:
+                if y[knee_idx] >= degradation_threshold and 0.50 <= val <= 0.95:
                     return val, {
                         "x": x,
                         "y": y,
