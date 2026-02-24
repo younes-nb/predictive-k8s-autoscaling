@@ -6,8 +6,6 @@ import subprocess
 import polars as pl
 import numpy as np
 import matplotlib.pyplot as plt
-from kneed import KneeLocator
-from scipy.signal import medfilt
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, os.pardir))
@@ -62,38 +60,45 @@ def get_base_threshold_for_ms(df_ms):
     )
 
     x, y = analysis_data["cpu_bin"].to_numpy(), analysis_data["p95_rt"].to_numpy()
-    if len(x) < 7:
+    if len(x) < 10:
         return None, None
 
-    baseline_rt = np.mean(y[:3])
-    if np.max(y) < (baseline_rt * 1.5):
+    low_cpu_mask = x <= max(0.30, x[min(4, len(x) - 1)])
+    baseline_rt = np.median(y[low_cpu_mask])
+
+    if baseline_rt == 0 or np.isnan(baseline_rt):
         return None, None
 
-    y_filtered = medfilt(y, kernel_size=3)
+    degradation_threshold = max(baseline_rt * 1.75, baseline_rt + 2.0)
 
-    y_monotonic = np.maximum.accumulate(y_filtered)
+    if np.max(y) < degradation_threshold:
+        return None, None
 
-    y_min, y_max = np.min(y_monotonic), np.max(y_monotonic)
-    y_norm = (y_monotonic - y_min) / (y_max - y_min) if y_max > y_min else y_monotonic
+    breach_count = 0
+    required_consecutive_breaches = 2
 
-    window = 5
-    if len(y_norm) >= window:
-        y_smoothed = np.convolve(y_norm, np.ones(window) / window, mode="valid")
-        x_smoothed = x[window - 1 :]
-    else:
-        y_smoothed, x_smoothed = y_norm, x
+    for i in range(len(x)):
+        if x[i] < 0.20:
+            continue
 
-    try:
-        kneedle = KneeLocator(
-            x_smoothed, y_smoothed, S=1.0, curve="convex", direction="increasing"
-        )
+        if y[i] >= degradation_threshold:
+            breach_count += 1
+            if breach_count >= required_consecutive_breaches:
+                knee_idx = i - required_consecutive_breaches + 1
+                val = round(x[knee_idx], 2)
 
-        if kneedle.knee:
-            val = round(kneedle.knee, 2)
-            if 0.40 <= val <= 0.95:
-                return val, {"x": x, "y": y, "knee": val}
-    except:
-        pass
+                if 0.30 <= val <= 0.95:
+                    return val, {
+                        "x": x,
+                        "y": y,
+                        "knee": val,
+                        "baseline": baseline_rt,
+                        "threshold_rt": degradation_threshold,
+                    }
+                else:
+                    return None, None
+        else:
+            breach_count = 0
 
     return None, None
 
@@ -138,7 +143,7 @@ def main():
                 print(f"✅ Knee at: {threshold}")
             else:
                 skipped_count += 1
-                print("Skipped (Invalid Curve)")
+                print("Skipped (No clear saturation)")
         else:
             skipped_count += 1
             print("Empty Data")
@@ -151,7 +156,7 @@ def main():
     avg_val = np.mean(thresholds)
 
     print("\n" + "=" * 45)
-    print("📊 REFINED SATURATION RESULTS")
+    print("📊 REFINED SATURATION RESULTS (SLA DEGRADATION METHOD)")
     print("=" * 45)
     print(f"Total Processed: {len(selected_ms)}")
     print(f"Successfully Calibrated: {len(results_data)}")
@@ -169,14 +174,28 @@ def main():
         axes, [(min_case, "Low"), (avg_case, "Avg"), (max_case, "High")]
     ):
         d = case["plot"]
-        ax.plot(d["x"], d["y"], "o-", alpha=0.4, label="Raw P95 RT")
+        ax.plot(d["x"], d["y"], "o-", alpha=0.6, label="Raw P95 RT")
+
+        ax.axhline(
+            d["baseline"],
+            color="green",
+            linestyle=":",
+            label=f"Baseline: {d['baseline']:.1f}ms",
+        )
+        ax.axhline(
+            d["threshold_rt"],
+            color="orange",
+            linestyle=":",
+            label=f"Degraded: {d['threshold_rt']:.1f}ms",
+        )
         ax.axvline(
             d["knee"],
             color="red",
             linestyle="--",
             linewidth=2,
-            label=f"Knee: {d['knee']}",
+            label=f"Saturation CPU: {d['knee']}",
         )
+
         ax.set_title(f"{title} Threshold: {case['name']}")
         ax.set_xlabel("CPU Utilization")
         ax.set_ylabel("Latency (ms)")
