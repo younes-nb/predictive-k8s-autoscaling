@@ -55,7 +55,7 @@ def get_base_threshold_for_ms(df_ms):
                 pl.len().alias("sample_count"),
             ]
         )
-        .filter(pl.col("sample_count") >= 10)
+        .filter(pl.col("sample_count") >= 3)
         .sort("cpu_bin")
     )
 
@@ -72,11 +72,23 @@ def get_base_threshold_for_ms(df_ms):
     degradation_threshold = max(baseline_rt * 1.75, baseline_rt + 2.0)
 
     if np.max(y) < degradation_threshold:
-        return None, None
+        max_cpu_observed = np.max(x)
+        if max_cpu_observed >= 0.70:
+            val = min(0.95, round(max_cpu_observed, 2))
+            return val, {
+                "x": x,
+                "y": y,
+                "knee": val,
+                "baseline": baseline_rt,
+                "threshold_rt": degradation_threshold,
+                "status": "Safe at High CPU",
+            }
+        else:
+            return None, None
 
     y_smoothed = medfilt(y, kernel_size=3)
     breach_count = 0
-    required_consecutive_breaches = 4
+    required_consecutive_breaches = 2
 
     for i in range(len(x)):
         if x[i] < 0.50:
@@ -88,16 +100,16 @@ def get_base_threshold_for_ms(df_ms):
                 knee_idx = i - required_consecutive_breaches + 1
                 val = round(x[knee_idx], 2)
 
-                if y[knee_idx] >= degradation_threshold and 0.50 <= val <= 0.95:
-                    return val, {
-                        "x": x,
-                        "y": y,
-                        "knee": val,
-                        "baseline": baseline_rt,
-                        "threshold_rt": degradation_threshold,
-                    }
-                else:
-                    return None, None
+                val = max(0.50, min(0.95, val))
+
+                return val, {
+                    "x": x,
+                    "y": y,
+                    "knee": val,
+                    "baseline": baseline_rt,
+                    "threshold_rt": degradation_threshold,
+                    "status": "Degradation Found",
+                }
         else:
             breach_count = 0
 
@@ -141,10 +153,10 @@ def main():
                 results_data.append(
                     {"name": name, "threshold": threshold, "plot": plot_info}
                 )
-                print(f"✅ Knee at: {threshold}")
+                print(f"✅ Knee at: {threshold} ({plot_info.get('status', '')})")
             else:
                 skipped_count += 1
-                print("Skipped (No clear saturation)")
+                print("Skipped (No clear saturation or high load)")
         else:
             skipped_count += 1
             print("Empty Data")
@@ -157,7 +169,7 @@ def main():
     avg_val = np.mean(thresholds)
 
     print("\n" + "=" * 45)
-    print("📊 REFINED SATURATION RESULTS (SLA DEGRADATION METHOD)")
+    print("📊 REFINED SATURATION RESULTS")
     print("=" * 45)
     print(f"Total Processed: {len(selected_ms)}")
     print(f"Successfully Calibrated: {len(results_data)}")
@@ -189,12 +201,18 @@ def main():
             linestyle=":",
             label=f"Degraded: {d['threshold_rt']:.1f}ms",
         )
+
+        line_label = (
+            f"Max Safe CPU: {d['knee']}"
+            if d.get("status") == "Safe at High CPU"
+            else f"Saturation CPU: {d['knee']}"
+        )
         ax.axvline(
             d["knee"],
             color="red",
             linestyle="--",
             linewidth=2,
-            label=f"Saturation CPU: {d['knee']}",
+            label=line_label,
         )
 
         ax.set_title(f"{title} Threshold: {case['name']}")
