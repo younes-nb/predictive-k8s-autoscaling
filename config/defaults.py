@@ -189,7 +189,7 @@ class PreprocessingDefaults:
     FREQ: str = "1m"
     MAX_SERVICES: int = 2000
     SUBSET_SEED: int = 42
-    FEATURE_SET: str = "cpu_mem"
+    FEATURE_SET: str = "cpu_mem_traffic"
 
 
 @dataclass(frozen=True)
