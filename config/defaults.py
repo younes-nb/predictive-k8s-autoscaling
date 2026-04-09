@@ -16,7 +16,7 @@ class Paths:
     PARQUET_THRESHOLD_MSRESOURCE: str = "/dataset/threshold/msresource"
     PARQUET_THRESHOLD_MSRTMCRE: str = "/dataset/threshold/msrtmcre"
     WINDOWS_DIR: str = "/dataset/windows"
-    MODELS_DIR: str = "/dataset/models"
+    MODELS_DIR: str = "/proj/k8sautoscaledl-PG0/models"
     LOGS_DIR: str = "/proj/k8sautoscaledl-PG0/logs"
 
 
