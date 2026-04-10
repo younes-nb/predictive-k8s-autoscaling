@@ -1,6 +1,7 @@
 import argparse
 import os
 import sys
+import time
 import urllib.request
 import tarfile
 
@@ -42,23 +43,30 @@ def compute_indices(start_date: str, end_date: str, ratio_min: int):
     return start_idx, end_idx
 
 
-def download_file(url: str, dst_path: str) -> bool:
+def download_file(url: str, dst_path: str, max_retries: int = 3) -> bool:
     os.makedirs(os.path.dirname(dst_path), exist_ok=True)
-    print(f"Downloading {url} -> {dst_path}")
-    try:
-        with urllib.request.urlopen(url) as resp, open(dst_path, "wb") as out:
-            chunk_size = 1 << 20
-            while True:
-                chunk = resp.read(chunk_size)
-                if not chunk:
-                    break
-                out.write(chunk)
-    except Exception as e:
-        print(f"[WARN] Failed to download {url}: {e}", file=sys.stderr)
-        if os.path.exists(dst_path):
-            os.remove(dst_path)
-        return False
-    return True
+
+    for attempt in range(1, max_retries + 1):
+        print(f"Downloading {url} -> {dst_path} (Attempt {attempt}/{max_retries})")
+        try:
+            with urllib.request.urlopen(url) as resp, open(dst_path, "wb") as out:
+                chunk_size = 1 << 20
+                while True:
+                    chunk = resp.read(chunk_size)
+                    if not chunk:
+                        break
+                    out.write(chunk)
+            return True
+        except Exception as e:
+            print(f"[WARN] Failed to download {url}: {e}", file=sys.stderr)
+            if os.path.exists(dst_path):
+                os.remove(dst_path)
+            if attempt < max_retries:
+                sleep_time = 2**attempt
+                print(f"Retrying in {sleep_time} seconds...")
+                time.sleep(sleep_time)
+
+    return False
 
 
 def extract_and_remove_tar(tar_path: str, out_dir: str) -> bool:
@@ -135,15 +143,28 @@ def main():
             url = f"{BASE_URL}/{cfg['prefix']}_{idx}.tar.gz"
             tar_path = os.path.join(raw_dir, f"{table}_{idx}.tar.gz")
 
+            base_prefix = os.path.basename(cfg["prefix"])
+            expected_csv_path = os.path.join(raw_dir, f"{base_prefix}_{idx}.csv")
+
+            marker_path = os.path.join(raw_dir, f"{table}_{idx}.extracted")
+
+            if os.path.exists(expected_csv_path) or os.path.exists(marker_path):
+                print(
+                    f"Data for {table} (idx {idx}) already extracted. Skipping download."
+                )
+                continue
+
             if not os.path.exists(tar_path):
-                ok = download_file(url, tar_path)
+                ok = download_file(url, tar_path, max_retries=10)
                 if not ok:
                     continue
             else:
                 print(f"Tar already exists, reusing: {tar_path}")
 
             ok = extract_and_remove_tar(tar_path, raw_dir)
-            if not ok:
+            if ok:
+                open(marker_path, "a").close()
+            else:
                 continue
 
     print("\nDone downloading and extracting.")
