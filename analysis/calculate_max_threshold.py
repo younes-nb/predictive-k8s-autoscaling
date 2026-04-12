@@ -14,6 +14,39 @@ if REPO_ROOT not in sys.path:
 
 from config.defaults import Paths
 
+def run_ingestion():
+    ingest_script = os.path.join(REPO_ROOT, "preprocessing", "ingest_traces_parquet.py")
+
+    tasks = [
+        {
+            "table": "msresource",
+            "raw": Paths.RAW_MSRESOURCE,
+            "out": Paths.PARQUET_THRESHOLD_MSRESOURCE,
+        },
+        {"table": "msrtmcre", "raw": Paths.RAW_MSRTMCRE, "out": Paths.PARQUET_THRESHOLD_MSRTMCRE},
+    ]
+
+    for task in tasks:
+        print(f"🛠  Running Ingestion for {task['table']}...")
+        cmd = [
+            sys.executable,
+            ingest_script,
+            "--table",
+            task["table"],
+            "--feature_set",
+            "threshold_analysis",
+            "--raw_dir",
+            task["raw"],
+            "--out_dir",
+            task["out"],
+        ]
+
+        result = subprocess.run(cmd, capture_output=False)
+        if result.returncode != 0:
+            print(f"❌ Ingestion failed for {task['table']}. Exiting.")
+            sys.exit(1)
+    print("✅ Ingestion complete.\n")
+
 
 def get_base_threshold_for_ms(df_ms):
     if df_ms["cpu_utilization"].max() > 1.0:
@@ -121,6 +154,11 @@ def main():
     parser.add_argument("--count", type=int, default=None)
     parser.add_argument("--skip_ingest", action="store_true")
     args = parser.parse_args()
+
+    if not args.skip_ingest:
+        run_ingestion()
+    else:
+        print("⏭  Skipping ingest step as requested.")
 
     print("🚀 Initializing Lazy DataFrames...")
     q_rt = pl.scan_parquet(Paths.PARQUET_THRESHOLD_MSRTMCRE)
