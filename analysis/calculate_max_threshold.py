@@ -2,6 +2,7 @@ import os
 import random
 import argparse
 import sys
+import subprocess
 import polars as pl
 import numpy as np
 import matplotlib.pyplot as plt
