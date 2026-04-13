@@ -55,7 +55,7 @@ def run_ingestion():
 
 
 def analyze_microservice_arrays(x, y):
-    if len(x) < 10:
+    if len(x) < 5:
         return None, None
 
     low_cpu_mask = x <= max(0.30, x[min(4, len(x) - 1)])
@@ -68,7 +68,7 @@ def analyze_microservice_arrays(x, y):
 
     if np.max(y) < degradation_threshold:
         max_cpu_observed = np.max(x)
-        if max_cpu_observed >= 0.70:
+        if max_cpu_observed >= 0.60:
             val = min(0.95, round(max_cpu_observed, 2))
             return val, {
                 "x": x,
