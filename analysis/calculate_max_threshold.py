@@ -1,15 +1,11 @@
 import os
-import random
 import argparse
 import sys
-import subprocess
-import polars as pl
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 from scipy.signal import medfilt
-import gc
-
-pl.Config.set_streaming_chunk_size(10000)
+import duckdb
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, os.pardir))
@@ -17,7 +13,6 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from config.defaults import Paths
-
 
 def analyze_microservice_arrays(x, y):
     if len(x) < 5:
@@ -53,126 +48,106 @@ def analyze_microservice_arrays(x, y):
             breach_count = 0
     return None, None
 
-
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--count", type=int, default=None)
+    parser.add_argument("--count", type=int, default=None, help="Limit applied after aggregation")
     parser.add_argument("--skip_ingest", action="store_true")
-    parser.add_argument("--batch_size", type=int, default=50)
     args = parser.parse_args()
 
-    print("🔍 Phase 1: Discovering Services...")
-    with pl.StringCache():
-        all_ms_names = (
-            pl.scan_parquet(
-                os.path.join(Paths.PARQUET_THRESHOLD_MSRESOURCE, "*.parquet")
-            )
-            .select("msname")
-            .unique()
-            .collect(engine="streaming")
-            .get_column("msname")
-            .to_list()
-        )
+    print("🔍 Phase 1: Massive One-Pass Aggregation (DuckDB)...")
+    
+    db_path = os.path.join(THIS_DIR, "alibaba_processing.db")
+    if os.path.exists(db_path):
+        os.remove(db_path)
+    
+    con = duckdb.connect(db_path)
+    
+    con.execute("PRAGMA threads=16")
+    
+    cpu_parquet_path = os.path.join(Paths.PARQUET_THRESHOLD_MSRESOURCE, "*.parquet")
+    rt_parquet_path = os.path.join(Paths.PARQUET_THRESHOLD_MSRTMCRE, "*.parquet")
 
-    if args.count:
-        all_ms_names = random.sample(all_ms_names, min(args.count, len(all_ms_names)))
+    query = f"""
+    CREATE TABLE ms_aggregated AS
+    WITH cpu_data AS (
+        SELECT 
+            timestamp, msinstanceid, msname,
+            ROUND(CASE WHEN cpu_utilization > 1.0 THEN cpu_utilization / 100.0 ELSE cpu_utilization END, 2) as cpu_bin
+        FROM read_parquet('{cpu_parquet_path}')
+    ),
+    rt_data AS (
+        SELECT 
+            timestamp, msinstanceid, msname,
+            (providerrpc_mcr + http_mcr + providermq_mcr) as total_mcr,
+            ((providerrpc_rt * providerrpc_mcr) + (http_rt * http_mcr) + (providermq_rt * providermq_mcr)) as total_rt_sum
+        FROM read_parquet('{rt_parquet_path}')
+        WHERE (providerrpc_mcr + http_mcr + providermq_mcr) > 0
+    )
+    SELECT 
+        c.msname, 
+        c.cpu_bin, 
+        approx_quantile(r.total_rt_sum / r.total_mcr, 0.95) as p95_rt,
+        COUNT(*) as n_samples
+    FROM cpu_data c
+    JOIN rt_data r 
+        ON c.timestamp = r.timestamp 
+        AND c.msinstanceid = r.msinstanceid 
+        AND c.msname = r.msname
+    GROUP BY c.msname, c.cpu_bin
+    HAVING COUNT(*) >= 3
+    """
 
-    total_ms = len(all_ms_names)
-    print(f"🎯 Target: {total_ms} services. Starting Processing...")
+    print("⏳ Running disk-backed join & aggregation. This may take a while, but it will not crash...")
+    con.execute(query)
 
+    print("✅ Aggregation complete. Fetching compressed results into memory...")
+    df = con.execute("SELECT msname, cpu_bin, p95_rt FROM ms_aggregated ORDER BY msname, cpu_bin").df()
+    con.close()
+    
+    if os.path.exists(db_path):
+        os.remove(db_path)
+
+    print("🔍 Phase 2: Calculating Saturation Knees...")
     results_data = []
-
-    with pl.StringCache():
-        for i in range(0, total_ms, args.batch_size):
-            batch = all_ms_names[i : i + args.batch_size]
-            print(
-                f"📦 Batch {i//args.batch_size + 1}: Analyzing {len(batch)} services..."
-            )
-
-            q_rt = (
-                pl.scan_parquet(
-                    os.path.join(Paths.PARQUET_THRESHOLD_MSRTMCRE, "*.parquet")
-                )
-                .filter(pl.col("msname").is_in(batch))
-                .with_columns(
-                    total_mcr=(
-                        pl.col("providerrpc_mcr")
-                        + pl.col("http_mcr")
-                        + pl.col("providermq_mcr")
-                    )
-                )
-                .filter(pl.col("total_mcr") > 0)
-                .with_columns(
-                    agg_rt=(
-                        (
-                            pl.col("providerrpc_rt") * pl.col("providerrpc_mcr")
-                            + pl.col("http_rt") * pl.col("http_mcr")
-                            + pl.col("providermq_rt") * pl.col("providermq_mcr")
-                        )
-                        / pl.col("total_mcr")
-                    )
-                )
-                .select(["timestamp", "msinstanceid", "msname", "agg_rt"])
-                .cast({"msname": pl.Categorical, "msinstanceid": pl.Categorical})
-            )
-
-            q_cpu = (
-                pl.scan_parquet(
-                    os.path.join(Paths.PARQUET_THRESHOLD_MSRESOURCE, "*.parquet")
-                )
-                .filter(pl.col("msname").is_in(batch))
-                .with_columns(
-                    cpu_utilization=pl.when(pl.col("cpu_utilization") > 1.0)
-                    .then(pl.col("cpu_utilization") / 100.0)
-                    .otherwise(pl.col("cpu_utilization"))
-                )
-                .with_columns(cpu_bin=(pl.col("cpu_utilization") * 100).round(0) / 100)
-                .select(["timestamp", "msinstanceid", "msname", "cpu_bin"])
-                .cast({"msname": pl.Categorical, "msinstanceid": pl.Categorical})
-            )
-
-            try:
-                df_batch = (
-                    q_rt.join(q_cpu, on=["timestamp", "msinstanceid", "msname"])
-                    .group_by(["msname", "cpu_bin"])
-                    .agg(p95_rt=pl.col("agg_rt").quantile(0.95), n=pl.len())
-                    .filter(pl.col("n") >= 3)
-                    .sort(["msname", "cpu_bin"])
-                    .collect(engine="streaming")
-                )
-
-                if not df_batch.is_empty():
-                    for msname, partition in df_batch.partition_by(
-                        "msname", as_dict=True
-                    ).items():
-                        threshold, _ = analyze_microservice_arrays(
-                            partition["cpu_bin"].to_numpy(),
-                            partition["p95_rt"].to_numpy(),
-                        )
-                        if threshold:
-                            results_data.append(
-                                {"msname": msname, "threshold": threshold}
-                            )
-
-                del df_batch
-                gc.collect()
-
-            except Exception as e:
-                print(f"⚠️ Batch failed: {e}")
-                continue
+    
+    grouped = df.groupby("msname")
+    
+    ms_names_processed = 0
+    for msname, group in grouped:
+        if args.count and ms_names_processed >= args.count:
+            break
+            
+        group = group.sort_values("cpu_bin")
+        threshold, _ = analyze_microservice_arrays(
+            group["cpu_bin"].to_numpy(), 
+            group["p95_rt"].to_numpy()
+        )
+        
+        if threshold:
+            results_data.append({"msname": msname, "threshold": threshold})
+            
+        ms_names_processed += 1
 
     if results_data:
         thresholds = [r["threshold"] for r in results_data]
-        print(f"\n✅ Analysis Complete.")
-        print(f"Average CPU Saturation Threshold: {np.mean(thresholds):.2f}")
+        print("\n" + "="*40)
+        print("📊 FINAL SATURATION RESULTS")
+        print("="*40)
+        print(f"Services Calibrated:  {len(results_data)}")
+        print(f"Recommended MAX_CPU:  {np.mean(thresholds):.2f}")
+        print("="*40)
 
         plt.figure(figsize=(10, 6))
         plt.hist(thresholds, bins=20, color="skyblue", edgecolor="black")
+        plt.axvline(np.mean(thresholds), color="red", linestyle="--", label=f"Mean: {np.mean(thresholds):.2f}")
         plt.title("Distribution of CPU Saturation Thresholds")
+        plt.xlabel("CPU Utilization")
+        plt.ylabel("Microservice Count")
+        plt.legend()
         plt.savefig("threshold_distribution.png")
+        print("📈 Saved distribution to threshold_distribution.png")
     else:
-        print("❌ No saturation data found.")
-
+        print("❌ No saturation knees detected.")
 
 if __name__ == "__main__":
     main()
