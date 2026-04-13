@@ -15,6 +15,7 @@ if REPO_ROOT not in sys.path:
 
 from config.defaults import Paths
 
+
 def run_ingestion():
     ingest_script = os.path.join(REPO_ROOT, "preprocessing", "ingest_traces_parquet.py")
 
@@ -24,7 +25,11 @@ def run_ingestion():
             "raw": Paths.RAW_MSRESOURCE,
             "out": Paths.PARQUET_THRESHOLD_MSRESOURCE,
         },
-        {"table": "msrtmcre", "raw": Paths.RAW_MSRTMCRE, "out": Paths.PARQUET_THRESHOLD_MSRTMCRE},
+        {
+            "table": "msrtmcre",
+            "raw": Paths.RAW_MSRTMCRE,
+            "out": Paths.PARQUET_THRESHOLD_MSRTMCRE,
+        },
     ]
 
     for task in tasks:
@@ -49,51 +54,7 @@ def run_ingestion():
     print("✅ Ingestion complete.\n")
 
 
-def get_base_threshold_for_ms(df_ms):
-    if df_ms["cpu_utilization"].max() > 1.0:
-        df_ms = df_ms.with_columns(pl.col("cpu_utilization") / 100.0)
-
-    df_ms = df_ms.with_columns(
-        [
-            (
-                (
-                    pl.col("providerrpc_mcr")
-                    + pl.col("http_mcr")
-                    + pl.col("providermq_mcr")
-                ).alias("total_mcr")
-            ),
-            (
-                (pl.col("providerrpc_rt") * pl.col("providerrpc_mcr"))
-                + (pl.col("http_rt") * pl.col("http_mcr"))
-                + (pl.col("providermq_rt") * pl.col("providermq_mcr"))
-            ).alias("weighted_rt_sum"),
-        ]
-    )
-
-    df_ms = df_ms.filter(pl.col("total_mcr") > 0)
-    if df_ms.height == 0:
-        return None, None
-
-    df_ms = df_ms.with_columns(
-        (pl.col("weighted_rt_sum") / pl.col("total_mcr")).alias("agg_rt")
-    )
-    df_ms = df_ms.with_columns((pl.col("cpu_utilization") * 100).round(0) / 100).rename(
-        {"cpu_utilization": "cpu_bin"}
-    )
-
-    analysis_data = (
-        df_ms.group_by("cpu_bin")
-        .agg(
-            [
-                pl.col("agg_rt").quantile(0.95).alias("p95_rt"),
-                pl.len().alias("sample_count"),
-            ]
-        )
-        .filter(pl.col("sample_count") >= 3)
-        .sort("cpu_bin")
-    )
-
-    x, y = analysis_data["cpu_bin"].to_numpy(), analysis_data["p95_rt"].to_numpy()
+def analyze_microservice_arrays(x, y):
     if len(x) < 10:
         return None, None
 
@@ -133,7 +94,6 @@ def get_base_threshold_for_ms(df_ms):
             if breach_count >= required_consecutive_breaches:
                 knee_idx = i - required_consecutive_breaches + 1
                 val = round(x[knee_idx], 2)
-
                 val = max(0.50, min(0.95, val))
 
                 return val, {
@@ -165,40 +125,75 @@ def main():
     q_rt = pl.scan_parquet(Paths.PARQUET_THRESHOLD_MSRTMCRE)
     q_cpu = pl.scan_parquet(Paths.PARQUET_THRESHOLD_MSRESOURCE)
 
-    ms_names = q_rt.select("msname").unique().collect().get_column("msname").to_list()
+    print(
+        "⏳ Performing Single-Pass Global Aggregation (Scanning entire dataset once)..."
+    )
+
+    q_combined = q_rt.join(q_cpu, on=["timestamp", "msinstanceid", "msname"])
+
+    q_agg = (
+        q_combined.with_columns(
+            total_mcr=(
+                pl.col("providerrpc_mcr")
+                + pl.col("http_mcr")
+                + pl.col("providermq_mcr")
+            ),
+            cpu_utilization=pl.when(pl.col("cpu_utilization") > 1.0)
+            .then(pl.col("cpu_utilization") / 100.0)
+            .otherwise(pl.col("cpu_utilization")),
+        )
+        .with_columns(
+            weighted_rt_sum=(
+                (pl.col("providerrpc_rt") * pl.col("providerrpc_mcr"))
+                + (pl.col("http_rt") * pl.col("http_mcr"))
+                + (pl.col("providermq_rt") * pl.col("providermq_mcr"))
+            )
+        )
+        .filter(pl.col("total_mcr") > 0)
+        .with_columns(
+            agg_rt=(pl.col("weighted_rt_sum") / pl.col("total_mcr")),
+            cpu_bin=((pl.col("cpu_utilization") * 100).round(0) / 100),
+        )
+        .group_by(["msname", "cpu_bin"])
+        .agg(p95_rt=pl.col("agg_rt").quantile(0.95), sample_count=pl.len())
+        .filter(pl.col("sample_count") >= 3)
+    )
+
+    df_agg = q_agg.collect(streaming=True)
+
+    print("✅ Global Aggregation Complete! Data reduced to memory-safe summary.")
+
+    ms_names = df_agg["msname"].unique().to_list()
     selected_ms = (
         random.sample(ms_names, min(args.count, len(ms_names)))
         if args.count
         else ms_names
     )
 
+    df_selected = df_agg.filter(pl.col("msname").is_in(selected_ms)).sort(
+        ["msname", "cpu_bin"]
+    )
+
     results_data = []
     skipped_count = 0
 
-    for i, name in enumerate(selected_ms):
-        print(f"[{i+1}/{len(selected_ms)}] Processing {name}... ", end="")
-        combined = (
-            q_rt.filter(pl.col("msname") == name)
-            .join(
-                q_cpu.filter(pl.col("msname") == name),
-                on=["timestamp", "msinstanceid", "msname"],
-            )
-            .collect()
-        )
+    print("🧠 Calibrating individual microservices...")
 
-        if not combined.is_empty():
-            threshold, plot_info = get_base_threshold_for_ms(combined)
-            if threshold:
-                results_data.append(
-                    {"name": name, "threshold": threshold, "plot": plot_info}
-                )
-                print(f"✅ Knee at: {threshold} ({plot_info.get('status', '')})")
-            else:
-                skipped_count += 1
-                print("Skipped (No clear saturation or high load)")
+    for partition_df in df_selected.partition_by("msname"):
+        name = partition_df["msname"][0]
+
+        x = partition_df["cpu_bin"].to_numpy()
+        y = partition_df["p95_rt"].to_numpy()
+
+        threshold, plot_info = analyze_microservice_arrays(x, y)
+
+        if threshold:
+            results_data.append(
+                {"name": name, "threshold": threshold, "plot": plot_info}
+            )
+            print(f"✅ [{name}] Knee at: {threshold} ({plot_info.get('status', '')})")
         else:
             skipped_count += 1
-            print("Empty Data")
 
     if not results_data:
         print("\n❌ No valid knees found.")
@@ -227,7 +222,6 @@ def main():
     ):
         d = case["plot"]
         ax.plot(d["x"], d["y"], "o-", alpha=0.6, label="Raw P95 RT")
-
         ax.axhline(
             d["baseline"],
             color="green",
@@ -247,11 +241,7 @@ def main():
             else f"Saturation CPU: {d['knee']}"
         )
         ax.axvline(
-            d["knee"],
-            color="red",
-            linestyle="--",
-            linewidth=2,
-            label=line_label,
+            d["knee"], color="red", linestyle="--", linewidth=2, label=line_label
         )
 
         ax.set_title(f"{title} Threshold: {case['name']}")
