@@ -69,7 +69,7 @@ def main():
             )
             .select("msname")
             .unique()
-            .collect(streaming=True)
+            .collect(engine="streaming")
             .get_column("msname")
             .to_list()
         )
@@ -138,7 +138,7 @@ def main():
                     .agg(p95_rt=pl.col("agg_rt").quantile(0.95), n=pl.len())
                     .filter(pl.col("n") >= 3)
                     .sort(["msname", "cpu_bin"])
-                    .collect(streaming=True)
+                    .collect(engine="streaming")
                 )
 
                 if not df_batch.is_empty():
