@@ -52,11 +52,12 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--count", type=int, default=None, help="Limit applied after aggregation")
     parser.add_argument("--skip_ingest", action="store_true")
+    parser.add_argument("--temp_dir", type=str, default="/dataset/duckdb_temp")
     args = parser.parse_args()
 
     print("🔍 Phase 1: Massive One-Pass Aggregation (DuckDB)...")
     
-    db_path = os.path.join(THIS_DIR, "alibaba_processing.db")
+    db_path = os.path.join(args.temp_dir, "alibaba_processing.db")
     if os.path.exists(db_path):
         os.remove(db_path)
     
