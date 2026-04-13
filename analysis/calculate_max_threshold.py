@@ -122,14 +122,46 @@ def main():
         print("⏭  Skipping ingest step as requested.")
 
     print("🚀 Initializing Lazy DataFrames...")
-    q_rt = pl.scan_parquet(Paths.PARQUET_THRESHOLD_MSRTMCRE)
-    q_cpu = pl.scan_parquet(Paths.PARQUET_THRESHOLD_MSRESOURCE)
+    rt_cols = [
+        "timestamp",
+        "msinstanceid",
+        "msname",
+        "providerrpc_mcr",
+        "http_mcr",
+        "providermq_mcr",
+        "providerrpc_rt",
+        "http_rt",
+        "providermq_rt",
+    ]
+    cpu_cols = ["timestamp", "msinstanceid", "msname", "cpu_utilization"]
 
-    print(
-        "⏳ Performing Single-Pass Global Aggregation (Scanning entire dataset once)..."
+    q_rt = pl.scan_parquet(Paths.PARQUET_THRESHOLD_MSRTMCRE).select(rt_cols)
+    q_cpu = pl.scan_parquet(Paths.PARQUET_THRESHOLD_MSRESOURCE).select(cpu_cols)
+
+    print("🔍 Identifying unique microservices...")
+    all_ms_names = (
+        q_rt.select("msname")
+        .unique()
+        .collect(engine="streaming")
+        .get_column("msname")
+        .to_list()
     )
 
-    q_combined = q_rt.join(q_cpu, on=["timestamp", "msinstanceid", "msname"])
+    selected_ms = (
+        random.sample(all_ms_names, min(args.count, len(all_ms_names)))
+        if args.count
+        else all_ms_names
+    )
+    print(f"🎯 Selected {len(selected_ms)} microservices for analysis.")
+
+    q_rt_filtered = q_rt.filter(pl.col("msname").is_in(selected_ms))
+    q_cpu_filtered = q_cpu.filter(pl.col("msname").is_in(selected_ms))
+
+    print("⏳ Joining and Aggregating (Optimized sub-set)...")
+
+    q_combined = q_rt_filtered.join(
+        q_cpu_filtered, on=["timestamp", "msinstanceid", "msname"]
+    )
 
     q_agg = (
         q_combined.with_columns(
@@ -161,37 +193,23 @@ def main():
 
     df_agg = q_agg.collect(engine="streaming")
 
-    print("✅ Global Aggregation Complete! Data reduced to memory-safe summary.")
+    print("✅ Aggregation Complete! Calibrating...")
 
-    ms_names = df_agg["msname"].unique().to_list()
-    selected_ms = (
-        random.sample(ms_names, min(args.count, len(ms_names)))
-        if args.count
-        else ms_names
-    )
-
-    df_selected = df_agg.filter(pl.col("msname").is_in(selected_ms)).sort(
-        ["msname", "cpu_bin"]
-    )
+    df_selected = df_agg.sort(["msname", "cpu_bin"])
 
     results_data = []
     skipped_count = 0
 
-    print("🧠 Calibrating individual microservices...")
-
     for partition_df in df_selected.partition_by("msname"):
         name = partition_df["msname"][0]
-
         x = partition_df["cpu_bin"].to_numpy()
         y = partition_df["p95_rt"].to_numpy()
 
         threshold, plot_info = analyze_microservice_arrays(x, y)
-
         if threshold:
             results_data.append(
                 {"name": name, "threshold": threshold, "plot": plot_info}
             )
-            print(f"✅ [{name}] Knee at: {threshold} ({plot_info.get('status', '')})")
         else:
             skipped_count += 1
 
