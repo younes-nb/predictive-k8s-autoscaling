@@ -159,7 +159,7 @@ def main():
         .filter(pl.col("sample_count") >= 3)
     )
 
-    df_agg = q_agg.collect(streaming=True)
+    df_agg = q_agg.collect(engine="streaming")
 
     print("✅ Global Aggregation Complete! Data reduced to memory-safe summary.")
 
