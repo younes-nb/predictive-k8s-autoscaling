@@ -115,7 +115,6 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--count", type=int, default=None)
     parser.add_argument("--skip_ingest", action="store_true")
-    parser.add_argument("--batch_size", type=int, default=1000)
     args = parser.parse_args()
 
     if not args.skip_ingest:
@@ -123,7 +122,7 @@ def main():
     else:
         print("⏭  Skipping ingest step as requested.")
 
-    print("🚀 Initializing Lazy DataFrames...")
+    print("🚀 Building global streaming query plan...")
 
     q_rt_skinny = (
         pl.scan_parquet(Paths.PARQUET_THRESHOLD_MSRTMCRE)
@@ -159,14 +158,29 @@ def main():
         .select(["timestamp", "msinstanceid", "msname", "cpu_bin"])
     )
 
-    print("🔍 Identifying unique microservices...")
-    all_ms_names = (
-        q_rt_skinny.select("msname")
-        .unique()
-        .collect(engine="streaming")
-        .get_column("msname")
-        .to_list()
+    print(
+        "🔄 Executing global out-of-core aggregation (this may take a few minutes)..."
     )
+    q_agg = (
+        q_rt_skinny.join(
+            q_cpu_skinny,
+            on=["timestamp", "msinstanceid", "msname"],
+        )
+        .group_by(["msname", "cpu_bin"])
+        .agg(p95_rt=pl.col("agg_rt").quantile(0.95), sample_count=pl.len())
+        .filter(pl.col("sample_count") >= 3)
+    )
+
+    try:
+        df_all = q_agg.collect(engine="streaming").sort(["msname", "cpu_bin"])
+        print(f"✅ Global aggregation complete. Extracted {len(df_all)} data points.")
+    except Exception as e:
+        print(f"❌ Critical error during streaming collection: {e}")
+        sys.exit(1)
+
+    print("🔍 Partitioning microservices for analysis...")
+    partitions = df_all.partition_by("msname", as_dict=True)
+    all_ms_names = list(partitions.keys())
 
     selected_ms = (
         random.sample(all_ms_names, min(args.count, len(all_ms_names)))
@@ -180,52 +194,31 @@ def main():
     results_data = []
     plot_samples = {}
     skipped_count = 0
-    batch_size = args.batch_size
 
-    for i in range(0, total_to_process, batch_size):
-        batch_names = selected_ms[i : i + batch_size]
-        print(
-            f"📦 Processing batch {i//batch_size + 1}: [{i} to {min(i+batch_size, total_to_process)}]"
-        )
+    for idx, msname in enumerate(selected_ms):
+        if idx % 5000 == 0 and idx > 0:
+            print(f"📦 Analyzed {idx} / {total_to_process} microservices...")
 
-        q_batch = (
-            q_rt_skinny.filter(pl.col("msname").is_in(batch_names))
-            .join(
-                q_cpu_skinny.filter(pl.col("msname").is_in(batch_names)),
-                on=["timestamp", "msinstanceid", "msname"],
-            )
-            .group_by(["msname", "cpu_bin"])
-            .agg(p95_rt=pl.col("agg_rt").quantile(0.95), sample_count=pl.len())
-            .filter(pl.col("sample_count") >= 3)
-        )
+        partition_df = partitions[msname]
+        x = partition_df["cpu_bin"].to_numpy()
+        y = partition_df["p95_rt"].to_numpy()
 
-        try:
-            df_batch = q_batch.collect(engine="streaming").sort(["msname", "cpu_bin"])
+        threshold, plot_info = analyze_microservice_arrays(x, y)
+        if threshold:
+            results_data.append({"name": msname, "threshold": threshold})
 
-            for partition_df in df_batch.partition_by("msname"):
-                name = partition_df["msname"][0]
-                x = partition_df["cpu_bin"].to_numpy()
-                y = partition_df["p95_rt"].to_numpy()
+            if len(plot_samples) < 50:
+                plot_samples[msname] = {
+                    "name": msname,
+                    "threshold": threshold,
+                    "plot": plot_info,
+                }
+        else:
+            skipped_count += 1
 
-                threshold, plot_info = analyze_microservice_arrays(x, y)
-                if threshold:
-                    results_data.append({"name": name, "threshold": threshold})
-
-                    if len(plot_samples) < 50:
-                        plot_samples[name] = {
-                            "name": name,
-                            "threshold": threshold,
-                            "plot": plot_info,
-                        }
-                else:
-                    skipped_count += 1
-
-            del df_batch
-            gc.collect()
-
-        except Exception as e:
-            print(f"⚠️ Error processing batch {i//batch_size + 1}: {e}")
-            continue
+    del partitions
+    del df_all
+    gc.collect()
 
     if not results_data:
         print("\n❌ No valid knees found.")
