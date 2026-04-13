@@ -55,6 +55,10 @@ def main():
     parser.add_argument("--temp_dir", type=str, default="/dataset/duckdb_temp")
     args = parser.parse_args()
 
+    if not os.path.exists(args.temp_dir):
+        print(f"📁 Creating directory: {args.temp_dir}")
+        os.makedirs(args.temp_dir, exist_ok=True)
+
     print("🔍 Phase 1: Massive One-Pass Aggregation (DuckDB)...")
     
     db_path = os.path.join(args.temp_dir, "alibaba_processing.db")
