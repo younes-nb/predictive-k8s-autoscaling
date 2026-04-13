@@ -114,6 +114,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--count", type=int, default=None)
     parser.add_argument("--skip_ingest", action="store_true")
+    parser.add_argument("--batch_size", type=int, default=2000)
     args = parser.parse_args()
 
     if not args.skip_ingest:
@@ -152,66 +153,72 @@ def main():
         if args.count
         else all_ms_names
     )
-    print(f"🎯 Selected {len(selected_ms)} microservices for analysis.")
 
-    q_rt_filtered = q_rt.filter(pl.col("msname").is_in(selected_ms))
-    q_cpu_filtered = q_cpu.filter(pl.col("msname").is_in(selected_ms))
-
-    print("⏳ Joining and Aggregating (Optimized sub-set)...")
-
-    q_combined = q_rt_filtered.join(
-        q_cpu_filtered, on=["timestamp", "msinstanceid", "msname"]
-    )
-
-    q_agg = (
-        q_combined.with_columns(
-            total_mcr=(
-                pl.col("providerrpc_mcr")
-                + pl.col("http_mcr")
-                + pl.col("providermq_mcr")
-            ),
-            cpu_utilization=pl.when(pl.col("cpu_utilization") > 1.0)
-            .then(pl.col("cpu_utilization") / 100.0)
-            .otherwise(pl.col("cpu_utilization")),
-        )
-        .with_columns(
-            weighted_rt_sum=(
-                (pl.col("providerrpc_rt") * pl.col("providerrpc_mcr"))
-                + (pl.col("http_rt") * pl.col("http_mcr"))
-                + (pl.col("providermq_rt") * pl.col("providermq_mcr"))
-            )
-        )
-        .filter(pl.col("total_mcr") > 0)
-        .with_columns(
-            agg_rt=(pl.col("weighted_rt_sum") / pl.col("total_mcr")),
-            cpu_bin=((pl.col("cpu_utilization") * 100).round(0) / 100),
-        )
-        .group_by(["msname", "cpu_bin"])
-        .agg(p95_rt=pl.col("agg_rt").quantile(0.95), sample_count=pl.len())
-        .filter(pl.col("sample_count") >= 3)
-    )
-
-    df_agg = q_agg.collect(engine="streaming")
-
-    print("✅ Aggregation Complete! Calibrating...")
-
-    df_selected = df_agg.sort(["msname", "cpu_bin"])
+    total_to_process = len(selected_ms)
+    print(f"🎯 Total microservices to analyze: {total_to_process}")
 
     results_data = []
     skipped_count = 0
+    batch_size = args.batch_size
 
-    for partition_df in df_selected.partition_by("msname"):
-        name = partition_df["msname"][0]
-        x = partition_df["cpu_bin"].to_numpy()
-        y = partition_df["p95_rt"].to_numpy()
+    for i in range(0, total_to_process, batch_size):
+        batch_names = selected_ms[i : i + batch_size]
+        print(
+            f"📦 Processing batch {i//batch_size + 1}: [{i} to {min(i+batch_size, total_to_process)}]"
+        )
 
-        threshold, plot_info = analyze_microservice_arrays(x, y)
-        if threshold:
-            results_data.append(
-                {"name": name, "threshold": threshold, "plot": plot_info}
+        q_rt_filtered = q_rt.filter(pl.col("msname").is_in(batch_names))
+        q_cpu_filtered = q_cpu.filter(pl.col("msname").is_in(batch_names))
+
+        q_agg = (
+            q_rt_filtered.join(
+                q_cpu_filtered, on=["timestamp", "msinstanceid", "msname"]
             )
-        else:
-            skipped_count += 1
+            .with_columns(
+                total_mcr=(
+                    pl.col("providerrpc_mcr")
+                    + pl.col("http_mcr")
+                    + pl.col("providermq_mcr")
+                ),
+                cpu_utilization=pl.when(pl.col("cpu_utilization") > 1.0)
+                .then(pl.col("cpu_utilization") / 100.0)
+                .otherwise(pl.col("cpu_utilization")),
+            )
+            .with_columns(
+                weighted_rt_sum=(
+                    (pl.col("providerrpc_rt") * pl.col("providerrpc_mcr"))
+                    + (pl.col("http_rt") * pl.col("http_mcr"))
+                    + (pl.col("providermq_rt") * pl.col("providermq_mcr"))
+                )
+            )
+            .filter(pl.col("total_mcr") > 0)
+            .with_columns(
+                agg_rt=(pl.col("weighted_rt_sum") / pl.col("total_mcr")),
+                cpu_bin=((pl.col("cpu_utilization") * 100).round(0) / 100),
+            )
+            .group_by(["msname", "cpu_bin"])
+            .agg(p95_rt=pl.col("agg_rt").quantile(0.95), sample_count=pl.len())
+            .filter(pl.col("sample_count") >= 3)
+        )
+
+        try:
+            df_batch = q_agg.collect(engine="streaming").sort(["msname", "cpu_bin"])
+
+            for partition_df in df_batch.partition_by("msname"):
+                name = partition_df["msname"][0]
+                x = partition_df["cpu_bin"].to_numpy()
+                y = partition_df["p95_rt"].to_numpy()
+
+                threshold, plot_info = analyze_microservice_arrays(x, y)
+                if threshold:
+                    results_data.append(
+                        {"name": name, "threshold": threshold, "plot": plot_info}
+                    )
+                else:
+                    skipped_count += 1
+        except Exception as e:
+            print(f"⚠️ Error processing batch {i}: {e}")
+            continue
 
     if not results_data:
         print("\n❌ No valid knees found.")
