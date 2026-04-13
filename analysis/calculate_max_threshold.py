@@ -122,63 +122,78 @@ def main():
     else:
         print("⏭  Skipping ingest step as requested.")
 
-    print("🚀 Building global streaming query plan...")
+    print("🚀 Building global streaming query plan with memory protections...")
 
-    q_rt_skinny = (
-        pl.scan_parquet(Paths.PARQUET_THRESHOLD_MSRTMCRE)
-        .with_columns(
-            total_mcr=(
-                pl.col("providerrpc_mcr")
-                + pl.col("http_mcr")
-                + pl.col("providermq_mcr")
-            ),
-        )
-        .filter(pl.col("total_mcr") > 0)
-        .with_columns(
-            agg_rt=(
-                (
-                    pl.col("providerrpc_rt") * pl.col("providerrpc_mcr")
-                    + pl.col("http_rt") * pl.col("http_mcr")
-                    + pl.col("providermq_rt") * pl.col("providermq_mcr")
-                )
-                / pl.col("total_mcr")
+    with pl.StringCache():
+        q_rt_skinny = (
+            pl.scan_parquet(Paths.PARQUET_THRESHOLD_MSRTMCRE)
+            .with_columns(
+                total_mcr=(
+                    pl.col("providerrpc_mcr")
+                    + pl.col("http_mcr")
+                    + pl.col("providermq_mcr")
+                ),
             )
+            .filter(pl.col("total_mcr") > 0)
+            .with_columns(
+                agg_rt=(
+                    (
+                        pl.col("providerrpc_rt") * pl.col("providerrpc_mcr")
+                        + pl.col("http_rt") * pl.col("http_mcr")
+                        + pl.col("providermq_rt") * pl.col("providermq_mcr")
+                    )
+                    / pl.col("total_mcr")
+                )
+            )
+            .select(["timestamp", "msinstanceid", "msname", "agg_rt"])
+            .cast({"msinstanceid": pl.Categorical, "msname": pl.Categorical})
         )
-        .select(["timestamp", "msinstanceid", "msname", "agg_rt"])
-    )
 
-    q_cpu_skinny = (
-        pl.scan_parquet(Paths.PARQUET_THRESHOLD_MSRESOURCE)
-        .with_columns(
-            cpu_utilization=pl.when(pl.col("cpu_utilization") > 1.0)
-            .then(pl.col("cpu_utilization") / 100.0)
-            .otherwise(pl.col("cpu_utilization"))
+        q_cpu_skinny = (
+            pl.scan_parquet(Paths.PARQUET_THRESHOLD_MSRESOURCE)
+            .with_columns(
+                cpu_utilization=pl.when(pl.col("cpu_utilization") > 1.0)
+                .then(pl.col("cpu_utilization") / 100.0)
+                .otherwise(pl.col("cpu_utilization"))
+            )
+            .with_columns(cpu_bin=((pl.col("cpu_utilization") * 100).round(0) / 100))
+            .select(["timestamp", "msinstanceid", "msname", "cpu_bin"])
+            .cast({"msinstanceid": pl.Categorical, "msname": pl.Categorical})
         )
-        .with_columns(cpu_bin=((pl.col("cpu_utilization") * 100).round(0) / 100))
-        .select(["timestamp", "msinstanceid", "msname", "cpu_bin"])
-    )
 
-    print(
-        "🔄 Executing global out-of-core aggregation (this may take a few minutes)..."
-    )
-    q_agg = (
-        q_rt_skinny.join(
-            q_cpu_skinny,
-            on=["timestamp", "msinstanceid", "msname"],
+        print(
+            "🔄 Streaming out-of-core aggregation to disk (this prevents final memory build-up)..."
         )
-        .group_by(["msname", "cpu_bin"])
-        .agg(p95_rt=pl.col("agg_rt").quantile(0.95), sample_count=pl.len())
-        .filter(pl.col("sample_count") >= 3)
+        temp_parquet = "temp_agg_output.parquet"
+
+        q_agg = (
+            q_rt_skinny.join(
+                q_cpu_skinny,
+                on=["timestamp", "msinstanceid", "msname"],
+            )
+            .group_by(["msname", "cpu_bin"])
+            .agg(p95_rt=pl.col("agg_rt").quantile(0.95), sample_count=pl.len())
+            .filter(pl.col("sample_count") >= 3)
+        )
+
+        try:
+            q_agg.sink_parquet(temp_parquet)
+            print("✅ Data successfully aggregated and written to disk.")
+        except Exception as e:
+            print(f"❌ Critical error during stream sinking: {e}")
+            sys.exit(1)
+
+    print("🔍 Loading condensed dataset and partitioning microservices...")
+
+    df_all = (
+        pl.read_parquet(temp_parquet)
+        .with_columns(pl.col("msname").cast(pl.String))
+        .sort(["msname", "cpu_bin"])
     )
 
-    try:
-        df_all = q_agg.collect(engine="streaming").sort(["msname", "cpu_bin"])
-        print(f"✅ Global aggregation complete. Extracted {len(df_all)} data points.")
-    except Exception as e:
-        print(f"❌ Critical error during streaming collection: {e}")
-        sys.exit(1)
+    if os.path.exists(temp_parquet):
+        os.remove(temp_parquet)
 
-    print("🔍 Partitioning microservices for analysis...")
     partitions = df_all.partition_by("msname", as_dict=True)
     all_ms_names = list(partitions.keys())
 
