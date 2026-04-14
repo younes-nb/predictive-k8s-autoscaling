@@ -67,9 +67,10 @@ def main():
     
     con = duckdb.connect(db_path)
     
-    con.execute("PRAGMA threads=4") 
-    con.execute("PRAGMA memory_limit='10GB'") 
+    con.execute("PRAGMA threads=2") 
+    con.execute("PRAGMA memory_limit='30GB'") 
     con.execute("PRAGMA max_temp_directory_size='2TiB'")
+    con.execute("SET preserve_insertion_order=false")
     
     cpu_parquet_path = os.path.join(Paths.PARQUET_THRESHOLD_MSRESOURCE, "*.parquet")
     rt_parquet_path = os.path.join(Paths.PARQUET_THRESHOLD_MSRTMCRE, "*.parquet")
