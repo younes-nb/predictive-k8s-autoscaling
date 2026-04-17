@@ -16,13 +16,20 @@ if REPO_ROOT not in sys.path:
 
 from config.defaults import Paths
 
+
 def analyze_microservice_arrays(x, y):
     if len(x) < 8:
         return None, None
 
-    baseline_idx = max(1, len(y) // 3)
-    baseline_rt = np.median(y[:baseline_idx])
-    max_rt = np.max(y)
+    sort_idx = np.argsort(x)
+    x = x[sort_idx]
+    y = y[sort_idx]
+
+    y_smoothed = medfilt(y, kernel_size=3)
+    y_rcmin = np.minimum.accumulate(y_smoothed[::-1])[::-1]
+    baseline_idx = max(2, len(y_rcmin) // 3)
+    baseline_rt = np.median(y_rcmin[:baseline_idx])
+    max_rt = np.max(y_rcmin)
 
     if baseline_rt == 0 or np.isnan(baseline_rt):
         return None, None
@@ -34,7 +41,7 @@ def analyze_microservice_arrays(x, y):
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
 
-            my_pwlf = pwlf.PiecewiseLinFit(x, y)
+            my_pwlf = pwlf.PiecewiseLinFit(x, y_rcmin)
             breakpoints = my_pwlf.fit(2)
             knee = breakpoints[1]
             slopes = my_pwlf.calc_slopes()
@@ -42,7 +49,7 @@ def analyze_microservice_arrays(x, y):
             slope1, slope2 = slopes[0], slopes[1]
 
             if slope2 > 0 and slope2 > slope1:
-                if 0.10 <= knee <= 0.95:
+                if 0.15 <= knee <= 0.95:
                     return round(knee, 2), {"status": "Saturated"}
 
         return None, {"status": "No clear upward knee"}
@@ -165,7 +172,6 @@ def main():
     grouped = df.groupby("msname")
 
     for msname, group in grouped:
-        group = group.sort_values("cpu_bin")
         threshold, info = analyze_microservice_arrays(
             group["cpu_bin"].to_numpy(), group["p95_rt"].to_numpy()
         )
