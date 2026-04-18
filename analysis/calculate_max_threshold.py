@@ -19,7 +19,7 @@ from config.defaults import Paths
 
 def analyze_microservice_arrays(x, y):
     if len(x) < 8:
-        return None, None
+        return None, None, None, None, None, None
 
     sort_idx = np.argsort(x)
     x = x[sort_idx]
@@ -27,20 +27,31 @@ def analyze_microservice_arrays(x, y):
 
     y_smoothed = medfilt(y, kernel_size=3)
     y_rcmin = np.minimum.accumulate(y_smoothed[::-1])[::-1]
-    baseline_idx = max(2, len(y_rcmin) // 3)
+
+    baseline_idx = max(2, len(x) // 3)
     baseline_rt = np.median(y_rcmin[:baseline_idx])
-    max_rt = np.max(y_rcmin)
 
     if baseline_rt == 0 or np.isnan(baseline_rt):
-        return None, None
+        return None, None, None, None, None, None
 
-    if max_rt < (baseline_rt * 1.5) and max_rt < (baseline_rt + 2.0):
-        return None, {"status": "Safe"}
+    degradation_threshold = max(baseline_rt * 1.5, baseline_rt + 2.0)
+    max_rt = np.max(y_rcmin)
+
+    if max_rt < degradation_threshold:
+        max_cpu_observed = np.max(x)
+        if max_cpu_observed >= 0.50:
+            val = min(0.95, round(max_cpu_observed, 2))
+            return val, {"status": "Safe"}, x, y, baseline_rt, degradation_threshold
+        return None, None, None, None, None, None
+
+    breach_idx = np.where(y_rcmin >= degradation_threshold)[0]
+    if len(breach_idx) == 0:
+        return None, None, None, None, None, None
+    first_breach_cpu = x[breach_idx[0]]
 
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-
             my_pwlf = pwlf.PiecewiseLinFit(x, y_rcmin)
             breakpoints = my_pwlf.fit(2)
             knee = breakpoints[1]
@@ -49,13 +60,25 @@ def analyze_microservice_arrays(x, y):
             slope1, slope2 = slopes[0], slopes[1]
 
             if slope2 > 0 and slope2 > slope1:
-                if 0.15 <= knee <= 0.95:
-                    return round(knee, 2), {"status": "Saturated"}
+                if knee < 0.30 and first_breach_cpu > 0.40:
+                    final_knee = max(0.30, first_breach_cpu - 0.10)
+                else:
+                    final_knee = max(0.30, knee)
 
-        return None, {"status": "No clear upward knee"}
+                if final_knee <= 0.95:
+                    return (
+                        round(final_knee, 2),
+                        {"status": "Saturated"},
+                        x,
+                        y,
+                        baseline_rt,
+                        degradation_threshold,
+                    )
 
     except Exception:
-        return None, None
+        pass
+
+    return None, None, None, None, None, None
 
 
 def main():
@@ -82,7 +105,6 @@ def main():
         os.remove(db_path)
 
     con = duckdb.connect(db_path)
-
     con.execute("PRAGMA threads=8")
     con.execute("PRAGMA memory_limit='20GB'")
 
@@ -92,7 +114,6 @@ def main():
     print("🔍 Phase 1a: Identifying unique microservices...")
     unique_ms_query = f"SELECT DISTINCT msname FROM read_parquet('{cpu_parquet_path}')"
     unique_msnames = con.execute(unique_ms_query).df()["msname"].tolist()
-
     unique_msnames = [m for m in unique_msnames if pd.notna(m)]
 
     if args.count:
@@ -172,36 +193,108 @@ def main():
     grouped = df.groupby("msname")
 
     for msname, group in grouped:
-        threshold, info = analyze_microservice_arrays(
+        res = analyze_microservice_arrays(
             group["cpu_bin"].to_numpy(), group["p95_rt"].to_numpy()
         )
-
-        if threshold:
-            results_data.append({"msname": msname, "threshold": threshold})
+        if res[0] is not None:
+            threshold, info, x_arr, y_arr, base_rt, deg_rt = res
+            results_data.append(
+                {
+                    "msname": msname,
+                    "threshold": threshold,
+                    "status": info["status"],
+                    "x": x_arr,
+                    "y": y_arr,
+                    "base_rt": base_rt,
+                    "deg_rt": deg_rt,
+                }
+            )
 
     if results_data:
         thresholds = [r["threshold"] for r in results_data]
+        mean_thresh = np.mean(thresholds)
+
         print("\n" + "=" * 40)
         print("📊 HYBRID PWLF SATURATION RESULTS")
         print("=" * 40)
         print(f"Services with Valid Knees:  {len(results_data)}")
-        print(f"Calculated Mean MAX_CPU:    {np.mean(thresholds):.2f}")
+        print(f"Calculated Mean MAX_CPU:    {mean_thresh:.2f}")
         print("=" * 40)
 
         plt.figure(figsize=(10, 6))
-        plt.hist(thresholds, bins=20, color="lightgreen", edgecolor="black")
+        plt.hist(thresholds, bins=20, color="skyblue", edgecolor="black")
         plt.axvline(
-            np.mean(thresholds),
-            color="red",
-            linestyle="--",
-            label=f"Mean: {np.mean(thresholds):.2f}",
+            mean_thresh, color="red", linestyle="--", label=f"Mean: {mean_thresh:.2f}"
         )
-        plt.title("Distribution of CPU Saturation (Hybrid Regression)")
+        plt.title("Distribution of CPU Saturation (Operational Hybrid)")
         plt.xlabel("CPU Utilization Breakpoint")
         plt.ylabel("Microservice Count")
         plt.legend()
         plt.savefig("threshold_distribution.png")
         print("📈 Saved distribution to threshold_distribution.png")
+
+        if len(results_data) >= 3:
+            results_data.sort(key=lambda item: item["threshold"])
+
+            min_ex = results_data[0]
+            max_ex = results_data[-1]
+            avg_ex = min(
+                results_data, key=lambda item: abs(item["threshold"] - mean_thresh)
+            )
+
+            fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+            examples = [
+                ("Low Threshold", min_ex),
+                ("Avg Threshold", avg_ex),
+                ("High Threshold", max_ex),
+            ]
+
+            for ax, (title_prefix, ex) in zip(axes, examples):
+                ax.plot(
+                    ex["x"],
+                    ex["y"],
+                    marker="o",
+                    linestyle="-",
+                    alpha=0.6,
+                    label="Raw P95 RT",
+                )
+                ax.axhline(
+                    ex["base_rt"],
+                    color="green",
+                    linestyle=":",
+                    label=f"Baseline: {ex['base_rt']:.1f}ms",
+                )
+                if ex["deg_rt"]:
+                    ax.axhline(
+                        ex["deg_rt"],
+                        color="orange",
+                        linestyle=":",
+                        label=f"Degraded: {ex['deg_rt']:.1f}ms",
+                    )
+
+                label_text = (
+                    f"Max Safe CPU: {ex['threshold']}"
+                    if ex["status"] == "Safe"
+                    else f"Saturation CPU: {ex['threshold']}"
+                )
+                ax.axvline(
+                    ex["threshold"],
+                    color="red",
+                    linestyle="--",
+                    linewidth=2,
+                    label=label_text,
+                )
+
+                ax.set_title(f"{title_prefix}: {ex['msname']}")
+                ax.set_xlabel("CPU Utilization")
+                ax.set_ylabel("Latency (ms)")
+                ax.grid(True, alpha=0.3)
+                ax.legend()
+
+            plt.tight_layout()
+            plt.savefig("saturation_examples.png")
+            print("📈 Saved examples to saturation_examples.png")
+
     else:
         print("❌ No saturation knees detected.")
 
