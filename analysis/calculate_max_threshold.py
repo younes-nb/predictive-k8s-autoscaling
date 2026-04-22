@@ -1,3 +1,4 @@
+from asyncio import subprocess
 import os
 import argparse
 import sys
@@ -15,6 +16,44 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from config.defaults import Paths
+
+
+def run_ingestion():
+    ingest_script = os.path.join(REPO_ROOT, "preprocessing", "ingest_traces_parquet.py")
+
+    tasks = [
+        {
+            "table": "msresource",
+            "raw": Paths.RAW_MSRESOURCE,
+            "out": Paths.PARQUET_THRESHOLD_MSRESOURCE,
+        },
+        {
+            "table": "msrtmcre",
+            "raw": Paths.RAW_MSRTMCRE,
+            "out": Paths.PARQUET_THRESHOLD_MSRTMCRE,
+        },
+    ]
+
+    for task in tasks:
+        print(f"🛠  Running Ingestion for {task['table']}...")
+        cmd = [
+            sys.executable,
+            ingest_script,
+            "--table",
+            task["table"],
+            "--feature_set",
+            "threshold_analysis",
+            "--raw_dir",
+            task["raw"],
+            "--out_dir",
+            task["out"],
+        ]
+
+        result = subprocess.run(cmd, capture_output=False)
+        if result.returncode != 0:
+            print(f"❌ Ingestion failed for {task['table']}. Exiting.")
+            sys.exit(1)
+    print("✅ Ingestion complete.\n")
 
 
 def analyze_microservice_arrays(x, y):
@@ -95,6 +134,11 @@ def main():
         help="Number of microservices to join at once",
     )
     args = parser.parse_args()
+
+    if not args.skip_ingest:
+        run_ingestion()
+    else:
+        print("⏭  Skipping ingest step as requested.")
 
     if not os.path.exists(args.temp_dir):
         print(f"📁 Creating directory: {args.temp_dir}")
