@@ -1,4 +1,6 @@
 from asyncio import subprocess
+from datetime import datetime
+from datetime import datetime
 import os
 import argparse
 import sys
@@ -16,6 +18,20 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from config.defaults import Paths
+
+
+class LoggerWriter:
+    def __init__(self, filename):
+        self.terminal = sys.stdout
+        self.log = open(filename, "a", encoding="utf-8")
+
+    def write(self, message):
+        self.terminal.write(message)
+        self.log.write(message)
+
+    def flush(self):
+        self.terminal.flush()
+        self.log.flush()
 
 
 def run_ingestion():
@@ -134,6 +150,20 @@ def main():
         help="Number of microservices to join at once",
     )
     args = parser.parse_args()
+
+    os.makedirs(Paths.LOGS_DIR, exist_ok=True)
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    log_file_path = os.path.join(Paths.LOGS_DIR, f"max_threshold_analysis_{timestamp}.log")
+    dist_img_path = os.path.join(
+        Paths.LOGS_DIR, f"threshold_distribution_{timestamp}.png"
+    )
+    exam_img_path = os.path.join(Paths.LOGS_DIR, f"saturation_examples_{timestamp}.png")
+
+    sys.stdout = LoggerWriter(log_file_path)
+    
+    print(f"🕒 Starting Analysis Run at {timestamp}")
+    print(f"📂 Logs and Output will be saved to: {Paths.LOGS_DIR}\n")
 
     if not args.skip_ingest:
         run_ingestion()
@@ -274,8 +304,8 @@ def main():
         plt.xlabel("CPU Utilization Breakpoint")
         plt.ylabel("Microservice Count")
         plt.legend()
-        plt.savefig("threshold_distribution.png")
-        print("📈 Saved distribution to threshold_distribution.png")
+        plt.savefig(dist_img_path)
+        print(f"📈 Saved distribution to {dist_img_path}")
 
         if len(results_data) >= 3:
             results_data.sort(key=lambda item: item["threshold"])
@@ -336,8 +366,8 @@ def main():
                 ax.legend()
 
             plt.tight_layout()
-            plt.savefig("saturation_examples.png")
-            print("📈 Saved examples to saturation_examples.png")
+            plt.savefig(exam_img_path)
+            print(f"📈 Saved examples to {exam_img_path}")
 
     else:
         print("❌ No saturation knees detected.")
