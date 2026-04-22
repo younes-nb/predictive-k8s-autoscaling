@@ -6,3 +6,4 @@ pandas>=3.0.2
 matplotlib>=3.10.8
 python-dateutil>=2.9.0
 scipy>=1.17.1
+duckdb>=1.5.2
