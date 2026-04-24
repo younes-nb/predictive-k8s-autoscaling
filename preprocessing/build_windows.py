@@ -31,10 +31,9 @@ def build_table_agg(
     df_or_lazy, time_col: str, id_cols: list, freq: str, feature_exprs: list
 ):
     if isinstance(df_or_lazy, pl.DataFrame):
-        if df_or_lazy[time_col].dtype != pl.Datetime:
-            df_or_lazy = df_or_lazy.with_columns(pl.col(time_col).cast(pl.Datetime))
-    else:
-        df_or_lazy = df_or_lazy.with_columns(pl.col(time_col).cast(pl.Datetime))
+        df_or_lazy = df_or_lazy.lazy()
+
+    df_or_lazy = df_or_lazy.with_columns(pl.col(time_col).cast(pl.Datetime))
 
     agg_exprs = [
         pl.col(raw_col).last().alias(feat_name) for feat_name, raw_col in feature_exprs
@@ -49,9 +48,21 @@ def build_table_agg(
     return out
 
 
+def save_chunk(out_dir, shard_idx, chunk_idx, shard_data):
+    base = os.path.join(out_dir, f"part-{shard_idx:04d}_chunk-{chunk_idx:04d}")
+    saved_any = False
+    for split, (Xs, Ys, Ss) in shard_data.items():
+        if Xs:
+            np.save(f"{base}_X_{split}.npy", np.concatenate(Xs))
+            np.save(f"{base}_y_{split}.npy", np.concatenate(Ys))
+            np.save(f"{base}_sid_{split}.npy", np.concatenate(Ss))
+            saved_any = True
+    return saved_any
+
+
 def main():
     p = argparse.ArgumentParser(
-        description="Build windows with per-feature [0, 1] normalization."
+        description="Build windows with incremental disk flushing to prevent OOM."
     )
 
     p.add_argument("--out_dir", required=True)
@@ -75,6 +86,9 @@ def main():
     p.add_argument("--service_col", type=str, default=PREPROCESSING.SERVICE_COL)
     p.add_argument("--max_services", type=int, default=PREPROCESSING.MAX_SERVICES)
     p.add_argument("--subset_seed", type=int, default=PREPROCESSING.SUBSET_SEED)
+    p.add_argument(
+        "--flush_every", type=int, default=100, help="Flush to disk every N services"
+    )
 
     args = p.parse_args()
 
@@ -155,58 +169,78 @@ def main():
                 lf_base = lf_base.filter(
                     pl.col(args.service_col).is_in(list(selected_services))
                 )
-            df_base = lf_base.collect()
+
+            joined_lazy = build_table_agg(
+                lf_base, args.time_col, base_id_cols, args.freq, table_exprs[base_table]
+            )
+
+            bounds = lf_base.select(
+                [
+                    pl.col(args.time_col).min().alias("min_t"),
+                    pl.col(args.time_col).max().alias("max_t"),
+                ]
+            ).collect()
+            min_t, max_t = bounds["min_t"][0], bounds["max_t"][0]
         except Exception as e:
-            print(f"Error reading base parquet {base_pq}: {e}")
+            print(f"Error reading base parquet: {e}")
             continue
-
-        if df_base.height == 0:
-            continue
-
-        joined = build_table_agg(
-            df_base, args.time_col, base_id_cols, args.freq, table_exprs[base_table]
-        )
-        min_t, max_t = df_base[args.time_col].min(), df_base[args.time_col].max()
-        del df_base
-        gc.collect()
 
         for t in needed_tables:
             if t == base_table:
                 continue
-
             t_id_cols = DATASET_TABLES[t]["key_cols"]
             need_cols = list(
                 set([args.time_col, *t_id_cols, *[raw for _, raw in table_exprs[t]]])
             )
+
             try:
-                lf_t = (
+                lf_t_agg = build_table_agg(
                     pl.scan_parquet(table_parts[t])
                     .filter(
                         (pl.col(args.time_col).cast(pl.Datetime) >= min_t)
                         & (pl.col(args.time_col).cast(pl.Datetime) <= max_t)
                     )
-                    .select(need_cols)
+                    .select(need_cols),
+                    args.time_col,
+                    t_id_cols,
+                    args.freq,
+                    table_exprs[t],
                 )
-                df_t_agg = build_table_agg(
-                    lf_t, args.time_col, t_id_cols, args.freq, table_exprs[t]
-                ).collect(engine="streaming")
+
+                # Join keys logic
                 join_on = ["_t"] + FEATURE_SETS[args.feature_set].get(
                     "join_keys", {}
-                ).get(t, list(set(joined.columns).intersection(df_t_agg.columns)))
-                joined = joined.join(df_t_agg, on=join_on, how="left")
-                del df_t_agg
-                gc.collect()
+                ).get(t, [])
+                if len(join_on) == 1:  # Fallback to intersection
+                    schema_joined = joined_lazy.collect_schema().names()
+                    schema_t = lf_t_agg.collect_schema().names()
+                    join_on = list(set(schema_joined).intersection(schema_t))
+
+                joined_lazy = joined_lazy.join(lf_t_agg, on=join_on, how="left")
             except:
                 continue
 
-        joined = joined.drop_nulls(feature_names).sort(
-            list(set(args.id_cols).intersection(joined.columns)) + ["_t"]
+        print("Finalizing joined data...")
+        joined = (
+            joined_lazy.drop_nulls(feature_names)
+            .sort(
+                list(
+                    set(args.id_cols).intersection(joined_lazy.collect_schema().names())
+                )
+                + ["_t"]
+            )
+            .collect()
         )
+        del joined_lazy
+        gc.collect()
+
         if joined.height == 0:
             continue
 
         shard_data = {"train": ([], [], []), "val": ([], [], []), "test": ([], [], [])}
         group_cols = [c for c in args.id_cols if c in joined.columns]
+        group_count = 0
+        chunk_idx = 0
 
         for _, g in joined.group_by(group_cols, maintain_order=True):
             if g.height < args.input_len + args.pred_horizon:
@@ -220,7 +254,6 @@ def main():
 
             for j in range(len(feature_names)):
                 vals = moving_average(feat_raw[:, j], args.smoothing_window)
-
                 if vals is None:
                     if j == target_idx:
                         valid_group = False
@@ -229,10 +262,9 @@ def main():
                     continue
 
                 v_min, v_max = np.min(vals), np.max(vals)
-                if v_max > v_min:
-                    feat_norm[:, j] = (vals - v_min) / (v_max - v_min)
-                else:
-                    feat_norm[:, j] = 0.0
+                feat_norm[:, j] = (
+                    (vals - v_min) / (v_max - v_min) if v_max > v_min else 0.0
+                )
 
             if not valid_group:
                 continue
@@ -264,14 +296,25 @@ def main():
                     shard_data[split][1].append(Y_all[start:end])
                     shard_data[split][2].append(S_all[start:end])
 
-        base = os.path.join(args.out_dir, f"part-{shard_idx:04d}")
-        for split, (Xs, Ys, Ss) in shard_data.items():
-            if Xs:
-                np.save(f"{base}_X_{split}.npy", np.concatenate(Xs))
-                np.save(f"{base}_y_{split}.npy", np.concatenate(Ys))
-                np.save(f"{base}_sid_{split}.npy", np.concatenate(Ss))
+            group_count += 1
 
-        print(f"  Shard saved.")
+            if group_count >= args.flush_every:
+                if save_chunk(args.out_dir, shard_idx, chunk_idx, shard_data):
+                    print(f"  Flushed chunk {chunk_idx} ({group_count} services)")
+                    chunk_idx += 1
+                # Reset buffer
+                shard_data = {
+                    "train": ([], [], []),
+                    "val": ([], [], []),
+                    "test": ([], [], []),
+                }
+                group_count = 0
+                gc.collect()
+
+        if group_count > 0:
+            save_chunk(args.out_dir, shard_idx, chunk_idx, shard_data)
+            print(f"  Final shard chunk saved.")
+
         del joined, shard_data
         gc.collect()
 
