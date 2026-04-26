@@ -1,6 +1,5 @@
 import math
 import random
-import time
 from locust import FastHttpUser, TaskSet, LoadTestShape
 from faker import Faker
 
@@ -36,22 +35,20 @@ class WebsiteUser(FastHttpUser):
     tasks = [UserBehavior]
 
     def wait_time(self):
-        return random.expovariate(1.0 / 3.0)
+        return random.expovariate(1.0 / 4.0)
 
 
 class StatisticalLoadShape(LoadTestShape):
-    warmup_duration = 300
-    warmup_users = 20
-
-    avg_users = 100
-    macro_amplitude = 60
-    macro_cycle = 1200
-
-    micro_amplitude = 40
-    micro_cycle = 180
-
-    noise_factor = 0.35
-    time_limit = 3900
+    warmup_duration = 3600
+    test_duration = 10800
+    time_limit = warmup_duration + test_duration
+    warmup_users = 50
+    avg_users = 250
+    macro_amplitude = 120
+    macro_cycle = 3600
+    micro_amplitude = 60
+    micro_cycle = 300
+    noise_factor = 0.50
 
     def tick(self):
         run_time = self.get_run_time()
@@ -60,7 +57,8 @@ class StatisticalLoadShape(LoadTestShape):
             return None
 
         if run_time < self.warmup_duration:
-            return (self.warmup_users, max(1, int(self.warmup_users / 5)))
+            current_warmup = int((run_time / self.warmup_duration) * self.warmup_users)
+            return (max(1, current_warmup), 2)
 
         test_time = run_time - self.warmup_duration
 
@@ -77,8 +75,18 @@ class StatisticalLoadShape(LoadTestShape):
         std_dev = math.sqrt(base_tick_users) * self.noise_factor
         stochastic_users = int(random.gauss(base_tick_users, std_dev))
 
+        current_minute = int(test_time / 60)
+        is_burst_window = (current_minute % 15 == 0) or (current_minute % 15 == 1)
+
+        if is_burst_window:
+            burst_multiplier = random.uniform(1.5, 2.0)
+            stochastic_users = int(stochastic_users * burst_multiplier)
+
+        if random.random() < 0.02:
+            stochastic_users = int(stochastic_users * 0.7)
+
         final_user_count = max(1, stochastic_users)
 
-        spawn_rate = max(1, int(final_user_count / 3))
+        spawn_rate = max(5, int(final_user_count / 2))
 
         return (final_user_count, spawn_rate)
