@@ -18,7 +18,12 @@ MIN_THRESHOLD = 0.60
 MIN_REPLICAS = 1
 MAX_REPLICAS = 20
 MODEL_PATH = "/app/model.pt"
-INPUT_SIZE = 2 if FEATURE_SET == "cpu_mem" else 1
+if FEATURE_SET == "cpu_mem_traffic":
+    INPUT_SIZE = 3
+elif FEATURE_SET == "cpu_mem":
+    INPUT_SIZE = 2
+else:
+    INPUT_SIZE = 1
 HIDDEN_SIZE = 128
 NUM_LAYERS = 3
 DROPOUT = 0.3

@@ -1,7 +1,30 @@
 import json
 import time
+import numpy as np
 import config
 import utils
+
+
+def normalize_window(window_data):
+    if not window_data or not isinstance(window_data[0], list):
+        if isinstance(window_data, list) and len(window_data) > 0:
+            vals = np.array(window_data, dtype=float)
+            v_min, v_max = np.min(vals), np.max(vals)
+            norm = (
+                (vals - v_min) / (v_max - v_min)
+                if v_max > v_min
+                else np.zeros_like(vals)
+            )
+            return norm.tolist()
+        return window_data
+
+    arr = np.array(window_data, dtype=float)
+    for j in range(arr.shape[1]):
+        col = arr[:, j]
+        v_min, v_max = np.min(col), np.max(col)
+        arr[:, j] = (col - v_min) / (v_max - v_min) if v_max > v_min else 0.0
+
+    return arr.tolist()
 
 
 def fetch_metric_buckets(query, start_time, end_time, grid_timestamps):
@@ -34,7 +57,7 @@ def get_aggregated_window():
     cpu_buckets = fetch_metric_buckets(cpu_query, start_time, end_time, grid_timestamps)
 
     mem_buckets = None
-    if config.FEATURE_SET == "cpu_mem":
+    if config.FEATURE_SET in ["cpu_mem", "cpu_mem_traffic"]:
         mem_query = (
             f"sum(container_memory_working_set_bytes{{namespace='{config.NAMESPACE}', pod=~'{config.DEPLOYMENT}-.*', container!='POD'}}) by (pod) / "
             f"sum(kube_pod_container_resource_limits{{namespace='{config.NAMESPACE}', pod=~'{config.DEPLOYMENT}-.*', resource='memory'}}) by (pod)"
@@ -43,25 +66,52 @@ def get_aggregated_window():
             mem_query, start_time, end_time, grid_timestamps
         )
 
+    mcr_buckets = None
+    if config.FEATURE_SET == "cpu_mem_traffic":
+        mcr_query = (
+            f"sum(rate(istio_requests_total{{destination_workload='{config.DEPLOYMENT}', "
+            f"destination_workload_namespace='{config.NAMESPACE}', reporter='destination'}}[1m])) by (pod)"
+        )
+        mcr_buckets = fetch_metric_buckets(
+            mcr_query, start_time, end_time, grid_timestamps
+        )
+
     final_window = []
     use_prediction = True
 
     for i in range(config.WINDOW_SIZE):
         c_vals = cpu_buckets[i]
-        if not c_vals or (
-            config.FEATURE_SET == "cpu_mem" and (not mem_buckets or not mem_buckets[i])
-        ):
+
+        has_cpu = bool(c_vals)
+        has_mem = config.FEATURE_SET not in ["cpu_mem", "cpu_mem_traffic"] or bool(
+            mem_buckets and mem_buckets[i]
+        )
+        has_mcr = config.FEATURE_SET != "cpu_mem_traffic" or bool(
+            mcr_buckets and mcr_buckets[i]
+        )
+
+        if not (has_cpu and has_mem and has_mcr):
             use_prediction = False
-            row = [0.0, 0.0] if config.FEATURE_SET == "cpu_mem" else 0.0
-            final_window.append(row)
+            if config.FEATURE_SET == "cpu_mem_traffic":
+                final_window.append([0.0, 0.0, 0.0])
+            elif config.FEATURE_SET == "cpu_mem":
+                final_window.append([0.0, 0.0])
+            else:
+                final_window.append(0.0)
         else:
             avg_cpu = sum(c_vals) / len(c_vals)
-            if config.FEATURE_SET == "cpu_mem":
-                m_vals = mem_buckets[i]
-                avg_mem = sum(m_vals) / len(m_vals)
+            if config.FEATURE_SET == "cpu_mem_traffic":
+                avg_mem = sum(mem_buckets[i]) / len(mem_buckets[i])
+                avg_mcr = sum(mcr_buckets[i]) / len(mcr_buckets[i])
+                final_window.append([avg_cpu, avg_mem, avg_mcr])
+            elif config.FEATURE_SET == "cpu_mem":
+                avg_mem = sum(mem_buckets[i]) / len(mem_buckets[i])
                 final_window.append([avg_cpu, avg_mem])
             else:
                 final_window.append(avg_cpu)
+
+    if use_prediction:
+        final_window = normalize_window(final_window)
 
     return final_window, use_prediction
 
