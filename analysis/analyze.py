@@ -6,6 +6,7 @@ import numpy as np
 import glob
 import os
 import argparse
+from datetime import datetime
 
 DEPLOYMENT_LIMITS = {
     "adservice": 0.3,
@@ -145,7 +146,7 @@ def plot_deployments(deployment_data):
     if rows == 0:
         rows = 1
 
-    fig, axes = plt.subplots(rows, cols, figsize=(18, 5 * rows), sharex=False)
+    fig, axes = plt.subplots(rows, cols, figsize=(24, 6 * rows), sharex=False)
     axes = axes.flatten()
 
     for i, (name, df) in enumerate(deployment_data.items()):
@@ -218,7 +219,12 @@ def plot_deployments(deployment_data):
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     plt.subplots_adjust(hspace=0.6)
 
-    output_file = "experiment_results_plot.png"
+    save_dir = "/proj/k8sautoscaledl-PG0/plots"
+    os.makedirs(save_dir, exist_ok=True)
+
+    timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_file = os.path.join(save_dir, f"load_test_results_{timestamp_str}.png")
+
     plt.savefig(output_file, dpi=300)
     print(f"\n✅ Plot saved to {output_file}")
     plt.show()
