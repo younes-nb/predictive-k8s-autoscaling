@@ -69,10 +69,12 @@ def load_model():
         horizon=config.HORIZON,
         rnn_type=config.RNN_TYPE,
         bidirectional=config.BIDIRECTIONAL,
+        residual=config.RESIDUAL,
     )
     if os.path.exists(config.MODEL_PATH):
         checkpoint = torch.load(config.MODEL_PATH, map_location="cpu")
-        model.load_state_dict(checkpoint["model_state_dict"])
+        state_dict = checkpoint.get("model_state_dict", checkpoint)
+        model.load_state_dict(state_dict)
     model.eval()
     return model
 

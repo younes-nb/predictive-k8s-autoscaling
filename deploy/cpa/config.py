@@ -30,6 +30,7 @@ DROPOUT = 0.3
 HORIZON = 5
 RNN_TYPE = "lstm"
 BIDIRECTIONAL = False
+RESIDUAL = os.getenv("RESIDUAL", "false").lower() == "true"
 MC_REPEATS = 25
 K_FACTOR = 2.0
 STATE_FILE = "/tmp/cpa_state.json"

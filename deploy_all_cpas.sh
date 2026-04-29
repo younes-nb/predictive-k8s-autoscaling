@@ -4,6 +4,7 @@ NAMESPACE="online-boutique"
 IMAGE="docker.io/younesnb/predictive-k8s-autoscaler:v1.0.0"
 PROMETHEUS_URL="http://prometheus-stack-kube-prom-prometheus.monitoring.svc.cluster.local:9090"
 FEATURE_SET="cpu_mem_traffic"
+RESIDUAL="false"
 
 for DEPLOYMENT in $(kubectl get deployments -n $NAMESPACE -o jsonpath='{.items[*].metadata.name}'); do
     
@@ -31,6 +32,8 @@ spec:
             value: "${PROMETHEUS_URL}"
           - name: FEATURE_SET
             value: "${FEATURE_SET}"
+          - name: RESIDUAL
+            value: "${RESIDUAL}"
           - name: TARGET_DEPLOYMENT
             value: "${DEPLOYMENT}"
           - name: TARGET_NAMESPACE

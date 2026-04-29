@@ -128,6 +128,7 @@ def train(args):
         horizon=args.pred_horizon,
         rnn_type=args.rnn_type,
         bidirectional=args.bidirectional,
+        residual=args.residual,
     ).to(device)
 
     optimizer = torch.optim.Adam(
@@ -247,7 +248,7 @@ if __name__ == "__main__":
     p.add_argument(
         "--bidirectional", action="store_true", default=TRAINING.BIDIRECTIONAL
     )
-
+    p.add_argument("--residual", action="store_true", default=TRAINING.RESIDUAL)
     try:
         train(p.parse_args())
     except Exception as e:

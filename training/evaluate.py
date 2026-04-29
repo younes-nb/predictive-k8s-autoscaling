@@ -18,7 +18,7 @@ REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, os.pardir))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from config.defaults import PATHS, TRAINING
+from config.defaults import PATHS, TRAINING, PREPROCESSING
 from common.dataset import ShardedWindowsDataset
 from common.models import RNNForecaster
 
@@ -88,10 +88,12 @@ def evaluate(args):
     hidden_size = ckpt_args.get("hidden_size", TRAINING.HIDDEN_SIZE)
     num_layers = ckpt_args.get("num_layers", TRAINING.NUM_LAYERS)
     dropout = ckpt_args.get("dropout", TRAINING.DROPOUT)
-    horizon = ckpt_args.get("pred_horizon", 5)
+    horizon = ckpt_args.get("pred_horizon", PREPROCESSING.PRED_HORIZON)
     rnn_type = ckpt_args.get("rnn_type", "lstm")
-    input_len = ckpt_args.get("input_len", 60)
-    feature_set = ckpt_args.get("feature_set", "unknown")
+    input_len = ckpt_args.get("input_len", PREPROCESSING.INPUT_LEN)
+    feature_set = ckpt_args.get("feature_set", PREPROCESSING.FEATURE_SET)
+    bidirectional = ckpt_args.get("bidirectional", args.bidirectional)
+    residual_mode = ckpt_args.get("residual", args.residual)
 
     logging.info(f"Model trained on feature_set: {feature_set}")
     logging.info(f"RNN Type: {rnn_type}")
@@ -123,7 +125,8 @@ def evaluate(args):
         dropout=dropout,
         horizon=horizon,
         rnn_type=rnn_type,
-        bidirectional=args.bidirectional,
+        bidirectional=bidirectional,
+        residual=residual_mode,
     ).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
 
@@ -180,11 +183,11 @@ if __name__ == "__main__":
     p.add_argument("--checkpoint_path", required=True)
     p.add_argument("--batch_size", type=int, default=TRAINING.BATCH_SIZE)
     p.add_argument("--num_workers", type=int, default=TRAINING.NUM_WORKERS)
-    p.add_argument("--cpu", action="store_true")
+    p.add_argument("--cpu", action="store_true", default=False)
     p.add_argument(
         "--bidirectional", action="store_true", default=TRAINING.BIDIRECTIONAL
     )
-
+    p.add_argument("--residual", action="store_true", default=TRAINING.RESIDUAL)
     try:
         evaluate(p.parse_args())
     except Exception:

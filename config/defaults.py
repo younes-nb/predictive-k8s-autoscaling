@@ -215,6 +215,7 @@ class TrainingDefaults:
     INFERENCE_REPEATS: int = 100
     GLOBAL_THRESHOLD: bool = False
     BIDIRECTIONAL: bool = False
+    RESIDUAL: bool = False
 
 
 PREPROCESSING = PreprocessingDefaults()

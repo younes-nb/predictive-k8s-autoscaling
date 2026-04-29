@@ -12,11 +12,13 @@ class RNNForecaster(nn.Module):
         horizon: int = 5,
         rnn_type: str = "lstm",
         bidirectional: bool = False,
+        residual: bool = False,
     ):
         super().__init__()
         self.horizon = horizon
         self.rnn_type = rnn_type.lower()
         self.bidirectional = bidirectional
+        self.residual = residual
 
         if self.rnn_type not in ("lstm", "gru"):
             raise ValueError(f"Unsupported rnn_type: {self.rnn_type}")
@@ -33,7 +35,6 @@ class RNNForecaster(nn.Module):
         )
 
         self.dropout_layer = nn.Dropout(dropout)
-
         fc_input_dim = hidden_size * 2 if self.bidirectional else hidden_size
         self.fc = nn.Linear(fc_input_dim, horizon)
 
@@ -44,6 +45,13 @@ class RNNForecaster(nn.Module):
             x = x.squeeze(-1)
 
         out, _ = self.rnn(x)
-        last = out[:, -1, :]
-        last = self.dropout_layer(last)
-        return self.fc(last)
+        last_hidden = out[:, -1, :]
+        last_hidden = self.dropout_layer(last_hidden)
+
+        delta = self.fc(last_hidden)
+
+        if self.residual:
+            current_val = x[:, -1, 0].unsqueeze(-1)
+            return current_val + delta
+
+        return delta

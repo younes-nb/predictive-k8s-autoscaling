@@ -43,7 +43,6 @@ def main():
     )
     ap.add_argument("--windows_dir", default=PATHS.WINDOWS_DIR)
     ap.add_argument("--checkpoint_path", default=DEFAULT_CHECKPOINT_PATH)
-
     ap.add_argument("--cpu", action="store_true")
     ap.add_argument("--rnn_type", choices=["lstm", "gru"], default="lstm")
     ap.add_argument("--input_len", type=int)
@@ -51,11 +50,9 @@ def main():
     ap.add_argument("--hidden_size", type=int)
     ap.add_argument("--num_layers", type=int)
     ap.add_argument("--dropout", type=float)
-
     ap.add_argument("--skip_preprocessing", action="store_true")
     ap.add_argument("--skip_training", action="store_true")
     ap.add_argument("--skip_testing", action="store_true")
-
     ap.add_argument("--skip_fetch", action="store_true")
     ap.add_argument("--skip_ingest", action="store_true")
     ap.add_argument("--skip_windows", action="store_true")
@@ -83,6 +80,7 @@ def main():
         help="Use a single global adaptive threshold for all microservices in a batch.",
     )
     ap.add_argument("--bidirectional", action="store_true")
+    ap.add_argument("--residual", action="store_true",)
     ap.set_defaults(use_weights=TRAINING.USE_WEIGHTS)
 
     args = ap.parse_args()
@@ -183,6 +181,8 @@ def main():
             cmd_train.append("--use_weights")
         if args.bidirectional:
             cmd_train.append("--bidirectional")
+        if args.residual:
+            cmd_train.append("--residual")
 
         total_times["training"] = run(cmd_train, "Step 2b: Training Model")
     else:
@@ -201,6 +201,8 @@ def main():
             cmd_test.append("--cpu")
         if args.bidirectional:
             cmd_test.append("--bidirectional")
+        if args.residual:
+            cmd_test.append("--residual")
 
         total_times["testing"] = run(cmd_test, "Step 4: Test Model")
     else:
