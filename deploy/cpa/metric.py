@@ -1,27 +1,64 @@
 import json
 import time
+import os
 import numpy as np
 import config
 import utils
 
+STATE_FILE = "/tmp/scaler_state.json"
 
-def normalize_window(window_data):
-    if not window_data or not isinstance(window_data[0], list):
-        if isinstance(window_data, list) and len(window_data) > 0:
-            vals = np.array(window_data, dtype=float)
-            v_min, v_max = np.min(vals), np.max(vals)
-            norm = (
-                (vals - v_min) / (v_max - v_min)
-                if v_max > v_min
-                else np.zeros_like(vals)
-            )
-            return norm.tolist()
+
+def smooth_window(window_data, window_size=5):
+    if not window_data or len(window_data) < window_size:
         return window_data
 
     arr = np.array(window_data, dtype=float)
+    smoothed = np.zeros_like(arr)
+    kernel = np.ones(window_size) / window_size
+
     for j in range(arr.shape[1]):
         col = arr[:, j]
-        v_min, v_max = np.min(col), np.max(col)
+        pad_size = window_size // 2
+        padded = np.pad(col, (pad_size, pad_size), mode="edge")
+        smoothed_col = np.convolve(padded, kernel, mode="valid")
+        smoothed[:, j] = smoothed_col[: len(col)]
+
+    return smoothed.tolist()
+
+
+def normalize_and_track_global(window_data):
+    if not window_data or not isinstance(window_data[0], list):
+        return window_data
+
+    arr = np.array(window_data, dtype=float)
+    num_features = arr.shape[1]
+
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, "r") as f:
+                state = json.load(f)
+                global_mins = state.get("mins", [float("inf")] * num_features)
+                global_maxs = state.get("maxs", [float("-inf")] * num_features)
+        except json.JSONDecodeError:
+            global_mins = [float("inf")] * num_features
+            global_maxs = [float("-inf")] * num_features
+    else:
+        global_mins = [float("inf")] * num_features
+        global_maxs = [float("-inf")] * num_features
+
+    for j in range(num_features):
+        col_min = float(np.min(arr[:, j]))
+        col_max = float(np.max(arr[:, j]))
+        global_mins[j] = min(global_mins[j], col_min)
+        global_maxs[j] = max(global_maxs[j], col_max)
+
+    with open(STATE_FILE, "w") as f:
+        json.dump({"mins": global_mins, "maxs": global_maxs}, f)
+
+    for j in range(num_features):
+        col = arr[:, j]
+        v_min = global_mins[j]
+        v_max = global_maxs[j]
         arr[:, j] = (col - v_min) / (v_max - v_min) if v_max > v_min else 0.0
 
     return arr.tolist()
@@ -97,7 +134,7 @@ def get_aggregated_window():
             elif config.FEATURE_SET == "cpu_mem":
                 final_window.append([0.0, 0.0])
             else:
-                final_window.append(0.0)
+                final_window.append([0.0])
         else:
             avg_cpu = sum(c_vals) / len(c_vals)
             if config.FEATURE_SET == "cpu_mem_traffic":
@@ -108,10 +145,11 @@ def get_aggregated_window():
                 avg_mem = sum(mem_buckets[i]) / len(mem_buckets[i])
                 final_window.append([avg_cpu, avg_mem])
             else:
-                final_window.append(avg_cpu)
+                final_window.append([avg_cpu])
 
     if use_prediction:
-        final_window = normalize_window(final_window)
+        final_window = smooth_window(final_window, window_size=5)
+        final_window = normalize_and_track_global(final_window)
 
     return final_window, use_prediction
 
