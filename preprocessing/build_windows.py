@@ -300,29 +300,28 @@ def main():
                         ],
                         axis=1,
                     )
-                    feat_norm = np.zeros_like(feat_raw)
+
+                    feat_processed = np.zeros_like(feat_raw)
                     valid_group = True
 
                     for j in range(len(feature_names)):
                         vals = moving_average(feat_raw[:, j], args.smoothing_window)
+
                         if vals is None:
                             if j == target_idx:
                                 valid_group = False
                                 break
-                            feat_norm[:, j] = 0.0
+                            feat_processed[:, j] = 0.0
                             continue
 
-                        v_min, v_max = np.min(vals), np.max(vals)
-                        feat_norm[:, j] = (
-                            (vals - v_min) / (v_max - v_min) if v_max > v_min else 0.0
-                        )
+                        feat_processed[:, j] = vals
 
                     if not valid_group:
                         continue
 
                     X_all, Y_all, S_all = windowize_multivariate(
-                        feat_norm,
-                        feat_norm[:, target_idx],
+                        feat_processed,
+                        feat_processed[:, target_idx],
                         args.input_len,
                         args.pred_horizon,
                         args.stride,
