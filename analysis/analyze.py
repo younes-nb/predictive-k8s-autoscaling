@@ -119,6 +119,10 @@ def calculate_metrics(global_df):
     else:
         avg_sigma = 0.0
         p95_sigma = 0.0
+    if "replicas" in global_df.columns:
+        avg_replicas = global_df["replicas"].mean()
+    else:
+        avg_replicas = 0.0
 
     print("=" * 40)
     print("📊  GLOBAL EXPERIMENT METRICS")
@@ -133,6 +137,8 @@ def calculate_metrics(global_df):
     print("-" * 20)
     print(f"Avg Uncertainty: {avg_sigma:.5f}")
     print(f"P95 Uncertainty: {p95_sigma:.5f}")
+    print("=" * 40)
+    print(f"Avg Replicas: {avg_replicas:.2f}")
     print("=" * 40)
 
 
