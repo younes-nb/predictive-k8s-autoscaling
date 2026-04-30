@@ -37,29 +37,33 @@ def normalize_and_track_global(window_data):
         try:
             with open(STATE_FILE, "r") as f:
                 state = json.load(f)
-                global_mins = state.get("mins", [float("inf")] * num_features)
-                global_maxs = state.get("maxs", [float("-inf")] * num_features)
-        except json.JSONDecodeError:
-            global_mins = [float("inf")] * num_features
-            global_maxs = [float("-inf")] * num_features
+                global_mins = state.get("mins", [0.0] * num_features)
+                global_maxs = state.get("maxs", [1.0] * num_features)
+        except:
+            global_mins, global_maxs = [0.0] * num_features, [1.0] * num_features
     else:
-        global_mins = [float("inf")] * num_features
-        global_maxs = [float("-inf")] * num_features
+        global_mins, global_maxs = [0.0] * num_features, [1.0] * num_features
 
     for j in range(num_features):
-        col_min = float(np.min(arr[:, j]))
-        col_max = float(np.max(arr[:, j]))
-        global_mins[j] = min(global_mins[j], col_min)
-        global_maxs[j] = max(global_maxs[j], col_max)
+        is_traffic = config.FEATURE_SET == "cpu_mem_traffic" and j == 2
+
+        if is_traffic:
+            col_min = float(np.min(arr[:, j]))
+            col_max = float(np.max(arr[:, j]))
+            if global_mins[j] == 0.0 and global_maxs[j] == 1.0:
+                global_mins[j], global_maxs[j] = col_min, col_max
+            else:
+                global_mins[j] = min(global_mins[j], col_min)
+                global_maxs[j] = max(global_maxs[j], col_max)
+
+            v_min, v_max = global_mins[j], global_maxs[j]
+            arr[:, j] = (arr[:, j] - v_min) / (v_max - v_min) if v_max > v_min else 0.0
+        else:
+            arr[:, j] = np.clip(arr[:, j], 0.0, 1.0)
+            global_mins[j], global_maxs[j] = 0.0, 1.0
 
     with open(STATE_FILE, "w") as f:
         json.dump({"mins": global_mins, "maxs": global_maxs}, f)
-
-    for j in range(num_features):
-        col = arr[:, j]
-        v_min = global_mins[j]
-        v_max = global_maxs[j]
-        arr[:, j] = (col - v_min) / (v_max - v_min) if v_max > v_min else 0.0
 
     return arr.tolist()
 
@@ -170,9 +174,25 @@ def main():
 
     if res_load:
         current_load = float(res_load[0]["value"][1])
+        current_load = max(0.0, min(1.0, current_load))
     else:
         last_point = history[-1] if history else 0.0
         current_load = last_point[0] if isinstance(last_point, list) else last_point
+        
+    q_mem = (
+        f"sum(container_memory_working_set_bytes{{namespace='{config.NAMESPACE}', pod=~'{config.DEPLOYMENT}-.*', container!='POD'}}) / "
+        f"sum(kube_pod_container_resource_limits{{namespace='{config.NAMESPACE}', pod=~'{config.DEPLOYMENT}-.*', resource='memory'}})"
+    )
+    res_mem = utils.query_prometheus(q_mem)
+    current_mem = float(res_mem[0]["value"][1]) if res_mem else 0.0
+    current_mem = max(0.0, min(1.0, current_mem))
+
+    q_mcr = (
+        f"sum(rate(istio_requests_total{{destination_workload='{config.DEPLOYMENT}', "
+        f"destination_workload_namespace='{config.NAMESPACE}', reporter='destination'}}[1m]))"
+    )
+    res_mcr = utils.query_prometheus(q_mcr)
+    current_mcr = float(res_mcr[0]["value"][1]) if res_mcr else 0.0
 
     t_end = time.time()
 
@@ -182,6 +202,8 @@ def main():
                 "metrics": history,
                 "use_prediction": use_prediction,
                 "current_load": current_load,
+                "current_memory": current_mem,
+                "current_mcr": current_mcr,
                 "current_replicas": current_replicas,
                 "duration_seconds": t_end - t_start,
             }

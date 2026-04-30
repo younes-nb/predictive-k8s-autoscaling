@@ -107,13 +107,23 @@ def get_tehran_time():
     return tehran_time.strftime("%Y-%m-%d %H:%M:%S")
 
 
-def log_metrics(timestamp, curr_cpu, pred_cpu, threshold, sigma, inf_time, replicas):
+def log_metrics(
+    timestamp,
+    curr_cpu,
+    curr_mem,
+    curr_mcr,
+    pred_cpu,
+    threshold,
+    sigma,
+    inf_time,
+    replicas,
+):
     if not os.path.exists(config.EXPERIMENT_METRICS_FILE):
         with open(config.EXPERIMENT_METRICS_FILE, "w") as f:
             f.write(
-                "timestamp_tehran,current_cpu_60th,predicted_cpu_max,threshold,sigma,inference_time_s,current_replicas\n"
+                "timestamp_tehran,current_cpu_60th,current_mem_60th,current_mcr_60th,predicted_cpu_max,threshold,sigma,inference_time_s,current_replicas\n"
             )
     with open(config.EXPERIMENT_METRICS_FILE, "a") as f:
         f.write(
-            f"{timestamp},{curr_cpu:.4f},{pred_cpu:.4f},{threshold:.4f},{sigma:.4f},{inf_time:.4f},{replicas}\n"
+            f"{timestamp},{curr_cpu:.4f},{curr_mem:.4f},{curr_mcr:.4f},{pred_cpu:.4f},{threshold:.4f},{sigma:.4f},{inf_time:.4f},{replicas}\n"
         )

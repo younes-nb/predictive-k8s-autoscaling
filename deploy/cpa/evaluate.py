@@ -28,6 +28,8 @@ def main():
         history_metrics = data.get("metrics", [])
         use_prediction = data.get("use_prediction", False)
         current_load = float(data.get("current_load", 0.0))
+        current_memory = float(data.get("current_memory", 0.0))
+        current_mcr = float(data.get("current_mcr", 0.0))
         current_replicas = int(data.get("current_replicas", 1))
         metric_duration = float(data.get("duration_seconds", 0.0))
 
@@ -53,6 +55,7 @@ def main():
                 preds_tensor = (
                     raw_preds[0] if isinstance(raw_preds, tuple) else raw_preds
                 )
+                preds_tensor = torch.clamp(preds_tensor, min=0.0, max=1.0)
                 predicted_load_final = preds_tensor[0, -1].item()
 
             if config.THRESHOLD_MODE == "static":
@@ -105,6 +108,8 @@ def main():
         utils.log_metrics(
             utils.get_tehran_time(),
             current_load,
+            current_memory,
+            current_mcr,
             predicted_load_final,
             adaptive_threshold,
             model_sigma,
