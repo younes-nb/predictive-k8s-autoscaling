@@ -119,8 +119,8 @@ def calculate_metrics(global_df):
     else:
         avg_sigma = 0.0
         p95_sigma = 0.0
-    if "replicas" in global_df.columns:
-        avg_replicas = global_df["replicas"].mean()
+    if "current_replicas" in global_df.columns:
+        avg_replicas = global_df["current_replicas"].mean()
     else:
         avg_replicas = 0.0
 
