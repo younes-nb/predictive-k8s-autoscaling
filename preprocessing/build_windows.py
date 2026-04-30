@@ -263,7 +263,13 @@ def main():
                         join_on = list(set(schema_joined).intersection(schema_t))
 
                     joined_lazy = joined_lazy.join(lf_t_agg, on=join_on, how="left")
-
+                if "cpu_diff" in feature_names:
+                    joined_lazy = joined_lazy.with_columns(
+                        pl.col("cpu_diff")
+                        .diff()
+                        .over(base_id_cols)
+                        .fill_null(0.0)
+                    )
                 joined = (
                     joined_lazy.drop_nulls(feature_names)
                     .sort(

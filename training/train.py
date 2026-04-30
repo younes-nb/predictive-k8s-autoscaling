@@ -58,19 +58,29 @@ def setup_logging(mode="train"):
     return log_path
 
 
-def weighted_mse(preds, target, w=None, under_penalty=5.0):
+def weighted_mse(preds, target, w=None, under_penalty=5.0, deriv_penalty=2.0):
     diff = preds - target
     sq_err = diff**2
     under_mask = (preds < target).float()
     asym_weight = 1.0 + (under_mask * (under_penalty - 1.0))
-    loss_matrix = sq_err * asym_weight
-    per_sample = loss_matrix.mean(dim=1)
+    value_loss_matrix = sq_err * asym_weight
+    value_loss = value_loss_matrix.mean(dim=1)
+
+    if preds.size(1) > 1:
+        preds_deriv = preds[:, 1:] - preds[:, :-1]
+        target_deriv = target[:, 1:] - target[:, :-1]
+        deriv_loss = (preds_deriv - target_deriv) ** 2
+        deriv_loss = deriv_loss.mean(dim=1)
+    else:
+        deriv_loss = 0.0
+
+    total_per_sample = value_loss + (deriv_penalty * deriv_loss)
 
     if w is None:
-        return per_sample.mean()
+        return total_per_sample.mean()
 
     w = w.clamp(min=0.1, max=15.0)
-    return (w * per_sample).sum() / w.sum().clamp_min(1e-6)
+    return (w * total_per_sample).sum() / w.sum().clamp_min(1e-6)
 
 
 def train(args):
@@ -157,7 +167,13 @@ def train(args):
 
             optimizer.zero_grad()
             preds = model(x)
-            loss = loss = weighted_mse(preds, y, w, under_penalty=args.under_penalty)
+            loss = loss = weighted_mse(
+                preds,
+                y,
+                w,
+                under_penalty=args.under_penalty,
+                deriv_penalty=args.deriv_penalt,
+            )
             loss.backward()
 
             if args.grad_clip:
@@ -182,7 +198,13 @@ def train(args):
                 x, y = x.to(device), y.to(device)
                 preds = model(x)
 
-                loss = weighted_mse(preds, y, w, under_penalty=args.under_penalty)
+                loss = weighted_mse(
+                    preds,
+                    y,
+                    w,
+                    under_penalty=args.under_penalty,
+                    deriv_penalty=args.deriv_penalt,
+                )
                 val_loss_accum += loss.item() * x.size(0)
 
         avg_val_loss = val_loss_accum / len(val_ds) if len(val_ds) > 0 else 0.0
@@ -249,6 +271,11 @@ if __name__ == "__main__":
         "--bidirectional", action="store_true", default=TRAINING.BIDIRECTIONAL
     )
     p.add_argument("--residual", action="store_true", default=TRAINING.RESIDUAL)
+    p.add_argument(
+        "--deriv_penalty",
+        type=float,
+        default=TRAINING.DERIV_PENALTY,
+    )
     try:
         train(p.parse_args())
     except Exception as e:

@@ -61,6 +61,7 @@ FEATURES: Dict[str, Dict[str, str]] = {
     "http_mcr": {"table": "msrtmcre", "column": "http_mcr"},
     "providermq_rt": {"table": "msrtmcre", "column": "providermq_rt"},
     "providermq_mcr": {"table": "msrtmcre", "column": "providermq_mcr"},
+    "cpu_diff": {"table": "msresource", "column": "cpu_utilization"},
 }
 
 
@@ -87,7 +88,7 @@ FEATURE_SETS: Dict[str, Dict[str, Any]] = {
         "join_keys": {"msresource": ["nodeid"], "node": ["nodeid"]},
     },
     "cpu_mem_traffic": {
-        "features": ["cpu_utilization", "memory_utilization", "total_mcr"],
+        "features": ["cpu_utilization", "memory_utilization", "total_mcr", "cpu_diff"],
         "target": "cpu_utilization",
         "base_table": "msresource",
         "join_keys": {
@@ -178,7 +179,7 @@ def table_to_feature_exprs(feature_set: str) -> Dict[str, List[tuple]]:
 class PreprocessingDefaults:
     INPUT_LEN: int = 60
     PRED_HORIZON: int = 5
-    STRIDE: int = 10
+    STRIDE: int = 1
     TRAIN_FRAC: float = 0.7
     VAL_FRAC: float = 0.1
     SMOOTHING_WINDOW: int = 5
@@ -216,6 +217,7 @@ class TrainingDefaults:
     GLOBAL_THRESHOLD: bool = False
     BIDIRECTIONAL: bool = False
     RESIDUAL: bool = False
+    DERIV_PENALTY: float = 2.0
 
 
 PREPROCESSING = PreprocessingDefaults()
