@@ -34,6 +34,6 @@ RNN_TYPE = "lstm"
 BIDIRECTIONAL = False
 RESIDUAL = os.getenv("RESIDUAL", "false").lower() == "true"
 MC_REPEATS = 25
-K_FACTOR = 2.0
+K_FACTOR = 20.0
 STATE_FILE = "/tmp/cpa_state.json"
 EXPERIMENT_METRICS_FILE = "/tmp/experiment_metrics.csv"
