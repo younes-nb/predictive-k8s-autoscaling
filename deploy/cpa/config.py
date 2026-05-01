@@ -18,9 +18,11 @@ MIN_THRESHOLD = 0.60
 MIN_REPLICAS = 1
 MAX_REPLICAS = 20
 MODEL_PATH = "/app/model.pt"
-if FEATURE_SET == "cpu_mem_traffic":
+if FEATURE_SET == "cpu_mem_traffic_diff":
+    INPUT_SIZE = 4
+elif FEATURE_SET in ["cpu_mem_traffic", "cpu_mem_diff"]:
     INPUT_SIZE = 3
-elif FEATURE_SET == "cpu_mem":
+elif FEATURE_SET in ["cpu_mem", "cpu_diff"]:
     INPUT_SIZE = 2
 else:
     INPUT_SIZE = 1

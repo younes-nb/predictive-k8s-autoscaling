@@ -45,7 +45,10 @@ def normalize_and_track_global(window_data):
         global_mins, global_maxs = [0.0] * num_features, [1.0] * num_features
 
     for j in range(num_features):
-        is_traffic = config.FEATURE_SET == "cpu_mem_traffic" and j == 2
+        is_traffic = "traffic" in config.FEATURE_SET and j == (
+            2 if "mem" in config.FEATURE_SET else 1
+        )
+        is_diff = config.FEATURE_SET.endswith("_diff") and j == num_features - 1
 
         if is_traffic:
             col_min = float(np.min(arr[:, j]))
@@ -58,6 +61,9 @@ def normalize_and_track_global(window_data):
 
             v_min, v_max = global_mins[j], global_maxs[j]
             arr[:, j] = (arr[:, j] - v_min) / (v_max - v_min) if v_max > v_min else 0.0
+        elif is_diff:
+            arr[:, j] = np.clip(arr[:, j], -1.0, 1.0)
+            global_mins[j], global_maxs[j] = -1.0, 1.0
         else:
             arr[:, j] = np.clip(arr[:, j], 0.0, 1.0)
             global_mins[j], global_maxs[j] = 0.0, 1.0
@@ -98,7 +104,7 @@ def get_aggregated_window():
     cpu_buckets = fetch_metric_buckets(cpu_query, start_time, end_time, grid_timestamps)
 
     mem_buckets = None
-    if config.FEATURE_SET in ["cpu_mem", "cpu_mem_traffic"]:
+    if "mem" in config.FEATURE_SET:
         mem_query = (
             f"sum(container_memory_working_set_bytes{{namespace='{config.NAMESPACE}', pod=~'{config.DEPLOYMENT}-.*', container!='POD'}}) by (pod) / "
             f"sum(kube_pod_container_resource_limits{{namespace='{config.NAMESPACE}', pod=~'{config.DEPLOYMENT}-.*', resource='memory'}}) by (pod)"
@@ -108,7 +114,7 @@ def get_aggregated_window():
         )
 
     mcr_buckets = None
-    if config.FEATURE_SET == "cpu_mem_traffic":
+    if "traffic" in config.FEATURE_SET:
         mcr_query = (
             f"sum(rate(istio_requests_total{{destination_workload='{config.DEPLOYMENT}', "
             f"destination_workload_namespace='{config.NAMESPACE}', reporter='destination'}}[1m])) by (pod)"
@@ -119,37 +125,38 @@ def get_aggregated_window():
 
     final_window = []
     use_prediction = True
+    prev_cpu = None
 
     for i in range(config.WINDOW_SIZE):
         c_vals = cpu_buckets[i]
 
         has_cpu = bool(c_vals)
-        has_mem = config.FEATURE_SET not in ["cpu_mem", "cpu_mem_traffic"] or bool(
+        has_mem = ("mem" not in config.FEATURE_SET) or bool(
             mem_buckets and mem_buckets[i]
         )
-        has_mcr = config.FEATURE_SET != "cpu_mem_traffic" or bool(
+        has_mcr = ("traffic" not in config.FEATURE_SET) or bool(
             mcr_buckets and mcr_buckets[i]
         )
 
         if not (has_cpu and has_mem and has_mcr):
             use_prediction = False
-            if config.FEATURE_SET == "cpu_mem_traffic":
-                final_window.append([0.0, 0.0, 0.0])
-            elif config.FEATURE_SET == "cpu_mem":
-                final_window.append([0.0, 0.0])
-            else:
-                final_window.append([0.0])
+            final_window.append([0.0] * config.INPUT_SIZE)
+            prev_cpu = 0.0
         else:
             avg_cpu = sum(c_vals) / len(c_vals)
-            if config.FEATURE_SET == "cpu_mem_traffic":
-                avg_mem = sum(mem_buckets[i]) / len(mem_buckets[i])
-                avg_mcr = sum(mcr_buckets[i]) / len(mcr_buckets[i])
-                final_window.append([avg_cpu, avg_mem, avg_mcr])
-            elif config.FEATURE_SET == "cpu_mem":
-                avg_mem = sum(mem_buckets[i]) / len(mem_buckets[i])
-                final_window.append([avg_cpu, avg_mem])
-            else:
-                final_window.append([avg_cpu])
+
+            cpu_diff = avg_cpu - prev_cpu if prev_cpu is not None else 0.0
+            prev_cpu = avg_cpu
+
+            row = [avg_cpu]
+            if "mem" in config.FEATURE_SET:
+                row.append(sum(mem_buckets[i]) / len(mem_buckets[i]))
+            if "traffic" in config.FEATURE_SET:
+                row.append(sum(mcr_buckets[i]) / len(mcr_buckets[i]))
+            if config.FEATURE_SET.endswith("_diff"):
+                row.append(cpu_diff)
+
+            final_window.append(row)
 
     if use_prediction:
         final_window = smooth_window(final_window, window_size=5)
@@ -178,7 +185,7 @@ def main():
     else:
         last_point = history[-1] if history else 0.0
         current_load = last_point[0] if isinstance(last_point, list) else last_point
-        
+
     q_mem = (
         f"sum(container_memory_working_set_bytes{{namespace='{config.NAMESPACE}', pod=~'{config.DEPLOYMENT}-.*', container!='POD'}}) / "
         f"sum(kube_pod_container_resource_limits{{namespace='{config.NAMESPACE}', pod=~'{config.DEPLOYMENT}-.*', resource='memory'}})"

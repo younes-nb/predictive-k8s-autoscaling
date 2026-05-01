@@ -88,6 +88,15 @@ FEATURE_SETS: Dict[str, Dict[str, Any]] = {
         "join_keys": {"msresource": ["nodeid"], "node": ["nodeid"]},
     },
     "cpu_mem_traffic": {
+        "features": ["cpu_utilization", "memory_utilization", "total_mcr"],
+        "target": "cpu_utilization",
+        "base_table": "msresource",
+        "join_keys": {
+            "msresource": ["msname", "msinstanceid"],
+            "msrtmcre": ["msname", "msinstanceid"],
+        },
+    },
+    "cpu_mem_traffic_diff": {
         "features": ["cpu_utilization", "memory_utilization", "total_mcr", "cpu_diff"],
         "target": "cpu_utilization",
         "base_table": "msresource",
@@ -190,7 +199,7 @@ class PreprocessingDefaults:
     FREQ: str = "1m"
     MAX_SERVICES: int = 2000
     SUBSET_SEED: int = 42
-    FEATURE_SET: str = "cpu_mem_traffic"
+    FEATURE_SET: str = "cpu_mem_traffic_diff"
 
 
 @dataclass(frozen=True)
