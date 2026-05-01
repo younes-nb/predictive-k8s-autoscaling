@@ -15,7 +15,7 @@ def fetch_hpa_data():
     end_time = datetime.utcnow()
     start_time = end_time - timedelta(minutes=MINUTES_TO_FETCH)
 
-    query = "kube_hpa_status_current_replicas"
+    query = 'kube_horizontalpodautoscaler_status_current_replicas{namespace="online-boutique"}'
 
     params = {
         "query": query,
