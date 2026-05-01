@@ -172,7 +172,7 @@ def train(args):
                 y,
                 w,
                 under_penalty=args.under_penalty,
-                deriv_penalty=args.deriv_penalt,
+                deriv_penalty=args.deriv_penalty,
             )
             loss.backward()
 
@@ -203,7 +203,7 @@ def train(args):
                     y,
                     w,
                     under_penalty=args.under_penalty,
-                    deriv_penalty=args.deriv_penalt,
+                    deriv_penalty=args.deriv_penalty,
                 )
                 val_loss_accum += loss.item() * x.size(0)
 
