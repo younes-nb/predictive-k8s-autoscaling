@@ -68,7 +68,19 @@ def fetch_hpa_data(start_ts, end_ts):
 
         output_filename = "hpa_historical_logs.csv"
         df.to_csv(output_filename, index=False)
-        print(f"✅ Successfully saved {len(df)} records to {output_filename}")
+        print(f"✅ Successfully saved {len(df)} records to {output_filename}\n")
+
+        if not df.empty:
+            avg_replicas = df["Replicas"].mean()
+            print("=" * 40)
+            print("📊  GLOBAL HPA METRICS")
+            print("=" * 40)
+            print(f"Total Data Points:    {len(df)}")
+            print("-" * 20)
+            print(f"Avg Replicas:         {avg_replicas:.2f}")
+            print("=" * 40)
+        else:
+            print("❌ No data available to calculate metrics.")
 
     except requests.exceptions.HTTPError as e:
         print(f"❌ Authentication or Server Error: {e}")
