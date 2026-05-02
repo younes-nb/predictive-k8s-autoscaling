@@ -265,10 +265,17 @@ def main():
                     joined_lazy = joined_lazy.join(lf_t_agg, on=join_on, how="left")
                 if "cpu_diff" in feature_names:
                     joined_lazy = joined_lazy.with_columns(
-                        pl.col("cpu_diff")
+                        pl.col("cpu_diff").diff().over(base_id_cols).fill_null(0.0)
+                    )
+                if "mcr_diff" in feature_names:
+                    epsilon = 1e-6
+                    joined_lazy = joined_lazy.with_columns(
+                        (pl.col("mcr_diff") + epsilon)
+                        .log()
                         .diff()
-                        .over(base_id_cols)
+                        .over(["msname", "msinstanceid"])
                         .fill_null(0.0)
+                        .alias("mcr_diff")
                     )
                 joined = (
                     joined_lazy.drop_nulls(feature_names)
