@@ -19,7 +19,7 @@ MIN_REPLICAS = 1
 MAX_REPLICAS = 20
 MODEL_PATH = "/app/model.pt"
 if FEATURE_SET == "cpu_mem_traffic_diff":
-    INPUT_SIZE = 4
+    INPUT_SIZE = 3
 elif FEATURE_SET in ["cpu_mem_traffic", "cpu_mem_diff"]:
     INPUT_SIZE = 3
 elif FEATURE_SET in ["cpu_mem", "cpu_diff"]:

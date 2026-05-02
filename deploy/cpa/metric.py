@@ -1,11 +1,8 @@
 import json
 import time
-import os
 import numpy as np
 import config
 import utils
-
-STATE_FILE = "/tmp/scaler_state.json"
 
 
 def smooth_window(window_data, window_size=5):
@@ -24,54 +21,6 @@ def smooth_window(window_data, window_size=5):
         smoothed[:, j] = smoothed_col[: len(col)]
 
     return smoothed.tolist()
-
-
-def normalize_and_track_global(window_data):
-    if not window_data or not isinstance(window_data[0], list):
-        return window_data
-
-    arr = np.array(window_data, dtype=float)
-    num_features = arr.shape[1]
-
-    if os.path.exists(STATE_FILE):
-        try:
-            with open(STATE_FILE, "r") as f:
-                state = json.load(f)
-                global_mins = state.get("mins", [0.0] * num_features)
-                global_maxs = state.get("maxs", [1.0] * num_features)
-        except:
-            global_mins, global_maxs = [0.0] * num_features, [1.0] * num_features
-    else:
-        global_mins, global_maxs = [0.0] * num_features, [1.0] * num_features
-
-    for j in range(num_features):
-        is_traffic = "traffic" in config.FEATURE_SET and j == (
-            2 if "mem" in config.FEATURE_SET else 1
-        )
-        is_diff = config.FEATURE_SET.endswith("_diff") and j == num_features - 1
-
-        if is_traffic:
-            col_min = float(np.min(arr[:, j]))
-            col_max = float(np.max(arr[:, j]))
-            if global_mins[j] == 0.0 and global_maxs[j] == 1.0:
-                global_mins[j], global_maxs[j] = col_min, col_max
-            else:
-                global_mins[j] = min(global_mins[j], col_min)
-                global_maxs[j] = max(global_maxs[j], col_max)
-
-            v_min, v_max = global_mins[j], global_maxs[j]
-            arr[:, j] = (arr[:, j] - v_min) / (v_max - v_min) if v_max > v_min else 0.0
-        elif is_diff:
-            arr[:, j] = np.clip(arr[:, j], -1.0, 1.0)
-            global_mins[j], global_maxs[j] = -1.0, 1.0
-        else:
-            arr[:, j] = np.clip(arr[:, j], 0.0, 1.0)
-            global_mins[j], global_maxs[j] = 0.0, 1.0
-
-    with open(STATE_FILE, "w") as f:
-        json.dump({"mins": global_mins, "maxs": global_maxs}, f)
-
-    return arr.tolist()
 
 
 def fetch_metric_buckets(query, start_time, end_time, grid_timestamps):
@@ -126,6 +75,8 @@ def get_aggregated_window():
     final_window = []
     use_prediction = True
     prev_cpu = None
+    prev_mcr = None
+    epsilon = 1e-6
 
     for i in range(config.WINDOW_SIZE):
         c_vals = cpu_buckets[i]
@@ -142,25 +93,35 @@ def get_aggregated_window():
             use_prediction = False
             final_window.append([0.0] * config.INPUT_SIZE)
             prev_cpu = 0.0
+            prev_mcr = 0.0
         else:
             avg_cpu = sum(c_vals) / len(c_vals)
-
+            avg_cpu = max(0.0, min(1.0, avg_cpu))
             cpu_diff = avg_cpu - prev_cpu if prev_cpu is not None else 0.0
             prev_cpu = avg_cpu
 
             row = [avg_cpu]
+
             if "mem" in config.FEATURE_SET:
-                row.append(sum(mem_buckets[i]) / len(mem_buckets[i]))
+                avg_mem = sum(mem_buckets[i]) / len(mem_buckets[i])
+                avg_mem = max(0.0, min(1.0, avg_mem))
+                row.append(avg_mem)
+
             if "traffic" in config.FEATURE_SET:
-                row.append(sum(mcr_buckets[i]) / len(mcr_buckets[i]))
-            if config.FEATURE_SET.endswith("_diff"):
-                row.append(cpu_diff)
+                avg_mcr = sum(mcr_buckets[i]) / len(mcr_buckets[i])
+                if config.FEATURE_SET == "cpu_mem_traffic_diff":
+                    log_ret = np.log(avg_mcr + epsilon) - np.log(prev_mcr + epsilon) if prev_mcr is not None else 0.0
+                    row.append(np.tanh(log_ret))
+                else:
+                    row.append(avg_mcr)
+                prev_mcr = avg_mcr
+            elif config.FEATURE_SET.endswith("_diff"):
+                row.append(np.clip(cpu_diff, -1.0, 1.0))
 
             final_window.append(row)
 
     if use_prediction:
         final_window = smooth_window(final_window, window_size=5)
-        final_window = normalize_and_track_global(final_window)
 
     return final_window, use_prediction
 
@@ -199,7 +160,9 @@ def main():
         f"destination_workload_namespace='{config.NAMESPACE}', reporter='destination'}}[1m]))"
     )
     res_mcr = utils.query_prometheus(q_mcr)
-    current_mcr = float(res_mcr[0]["value"][1]) if res_mcr else 0.0
+
+    current_mcr_total = float(res_mcr[0]["value"][1]) if res_mcr else 0.0
+    current_mcr = current_mcr_total / current_replicas if current_replicas > 0 else 0.0
 
     t_end = time.time()
 

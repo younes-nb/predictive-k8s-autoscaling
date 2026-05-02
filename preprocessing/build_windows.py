@@ -263,19 +263,34 @@ def main():
                         join_on = list(set(schema_joined).intersection(schema_t))
 
                     joined_lazy = joined_lazy.join(lf_t_agg, on=join_on, how="left")
+
+                for feat in feature_names:
+                    is_resource = "cpu" in feat.lower() or "mem" in feat.lower()
+                    is_absolute = "diff" not in feat.lower()
+                    if is_resource and is_absolute:
+                        joined_lazy = joined_lazy.with_columns(
+                            pl.col(feat).clip(0.0, 1.0)
+                        )
+
                 if "cpu_diff" in feature_names:
                     joined_lazy = joined_lazy.with_columns(
-                        pl.col("cpu_diff").diff().over(base_id_cols).fill_null(0.0)
+                        pl.col("cpu_diff")
+                        .diff()
+                        .over(base_id_cols)
+                        .fill_null(0.0)
+                        .clip(-1.0, 1.0)
                     )
                 if "mcr_diff" in feature_names:
                     epsilon = 1e-6
                     joined_lazy = joined_lazy.with_columns(
-                        (pl.col("mcr_diff") + epsilon)
-                        .log()
-                        .diff()
-                        .over(["msname", "msinstanceid"])
-                        .fill_null(0.0)
-                        .alias("mcr_diff")
+                        (
+                            (pl.col("mcr_diff") + epsilon)
+                            .log()
+                            .diff()
+                            .over(["msname", "msinstanceid"])
+                            .fill_null(0.0)
+                            .tanh()
+                        ).alias("mcr_diff")
                     )
                 joined = (
                     joined_lazy.drop_nulls(feature_names)
