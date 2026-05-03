@@ -47,16 +47,16 @@ def get_aggregated_window():
     grid_timestamps = [start_time + (i * 60) for i in range(config.WINDOW_SIZE)]
 
     cpu_query = (
-        f"sum(rate(container_cpu_usage_seconds_total{{namespace='{config.NAMESPACE}', pod=~'{config.DEPLOYMENT}-.*', pod!~'.*-cpa', container!='POD'}}[1m])) by (pod) / "
-        f"sum(kube_pod_container_resource_limits{{namespace='{config.NAMESPACE}', pod=~'{config.DEPLOYMENT}-.*', pod!~'.*-cpa', resource='cpu'}}) by (pod)"
+        f"sum(rate(container_cpu_usage_seconds_total{{namespace='{config.NAMESPACE}', pod=~'{config.DEPLOYMENT}-.*', pod!~'.*-cpa', container!~'POD|istio-proxy'}}[1m])) by (pod) / "
+        f"sum(kube_pod_container_resource_limits{{namespace='{config.NAMESPACE}', pod=~'{config.DEPLOYMENT}-.*', pod!~'.*-cpa', container!~'POD|istio-proxy', resource='cpu'}}) by (pod)"
     )
     cpu_buckets = fetch_metric_buckets(cpu_query, start_time, end_time, grid_timestamps)
 
     mem_buckets = None
     if "mem" in config.FEATURE_SET:
         mem_query = (
-            f"sum(container_memory_working_set_bytes{{namespace='{config.NAMESPACE}', pod=~'{config.DEPLOYMENT}-.*', pod!~'.*-cpa', container!='POD'}}) by (pod) / "
-            f"sum(kube_pod_container_resource_limits{{namespace='{config.NAMESPACE}', pod=~'{config.DEPLOYMENT}-.*', pod!~'.*-cpa', resource='memory'}}) by (pod)"
+            f"sum(container_memory_working_set_bytes{{namespace='{config.NAMESPACE}', pod=~'{config.DEPLOYMENT}-.*', pod!~'.*-cpa', container!~'POD|istio-proxy'}}) by (pod) / "
+            f"sum(kube_pod_container_resource_limits{{namespace='{config.NAMESPACE}', pod=~'{config.DEPLOYMENT}-.*', pod!~'.*-cpa', container!~'POD|istio-proxy', resource='memory'}}) by (pod)"
         )
         mem_buckets = fetch_metric_buckets(
             mem_query, start_time, end_time, grid_timestamps
@@ -139,8 +139,8 @@ def main():
     current_replicas = int(res_rep[0]["value"][1]) if res_rep else 1
 
     q_load = (
-        f"sum(rate(container_cpu_usage_seconds_total{{namespace='{config.NAMESPACE}', pod=~'{config.DEPLOYMENT}-.*', pod!~'.*-cpa', container!='POD'}}[1m])) / "
-        f"sum(kube_pod_container_resource_limits{{namespace='{config.NAMESPACE}', pod=~'{config.DEPLOYMENT}-.*', pod!~'.*-cpa', resource='cpu'}})"
+        f"sum(rate(container_cpu_usage_seconds_total{{namespace='{config.NAMESPACE}', pod=~'{config.DEPLOYMENT}-.*', pod!~'.*-cpa', container!~'POD|istio-proxy'}}[1m])) / "
+        f"sum(kube_pod_container_resource_limits{{namespace='{config.NAMESPACE}', pod=~'{config.DEPLOYMENT}-.*', pod!~'.*-cpa', container!~'POD|istio-proxy', resource='cpu'}})"
     )
     res_load = utils.query_prometheus(q_load)
 
@@ -152,8 +152,8 @@ def main():
         current_load = last_point[0] if isinstance(last_point, list) else last_point
 
     q_mem = (
-        f"sum(container_memory_working_set_bytes{{namespace='{config.NAMESPACE}', pod=~'{config.DEPLOYMENT}-.*', pod!~'.*-cpa', container!='POD'}}) / "
-        f"sum(kube_pod_container_resource_limits{{namespace='{config.NAMESPACE}', pod=~'{config.DEPLOYMENT}-.*', pod!~'.*-cpa', resource='memory'}})"
+        f"sum(container_memory_working_set_bytes{{namespace='{config.NAMESPACE}', pod=~'{config.DEPLOYMENT}-.*', pod!~'.*-cpa', container!~'POD|istio-proxy'}}) / "
+        f"sum(kube_pod_container_resource_limits{{namespace='{config.NAMESPACE}', pod=~'{config.DEPLOYMENT}-.*', pod!~'.*-cpa', container!~'POD|istio-proxy', resource='memory'}})"
     )
     res_mem = utils.query_prometheus(q_mem)
     current_mem = float(res_mem[0]["value"][1]) if res_mem else 0.0
