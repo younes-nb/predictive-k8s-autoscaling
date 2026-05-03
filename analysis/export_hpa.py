@@ -138,30 +138,11 @@ def fetch_and_process_data(start_ts, end_ts):
     final_df["CPU"] = final_df["CPU"].clip(0.0, 1.0)
     final_df["Memory"] = final_df["Memory"].clip(0.0, 1.0)
 
-    epsilon = 1e-6
     final_df = final_df.sort_values(by=["Deployment", "Timestamp"])
-
-    final_df["log_rps"] = np.log(final_df["RPS"] + epsilon)
-
-    final_df["log_ret"] = final_df.groupby("Deployment")["log_rps"].diff().fillna(0.0)
-
-    final_df["MCR_Diff"] = np.tanh(final_df["log_ret"])
-
-    final_df = final_df.drop(columns=["log_rps", "log_ret"])
-
     final_df = final_df[
-        [
-            "Timestamp",
-            "Namespace",
-            "Deployment",
-            "Replicas",
-            "RPS",
-            "MCR_Diff",
-            "CPU",
-            "Memory",
-        ]
+        ["Timestamp", "Namespace", "Deployment", "Replicas", "RPS", "CPU", "Memory"]
     ]
-    final_df["MCR_Diff"] = final_df["MCR_Diff"].round(5)
+    
     final_df["CPU"] = final_df["CPU"].round(4)
     final_df["Memory"] = final_df["Memory"].round(4)
     final_df["RPS"] = final_df["RPS"].round(2)
