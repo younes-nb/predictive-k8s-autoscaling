@@ -121,7 +121,7 @@ def log_metrics(
     if not os.path.exists(config.EXPERIMENT_METRICS_FILE):
         with open(config.EXPERIMENT_METRICS_FILE, "w") as f:
             f.write(
-                "timestamp_tehran,current_cpu_60th,current_mem_60th,current_mcr_60th,predicted_cpu_max,threshold,sigma,inference_time_s,current_replicas\n"
+                "timestamp,cpu,memory,mcr,pred_cpu,threshold,sigma,inference_time_s,replicas\n"
             )
     with open(config.EXPERIMENT_METRICS_FILE, "a") as f:
         f.write(

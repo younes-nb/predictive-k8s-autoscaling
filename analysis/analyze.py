@@ -55,28 +55,28 @@ def load_and_filter_data(data_dir, start_str, end_str):
         deployment_name = os.path.basename(filename).replace(".csv", "")
         try:
             df = pd.read_csv(filename)
-            if "timestamp_tehran" not in df.columns:
+            if "timestamp" not in df.columns:
                 print(
-                    f"⚠️  Skipping {deployment_name}: 'timestamp_tehran' column missing."
+                    f"⚠️  Skipping {deployment_name}: 'timestamp' column missing."
                 )
                 continue
 
-            df["timestamp"] = pd.to_datetime(df["timestamp_tehran"])
+            df["timestamp"] = pd.to_datetime(df["timestamp"])
             mask = (df["timestamp"] >= start_ts) & (df["timestamp"] <= end_ts)
             filtered_df = df.loc[mask].copy()
 
             if not filtered_df.empty:
                 limit_per_pod = get_limit(deployment_name)
 
-                safe_replicas = filtered_df["current_replicas"].replace(0, 1)
+                safe_replicas = filtered_df["replicas"].replace(0, 1)
 
                 total_capacity = safe_replicas * limit_per_pod
 
                 filtered_df["cpu_actual_norm"] = (
-                    filtered_df["current_cpu_60th"] / total_capacity
+                    filtered_df["cpu"] / total_capacity
                 ).clip(upper=1.0)
                 filtered_df["cpu_pred_norm"] = (
-                    filtered_df["predicted_cpu_max"] / total_capacity
+                    filtered_df["pred_cpu"] / total_capacity
                 ).clip(upper=1.0)
                 filtered_df["deployment"] = deployment_name
                 deployment_data[deployment_name] = filtered_df
@@ -97,7 +97,7 @@ def calculate_metrics(global_df):
         print("❌ No data available to calculate metrics.")
         return
 
-    valid_preds = global_df[global_df["predicted_cpu_max"] > 0]
+    valid_preds = global_df[global_df["pred_cpu"] > 0]
 
     if valid_preds.empty:
         print("⚠️ No valid predictions (>0) found.")
@@ -119,8 +119,8 @@ def calculate_metrics(global_df):
     else:
         avg_sigma = 0.0
         p95_sigma = 0.0
-    if "current_replicas" in global_df.columns:
-        avg_replicas = global_df["current_replicas"].mean()
+    if "replicas" in global_df.columns:
+        avg_replicas = global_df["replicas"].mean()
     else:
         avg_replicas = 0.0
 
@@ -198,7 +198,7 @@ def plot_deployments(deployment_data):
         ax2 = ax.twinx()
         ax2.step(
             df["timestamp"],
-            df["current_replicas"],
+            df["replicas"],
             label="Replicas",
             color="green",
             where="post",
@@ -209,8 +209,8 @@ def plot_deployments(deployment_data):
         ax2.yaxis.set_major_locator(ticker.MaxNLocator(integer=True))
         ax2.yaxis.set_major_formatter(ticker.FormatStrFormatter("%d"))
 
-        rep_min = df["current_replicas"].min()
-        rep_max = df["current_replicas"].max()
+        rep_min = df["replicas"].min()
+        rep_max = df["replicas"].max()
         if rep_min == rep_max:
             ax2.set_ylim(rep_min - 1, rep_max + 1)
 
