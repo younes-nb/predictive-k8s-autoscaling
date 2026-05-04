@@ -43,7 +43,6 @@ def extract_robust_features(parquet_dir: str):
 
 
 def plot_cluster_samples(df, labels, parquet_dir, n_clusters):
-    """Generates visual charts of 2 random microservices per cluster."""
     os.makedirs(os.path.join(PATHS.ARCHETYPE_DIR, "plots"), exist_ok=True)
 
     for cid in range(n_clusters):
