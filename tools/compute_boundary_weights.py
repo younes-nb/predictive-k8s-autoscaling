@@ -60,6 +60,11 @@ def main():
     ap.add_argument("--windows_dir", default=PATHS.WINDOWS_DIR)
     ap.add_argument("--split", default="train", choices=["train", "val"])
     ap.add_argument(
+        "--archetype_id",
+        type=int,
+        default=None,
+    )
+    ap.add_argument(
         "--theta_mode", default=TRAINING.THETA_MODE, choices=["adaptive", "static"]
     )
     ap.add_argument("--theta_base", type=float, default=TRAINING.THETA_BASE)
@@ -71,6 +76,21 @@ def main():
     args = ap.parse_args()
     shards = find_shards(args.windows_dir, args.split)
 
+    sid_to_cluster = {}
+    if args.archetype_id is not None:
+        cluster_file = os.path.join(args.windows_dir, "service_clusters.npy")
+        if os.path.exists(cluster_file):
+            clusters = np.load(cluster_file)
+            sid_to_cluster = {
+                idx: cluster_id for idx, cluster_id in enumerate(clusters)
+            }
+            print(f"Filter Enabled: Processing only Archetype {args.archetype_id}")
+        else:
+            print(
+                f"[ERROR] Archetype {args.archetype_id} requested but service_clusters.npy not found."
+            )
+            sys.exit(1)
+
     theta_base_dict = {}
     if args.theta_mode == "adaptive":
         hists: Dict[int, np.ndarray] = {}
@@ -81,11 +101,19 @@ def main():
         for x_path, _, sid_path, _ in shards:
             X = np.load(x_path, mmap_mode="r")
             sid = np.load(sid_path, mmap_mode="r")
+
             u_now = X[:, -1, -1] if X.ndim == 3 else X[:, -1]
             for s in np.unique(sid):
+                if (
+                    args.archetype_id is not None
+                    and sid_to_cluster.get(int(s)) != args.archetype_id
+                ):
+                    continue
+
                 if s not in hists:
                     hists[s] = np.zeros(bins, dtype=np.int64)
                 hist_update(hists[s], u_now[sid == s], bins)
+
         theta_base_dict = {
             int(s): hist_quantile(h, args.theta_base) for s, h in hists.items()
         }
@@ -96,16 +124,32 @@ def main():
     for x_path, y_path, sid_path, base in shards:
         Y = np.load(y_path, mmap_mode="r")
         sid = np.load(sid_path, mmap_mode="r")
-        out_w_path = base + f"_w_{args.split}.npy"
+
+        suffix = f"_w_{args.split}.npy"
+        if args.archetype_id is not None:
+            suffix = f"_arch{args.archetype_id}_w_{args.split}.npy"
+        out_w_path = base + suffix
 
         W = np.lib.format.open_memmap(
             out_w_path, mode="w+", dtype=np.float32, shape=(Y.shape[0],)
         )
 
+        W[:] = 1.0
+
         for i in range(0, Y.shape[0], args.batch_size):
             end = i + args.batch_size
             y_target = torch.from_numpy(Y[i:end, -1].copy()).float()
             sid_batch = sid[i:end]
+
+            if args.archetype_id is not None:
+                cluster_mask = torch.tensor(
+                    [sid_to_cluster.get(int(s)) == args.archetype_id for s in sid_batch]
+                )
+            else:
+                cluster_mask = torch.ones(len(sid_batch), dtype=torch.bool)
+
+            if not cluster_mask.any():
+                continue
 
             if args.theta_mode == "adaptive":
                 tb = torch.tensor(
@@ -120,7 +164,9 @@ def main():
                 dist_sq = (y_target - args.theta_base) ** 2
                 w = 1.0 + args.gamma * torch.exp(-dist_sq / (2.0 * (args.delta**2)))
 
-            W[i : i + len(w)] = w.numpy()
+            final_w = torch.ones_like(w)
+            final_w[cluster_mask] = w[cluster_mask]
+            W[i : i + len(final_w)] = final_w.numpy()
 
         W.flush()
         print(f"  Saved weights: {Path(out_w_path).name}", end="\r")

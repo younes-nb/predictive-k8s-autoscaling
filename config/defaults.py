@@ -45,11 +45,33 @@ class Paths:
     LOGS_DIR: str = (
         f"{LOCAL_DIR}/logs" if LOCAL_MODE else "/proj/k8sautoscaledl-PG0/logs"
     )
+    ARCHETYPE_DIR: str = (
+        f"{LOCAL_DIR}/archetypes"
+        if LOCAL_MODE
+        else "/proj/k8sautoscaledl-PG0/archetypes"
+    )
+    ARCHETYPE_MAPPING: str = (
+        os.path.join(f"{LOCAL_DIR}/archetypes", "mapping.json")
+        if LOCAL_MODE
+        else "/proj/k8sautoscaledl-PG0/archetypes/mapping.json"
+    )
+    CLUSTER_STATS: str = (
+        os.path.join(f"{LOCAL_DIR}/archetypes", "k_selection_metrics.csv")
+        if LOCAL_MODE
+        else "/proj/k8sautoscaledl-PG0/archetypes/k_selection_metrics.csv"
+    )
 
 
 PATHS = Paths()
 
-DEFAULT_CHECKPOINT_PATH = os.path.join(PATHS.MODELS_DIR, "model.pt")
+
+def get_checkpoint_path(archetype_id: int = None) -> str:
+    if archetype_id is not None:
+        return os.path.join(PATHS.MODELS_DIR, f"model_arch_{archetype_id}.pt")
+    return os.path.join(PATHS.MODELS_DIR, "model_global.pt")
+
+
+DEFAULT_CHECKPOINT_PATH = get_checkpoint_path()
 
 DATASET_TABLES: Dict[str, Dict[str, Any]] = {
     "msresource": {
@@ -213,6 +235,16 @@ def table_to_feature_exprs(feature_set: str) -> Dict[str, List[tuple]]:
 
 
 @dataclass(frozen=True)
+class ArchetypeDefaults:
+    ENABLED: bool = False
+    MIN_K: int = 2
+    MAX_K: int = 8
+    AUTO_K_METHOD: str = "elbow"
+    CLUSTERING_FEATURES: Tuple[str, ...] = ("mean", "std", "p95", "skew", "kurtosis")
+    RANDOM_STATE: int = 42
+
+
+@dataclass(frozen=True)
 class PreprocessingDefaults:
     INPUT_LEN: int = 60
     PRED_HORIZON: int = 5
@@ -255,7 +287,9 @@ class TrainingDefaults:
     BIDIRECTIONAL: bool = False
     RESIDUAL: bool = False
     DERIV_PENALTY: float = 0.0
+    ARCHETYPE_MODE: bool = False
 
 
+ARCHETYPES = ArchetypeDefaults()
 PREPROCESSING = PreprocessingDefaults()
 TRAINING = TrainingDefaults()

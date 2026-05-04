@@ -98,15 +98,23 @@ def train(args):
     torch.manual_seed(args.seed)
 
     logging.info("\n--- Loading Datasets ---")
+
     train_ds = ShardedWindowsDataset(
-        args.windows_dir, "train", args.input_len, args.pred_horizon, args.use_weights
+        args.windows_dir,
+        "train",
+        args.input_len,
+        args.pred_horizon,
+        args.use_weights,
+        archetype_id=args.archetype_id,
     )
+
     val_ds = ShardedWindowsDataset(
         args.windows_dir,
         "val",
         args.input_len,
         args.pred_horizon,
         use_weights=args.use_weights,
+        archetype_id=args.archetype_id,
     )
 
     logging.info(f"Train samples: {len(train_ds)}")
@@ -167,7 +175,7 @@ def train(args):
 
             optimizer.zero_grad()
             preds = model(x)
-            loss = loss = weighted_mse(
+            loss = weighted_mse(
                 preds,
                 y,
                 w,
@@ -246,6 +254,11 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--windows_dir", required=True)
     p.add_argument("--checkpoint_path", default=DEFAULT_CHECKPOINT_PATH)
+    p.add_argument(
+        "--archetype_id",
+        type=int,
+        default=None,
+    )
     p.add_argument("--use_weights", action="store_true")
     p.add_argument("--input_len", type=int, default=PREPROCESSING.INPUT_LEN)
     p.add_argument("--pred_horizon", type=int, default=PREPROCESSING.PRED_HORIZON)

@@ -1,10 +1,12 @@
 import os
 import glob
 import re
+import json
 import numpy as np
 import torch
 from torch.utils.data import Dataset
 from pathlib import Path
+from config.defaults import PATHS  # Added import
 
 
 class ShardedWindowsDataset(Dataset):
@@ -15,25 +17,40 @@ class ShardedWindowsDataset(Dataset):
         input_len: int,
         horizon: int,
         use_weights: bool = False,
+        archetype_id: int = None,
     ):
         self.input_len = int(input_len)
         self.horizon = int(horizon)
         self.split = split
         self.use_weights = use_weights
+        self.archetype_id = archetype_id
 
         self.shard_paths = []
-        self.cum_lengths = []
+        self.valid_indices = []
+
+        self.archetype_map = None
+        if self.archetype_id is not None:
+            if not os.path.exists(PATHS.ARCHETYPE_MAPPING):
+                raise FileNotFoundError(
+                    f"Archetype mapping not found at {PATHS.ARCHETYPE_MAPPING}. Run clustering first."
+                )
+            with open(PATHS.ARCHETYPE_MAPPING, "r") as f:
+                self.archetype_map = json.load(f)
 
         pattern = os.path.join(windows_dir, f"part-*_X_{split}.npy")
         x_files = sorted(glob.glob(pattern), key=self._natural_key)
 
         if not x_files:
             print(f"[WARN] No shards found for split={split} in {windows_dir}")
-            self.total_len = 0
             return
 
-        total = 0
-        for x_path in x_files:
+        print(
+            f"[{split}] Filtering shards for Archetype {archetype_id}..."
+            if archetype_id is not None
+            else f"[{split}] Loading all shards..."
+        )
+
+        for s_idx, x_path in enumerate(x_files):
             base = x_path.replace(f"_X_{split}.npy", "")
             y_path = base + f"_y_{split}.npy"
             sid_path = base + f"_sid_{split}.npy"
@@ -42,32 +59,47 @@ class ShardedWindowsDataset(Dataset):
             if not (os.path.exists(y_path) and os.path.exists(sid_path)):
                 continue
 
-            x_mmap = np.load(x_path, mmap_mode="r")
-            shard_size = x_mmap.shape[0]
-            del x_mmap
+            sids = np.load(sid_path)
 
-            shard_info = {
-                "X": x_path,
-                "y": y_path,
-                "sid": sid_path,
-                "w": (
-                    w_path
-                    if (self.use_weights and split != "test" and os.path.exists(w_path))
-                    else None
-                ),
-            }
+            if self.archetype_id is not None:
+                mask = np.array(
+                    [
+                        self.archetype_map.get(str(s), -1) == self.archetype_id
+                        for s in sids
+                    ]
+                )
+                local_valid_rows = np.where(mask)[0]
+            else:
+                local_valid_rows = np.arange(len(sids))
 
-            if self.use_weights and split != "test" and shard_info["w"] is None:
-                raise RuntimeError(f"Weights requested but missing: {w_path}")
+            if len(local_valid_rows) > 0:
+                shard_info = {
+                    "X": x_path,
+                    "y": y_path,
+                    "sid": sid_path,
+                    "w": (
+                        w_path
+                        if (
+                            self.use_weights
+                            and split != "test"
+                            and os.path.exists(w_path)
+                        )
+                        else None
+                    ),
+                }
 
-            self.shard_paths.append(shard_info)
-            total += shard_size
-            self.cum_lengths.append(total)
+                if self.use_weights and split != "test" and shard_info["w"] is None:
+                    raise RuntimeError(f"Weights requested but missing: {w_path}")
 
-        self.cum_lengths = np.array(self.cum_lengths)
-        self.total_len = total
+                shard_list_idx = len(self.shard_paths)
+                self.shard_paths.append(shard_info)
+
+                for l_idx in local_valid_rows:
+                    self.valid_indices.append((shard_list_idx, l_idx))
+
+        self.total_len = len(self.valid_indices)
         print(
-            f"[{split}] Metadata loaded for {len(self.shard_paths)} shards, total: {self.total_len}"
+            f"[{split}] Filtered to {self.total_len} samples across {len(self.shard_paths)} shards."
         )
 
     def _natural_key(self, p):
@@ -77,17 +109,14 @@ class ShardedWindowsDataset(Dataset):
         ]
 
     def __len__(self):
-        return getattr(self, "total_len", 0)
+        return self.total_len
 
     def __getitem__(self, idx):
         if idx < 0 or idx >= self.total_len:
             raise IndexError(idx)
 
-        shard_idx = np.searchsorted(self.cum_lengths, idx, side="right")
-        prev_cum = 0 if shard_idx == 0 else self.cum_lengths[shard_idx - 1]
-        local_idx = idx - prev_cum
-
-        paths = self.shard_paths[shard_idx]
+        shard_list_idx, local_idx = self.valid_indices[idx]
+        paths = self.shard_paths[shard_list_idx]
 
         X_mmap = np.load(paths["X"], mmap_mode="r")
         Y_mmap = np.load(paths["y"], mmap_mode="r")

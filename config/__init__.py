@@ -1,5 +1,6 @@
 from .defaults import (
     PATHS,
+    ARCHETYPES,
     PREPROCESSING,
     TRAINING,
     DEFAULT_CHECKPOINT_PATH,
@@ -8,6 +9,7 @@ from .defaults import (
 
 __all__ = [
     "PATHS",
+    "ARCHETYPES",
     "PREPROCESSING",
     "TRAINING",
     "DEFAULT_CHECKPOINT_PATH",

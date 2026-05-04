@@ -57,6 +57,12 @@ def main():
     ap.add_argument("--skip_ingest", action="store_true")
     ap.add_argument("--skip_windows", action="store_true")
     ap.add_argument(
+        "--archetype_id",
+        type=int,
+        default=None,
+        help="Run pipeline for a specific cluster archetype.",
+    )
+    ap.add_argument(
         "--delete_raw",
         action="store_false",
         dest="keep_raw",
@@ -80,7 +86,10 @@ def main():
         help="Use a single global adaptive threshold for all microservices in a batch.",
     )
     ap.add_argument("--bidirectional", action="store_true")
-    ap.add_argument("--residual", action="store_true",)
+    ap.add_argument(
+        "--residual",
+        action="store_true",
+    )
     ap.set_defaults(use_weights=TRAINING.USE_WEIGHTS)
 
     args = ap.parse_args()
@@ -142,6 +151,9 @@ def main():
                 str(TRAINING.DELTA),
             ]
 
+            if args.archetype_id is not None:
+                base_cmd_weights.extend(["--archetype_id", str(args.archetype_id)])
+
             t_train = run(
                 base_cmd_weights + ["--split", "train"],
                 "Step 2a: Compute Weights (TRAIN)",
@@ -165,6 +177,10 @@ def main():
             "--feature_set",
             args.feature_set,
         ]
+
+        if args.archetype_id is not None:
+            cmd_train.extend(["--archetype_id", str(args.archetype_id)])
+
         if args.cpu:
             cmd_train.append("--cpu")
         if args.input_len:
@@ -197,6 +213,10 @@ def main():
             "--checkpoint_path",
             args.checkpoint_path,
         ]
+
+        if args.archetype_id is not None:
+            cmd_test.extend(["--archetype_id", str(args.archetype_id)])
+
         if args.cpu:
             cmd_test.append("--cpu")
         if args.bidirectional:
@@ -211,6 +231,8 @@ def main():
     print("\n========== PIPELINE SUMMARY ==========")
     for stage, t in total_times.items():
         print(f"{stage:>25}: {t:.2f}s")
+    if args.archetype_id is not None:
+        print(f"{'ARCHETYPE':>25}: {args.archetype_id}")
     print("=======================================")
 
 

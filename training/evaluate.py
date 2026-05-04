@@ -99,8 +99,11 @@ def evaluate(args):
     logging.info(f"RNN Type: {rnn_type}")
 
     logging.info("\n--- Loading Test Dataset ---")
-    test_ds = ShardedWindowsDataset(args.windows_dir, "test", input_len, horizon)
-    logging.info(f"Test samples: {len(test_ds)}")
+
+    test_ds = ShardedWindowsDataset(
+        args.windows_dir, "test", input_len, horizon, archetype_id=args.archetype_id
+    )
+    logging.info(f"Test samples (Archetype {args.archetype_id}): {len(test_ds)}")
 
     if len(test_ds) > 0:
         first_x, *_ = test_ds[0]
@@ -157,7 +160,7 @@ def evaluate(args):
     inference_time = time.time() - start_time
 
     if total_samples == 0:
-        logging.warning("No samples found in test set.")
+        logging.warning("No samples found in test set for the specified archetype.")
         return
 
     mse = mse_sum / (total_samples * horizon)
@@ -165,8 +168,9 @@ def evaluate(args):
     avg_inference_time_ms = (inference_time / total_samples) * 1000.0
 
     logging.info("\n=== Test Results (Error & Latency) ===")
-    logging.info(f"feature_set: {feature_set}")
-    logging.info(f"RNN Type:    {rnn_type}")
+    logging.info(f"feature_set:  {feature_set}")
+    logging.info(f"Archetype ID: {args.archetype_id}")
+    logging.info(f"RNN Type:     {rnn_type}")
     logging.info("-" * 30)
     logging.info(f"MSE:                   {mse:.6f}")
     logging.info(f"MAE:                   {mae:.6f}")
@@ -181,6 +185,11 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--windows_dir", required=True)
     p.add_argument("--checkpoint_path", required=True)
+    p.add_argument(
+        "--archetype_id",
+        type=int,
+        default=None,
+    )
     p.add_argument("--batch_size", type=int, default=TRAINING.BATCH_SIZE)
     p.add_argument("--num_workers", type=int, default=TRAINING.NUM_WORKERS)
     p.add_argument("--cpu", action="store_true", default=False)
