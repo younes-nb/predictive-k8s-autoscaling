@@ -8,3 +8,4 @@ python-dateutil>=2.9.0
 scipy>=1.17.1
 duckdb>=1.5.2
 kneed>=0.8.6
+scikit-learn>=1.8.0
