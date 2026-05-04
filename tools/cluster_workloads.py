@@ -1,5 +1,6 @@
 import os
 import json
+import argparse
 import polars as pl
 import numpy as np
 import matplotlib.pyplot as plt
@@ -11,7 +12,7 @@ from kneed import KneeLocator
 from config.defaults import PATHS, ARCHETYPES, PREPROCESSING
 
 
-def extract_robust_features(parquet_dir: str):
+def extract_robust_features(parquet_dir: str, max_services: int = None):
     print(f"Scanning parquet files in {parquet_dir}...")
 
     lf = (
@@ -39,6 +40,11 @@ def extract_robust_features(parquet_dir: str):
         .filter(pl.col("sample_count") > 10)
         .collect()
     )
+
+    if max_services is not None:
+        print(f"Limiting clustering to {max_services} microservices...")
+        features = features.head(max_services)
+
     return features
 
 
@@ -77,9 +83,15 @@ def plot_cluster_samples(df, labels, parquet_dir, n_clusters):
 
 
 def main():
+    ap = argparse.ArgumentParser(description="Cluster microservice workloads")
+    ap.add_argument("--max_services", type=int, default=PREPROCESSING.MAX_SERVICES)
+    args, _ = ap.parse_known_args()
+
     os.makedirs(PATHS.ARCHETYPE_DIR, exist_ok=True)
 
-    features_df = extract_robust_features(PATHS.PARQUET_MSRESOURCE)
+    features_df = extract_robust_features(
+        PATHS.PARQUET_MSRESOURCE, max_services=args.max_services
+    )
 
     feature_cols = ["cpu_mean", "cpu_std", "cpu_p95", "cpu_skew", "cpu_kurt"]
     data_to_scale = features_df.select(feature_cols).to_numpy()

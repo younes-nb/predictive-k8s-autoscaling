@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Tuple, Dict, Any, List, Set
+from typing import Tuple, Dict, Any, List, Set, Optional
 import os
 
 LOCAL_MODE = os.getenv("PIPELINE_ENV") == "local"
@@ -257,7 +257,7 @@ class PreprocessingDefaults:
     ID_COLS: Tuple[str, ...] = ("msname", "msinstanceid")
     SERVICE_COL: str = "msname"
     FREQ: str = "1m"
-    MAX_SERVICES: int = 5 if LOCAL_MODE else 2000
+    MAX_SERVICES: Optional[int] = 5 if LOCAL_MODE else 2000
     SUBSET_SEED: int = 42
     FEATURE_SET: str = "cpu_mem_traffic_diff"
 

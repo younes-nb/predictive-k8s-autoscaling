@@ -63,6 +63,12 @@ def main():
         "--bidirectional", action="store_true", default=TRAINING.BIDIRECTIONAL
     )
     ap.add_argument("--residual", action="store_true", default=TRAINING.RESIDUAL)
+    ap.add_argument(
+        "--max_services",
+        type=int,
+        default=PREPROCESSING.MAX_SERVICES,
+        help="Number of microservices to process. None uses all microservices.",
+    )
 
     args = ap.parse_args()
 
@@ -89,15 +95,17 @@ def main():
             "--windows_dir",
             args.windows_dir,
         ]
+        if args.max_services is not None:
+            cmd_pre.extend(["--max_services", str(args.max_services)])
         total_times["preprocessing"] = run(cmd_pre, "Step 1: Preprocessing")
 
     if args.archetype_mode and not args.skip_clustering:
         cmd_cluster = [
             sys.executable,
             cluster_script,
-            "--windows_dir",
-            args.windows_dir,
         ]
+        if args.max_services is not None:
+            cmd_cluster.extend(["--max_services", str(args.max_services)])
         total_times["clustering"] = run(cmd_cluster, "Step 1.5: Clustering Workloads")
 
     ids_to_run = [None]

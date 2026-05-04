@@ -34,14 +34,12 @@ def main():
     )
     ap.add_argument("--start_date", default="0d0")
     ap.add_argument("--end_date", default="7d0")
-
     ap.add_argument(
         "--feature_set",
         default=PREPROCESSING.FEATURE_SET,
         choices=list(FEATURE_SETS.keys()),
     )
     ap.add_argument("--windows_dir", default=PATHS.WINDOWS_DIR)
-
     ap.add_argument("--skip_fetch", action="store_true")
     ap.add_argument("--skip_ingest", action="store_true")
     ap.add_argument("--skip_windows", action="store_true")
@@ -49,7 +47,11 @@ def main():
         "--delete_raw",
         action="store_false",
         dest="keep_raw",
-        help="Delete raw files after ingestion.",
+    )
+    ap.add_argument(
+        "--max_services",
+        type=int,
+        default=PREPROCESSING.MAX_SERVICES,
     )
 
     args = ap.parse_args()
@@ -105,6 +107,8 @@ def main():
             args.windows_dir,
             "--feature_set",
             args.feature_set,
+            "--max_services",
+            str(args.max_services),
         ]
         run(cmd, "Step 3: Build windows (join tables)")
     else:
