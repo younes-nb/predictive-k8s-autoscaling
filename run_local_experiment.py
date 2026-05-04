@@ -6,17 +6,23 @@ import time
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = THIS_DIR
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
 
 os.environ["PIPELINE_ENV"] = "local"
 
-from config.defaults import PATHS, PREPROCESSING, tables_for_feature_set
+from config.defaults import PATHS, PREPROCESSING, TRAINING, tables_for_feature_set
 
 
 def run(cmd, title: str):
     print(f"\n=== {title} ===")
     print("Running:", " ".join(cmd))
     start = time.time()
-    subprocess.run(cmd, check=True)
+    subprocess.run(
+        cmd,
+        check=True,
+        creationflags=getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0),
+    )
     elapsed = time.time() - start
     print(f"=== {title} completed in {elapsed:.2f}s ===")
     return elapsed
@@ -31,24 +37,29 @@ def main():
     )
     ap.add_argument("--start_date", default="0d0")
     ap.add_argument("--end_date", default="0d1")
-
+    ap.add_argument(
+        "--feature_set",
+        default=PREPROCESSING.FEATURE_SET,
+        help="Feature set to use (e.g., cpu_mem_traffic_diff)",
+    )
     ap.add_argument("--skip_fetch", action="store_true")
     ap.add_argument("--skip_ingest", action="store_true")
     ap.add_argument("--skip_windows", action="store_true")
     ap.add_argument("--skip_train", action="store_true")
+    ap.add_argument("--skip_testing", action="store_true")
+
     args = ap.parse_args()
 
-    os.makedirs(PATHS.RAW_MSRESOURCE, exist_ok=True)
-    os.makedirs(PATHS.RAW_MSRTMCRE, exist_ok=True)
     os.makedirs(PATHS.WINDOWS_DIR, exist_ok=True)
     os.makedirs(PATHS.MODELS_DIR, exist_ok=True)
 
     needed_tables = sorted(list(tables_for_feature_set(args.feature_set)))
 
     print(f"\n🚀 STARTING LOCAL LIGHTWEIGHT PIPELINE")
+    print(f"Feature Set: {args.feature_set}")
     print(f"Local Data Root: {os.path.abspath(os.path.join(THIS_DIR, 'local_data'))}")
 
-    fetch_script = os.path.join(REPO_ROOT, "preprocessing", "fetch_traces_azure.py")
+    fetch_script = os.path.join(REPO_ROOT, "preprocessing", "fetch_traces.py")
     ingest_script = os.path.join(REPO_ROOT, "preprocessing", "ingest_traces_parquet.py")
     windows_local_script = os.path.join(
         REPO_ROOT, "preprocessing", "build_windows_local.py"
@@ -58,24 +69,15 @@ def main():
     checkpoint_path = os.path.join(PATHS.MODELS_DIR, "model_local.pt")
 
     if not args.skip_fetch:
-        for table in needed_tables:
-            raw_dir = getattr(PATHS, f"RAW_{table.upper()}")
-            os.makedirs(raw_dir, exist_ok=True)
-            run(
-                [
-                    sys.executable,
-                    fetch_script,
-                    "--table",
-                    table,
-                    "--start_date",
-                    args.start_date,
-                    "--end_date",
-                    args.end_date,
-                    "--out_dir",
-                    raw_dir,
-                ],
-                f"Fetching {table} Traces",
-            )
+        run(
+            [
+                sys.executable, fetch_script,
+                "--feature_set", args.feature_set,
+                "--start_date", args.start_date,
+                "--end_date", args.end_date,
+            ],
+            "Fetching Required Traces",
+        )
 
     if not args.skip_ingest:
         for table in needed_tables:
@@ -123,7 +125,11 @@ def main():
                 "--checkpoint_path",
                 checkpoint_path,
                 "--feature_set",
-                PREPROCESSING.FEATURE_SET,
+                args.feature_set,
+                "--batch_size",
+                str(TRAINING.BATCH_SIZE),
+                "--num_workers",
+                str(TRAINING.NUM_WORKERS),
             ],
             "Training Local Model",
         )

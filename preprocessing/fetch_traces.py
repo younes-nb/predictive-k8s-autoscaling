@@ -1,9 +1,8 @@
 import argparse
 import os
 import sys
-import time
-import urllib.request
 import tarfile
+import subprocess
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, os.pardir))
@@ -46,27 +45,36 @@ def compute_indices(start_date: str, end_date: str, ratio_min: int):
 def download_file(url: str, dst_path: str, max_retries: int = 3) -> bool:
     os.makedirs(os.path.dirname(dst_path), exist_ok=True)
 
-    for attempt in range(1, max_retries + 1):
-        print(f"Downloading {url} -> {dst_path} (Attempt {attempt}/{max_retries})")
-        try:
-            with urllib.request.urlopen(url) as resp, open(dst_path, "wb") as out:
-                chunk_size = 1 << 20
-                while True:
-                    chunk = resp.read(chunk_size)
-                    if not chunk:
-                        break
-                    out.write(chunk)
-            return True
-        except Exception as e:
-            print(f"[WARN] Failed to download {url}: {e}", file=sys.stderr)
-            if os.path.exists(dst_path):
-                os.remove(dst_path)
-            if attempt < max_retries:
-                sleep_time = 2**attempt
-                print(f"Retrying in {sleep_time} seconds...")
-                time.sleep(sleep_time)
+    dir_name = os.path.dirname(dst_path)
+    file_name = os.path.basename(dst_path)
 
-    return False
+    cmd = [
+        "aria2c",
+        "-x",
+        "16",
+        "-s",
+        "16",
+        "-c",
+        "--check-certificate=false",
+        f"--max-tries={max_retries}",
+        f"--dir={dir_name}",
+        f"--out={file_name}",
+        url,
+    ]
+
+    print(f"Downloading {url} -> {dst_path} via aria2c...")
+    try:
+        subprocess.run(cmd, check=True)
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"[WARN] Failed to download {url}: {e}", file=sys.stderr)
+        return False
+    except FileNotFoundError:
+        print(
+            "[ERROR] aria2c is not installed. Please install it.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
 
 def extract_and_remove_tar(tar_path: str, out_dir: str) -> bool:
@@ -90,19 +98,15 @@ def main():
     )
     ap.add_argument("--start_date", default="0d0", help="e.g. 0d0")
     ap.add_argument("--end_date", default="7d0", help="e.g. 7d0")
-
     ap.add_argument(
         "--feature_set",
         default=PREPROCESSING.FEATURE_SET,
         choices=list(FEATURE_SETS.keys()),
-        help="Which feature set to prepare (controls which tables are fetched).",
     )
-
     ap.add_argument(
         "--tables",
         nargs="+",
         default=None,
-        help="Optional explicit table list (overrides --feature_set).",
     )
 
     args = ap.parse_args()
