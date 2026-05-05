@@ -40,7 +40,7 @@ def extract_robust_features(parquet_dir: str, max_services: int = None):
                 pl.col("cpu_utilization").quantile(0.95).alias("cpu_p95"),
                 pl.col("cpu_utilization").skew().alias("cpu_skew"),
                 pl.col("cpu_utilization").kurtosis().alias("cpu_kurt"),
-                pl.count().alias("sample_count"),
+                pl.len().alias("sample_count"),
             ]
         )
         .filter(pl.col("sample_count") > 10)
