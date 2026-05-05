@@ -1,6 +1,7 @@
 import os
 import json
 import argparse
+import sys
 import polars as pl
 import numpy as np
 import matplotlib.pyplot as plt
@@ -8,6 +9,11 @@ from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import silhouette_score
 from kneed import KneeLocator
+
+THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, os.pardir))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
 
 from config.defaults import PATHS, ARCHETYPES, PREPROCESSING
 
