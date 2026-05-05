@@ -96,6 +96,8 @@ def extract_robust_features(
             approx_quantile(cpu_utilization, 0.95) as cpu_p95,
             skewness(cpu_utilization) as cpu_skew,
             kurtosis(cpu_utilization) as cpu_kurt,
+            (max(cpu_utilization) / NULLIF(avg(cpu_utilization), 0)) as peak_to_avg,
+            (stddev_samp(cpu_utilization) / NULLIF(avg(cpu_utilization), 0)) as coeff_variation,
             count(*) as sample_count
         FROM minute_agg
         GROUP BY msname
