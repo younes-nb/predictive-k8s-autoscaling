@@ -62,6 +62,8 @@ def extract_robust_features(
             cpu_p95 DOUBLE,
             cpu_skew DOUBLE,
             cpu_kurt DOUBLE,
+            peak_to_avg DOUBLE,
+            coeff_variation DOUBLE,
             sample_count BIGINT
         )
         """)
@@ -142,6 +144,7 @@ def plot_cluster_samples(df, labels, parquet_dir, n_clusters):
             axes[i].plot(raw_data["cpu_utilization"].to_numpy(), alpha=0.7)
             axes[i].set_title(f"MS: {ms}")
             axes[i].set_ylabel("CPU Util")
+            axes[i].set_ylim(0, 1)
 
         plt.suptitle(f"Archetype {cid} Sample Workloads")
         plt.tight_layout()
@@ -175,7 +178,7 @@ def main():
         temp_dir=args.temp_dir,
     )
 
-    feature_cols = ["cpu_mean", "cpu_std", "cpu_p95", "cpu_skew", "cpu_kurt"]
+    feature_cols = ["cpu_mean", "cpu_std", "cpu_p95", "cpu_skew", "cpu_kurt", "peak_to_avg", "coeff_variation"]
     data_to_scale = features_df.select(feature_cols).to_numpy()
 
     scaler = StandardScaler()
