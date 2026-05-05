@@ -114,6 +114,12 @@ def main():
     sil_score = silhouette_score(scaled_data, labels)
     print(f"Optimal K: {best_k} | Silhouette Score: {sil_score:.4f}")
 
+    unique_labels, counts = np.unique(labels, return_counts=True)
+    print(f"\nTotal Number of Clusters: {best_k}")
+    for cluster_id, count in zip(unique_labels, counts):
+        print(f"  Cluster {cluster_id}: {count} members")
+    print()
+
     features_df = features_df.with_columns(pl.Series("archetype_id", labels))
 
     mapping = {
