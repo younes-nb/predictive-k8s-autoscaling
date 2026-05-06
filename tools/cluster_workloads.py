@@ -7,6 +7,9 @@ import pandas as pd
 import numpy as np
 import duckdb
 import matplotlib.pyplot as plt
+import joblib
+import pytz
+from datetime import datetime
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import silhouette_score, f1_score
@@ -20,6 +23,28 @@ if REPO_ROOT not in sys.path:
 from config.defaults import PATHS, ARCHETYPES, PREPROCESSING
 
 
+def get_tehran_timestamp():
+    tehran_tz = pytz.timezone("Asia/Tehran")
+    return datetime.now(tehran_tz).strftime("%Y%m%d_%H%M%S")
+
+
+def save_cluster_metrics(best_k, sil_score, counts):
+    os.makedirs(PATHS.LOGS_DIR, exist_ok=True)
+    timestamp = get_tehran_timestamp()
+    log_file = os.path.join(PATHS.LOGS_DIR, f"cluster_metrics_{timestamp}.log")
+
+    with open(log_file, "w") as f:
+        f.write(f"Clustering Run Metrics - {timestamp} (Tehran Time)\n")
+        f.write("-" * 50 + "\n")
+        f.write(f"Optimal Clusters (K): {best_k}\n")
+        f.write(f"Silhouette Score: {sil_score:.4f}\n\n")
+        f.write("Cluster Distribution:\n")
+        for cluster_id, count in enumerate(counts):
+            f.write(f"  - Archetype {cluster_id}: {count} members\n")
+
+    print(f"Metrics saved to: {log_file}")
+
+
 def extract_robust_features(
     parquet_dir: str,
     max_services: int = None,
@@ -29,7 +54,7 @@ def extract_robust_features(
     print(f"Scanning parquet files in {parquet_dir}...")
 
     if not os.path.exists(temp_dir):
-        print(f"📁 Creating directory: {temp_dir}")
+        print(f"Creating directory: {temp_dir}")
         os.makedirs(temp_dir, exist_ok=True)
 
     db_path = os.path.join(temp_dir, "cluster_processing.db")
@@ -42,7 +67,7 @@ def extract_robust_features(
 
     parquet_glob = os.path.join(parquet_dir, "*.parquet")
 
-    print("🔍 Phase 1: Identifying unique microservices...")
+    print("Phase 1: Identifying unique microservices...")
     unique_ms_query = f"SELECT DISTINCT msname FROM read_parquet('{parquet_glob}')"
     unique_msnames = con.execute(unique_ms_query).df()["msname"].tolist()
     unique_msnames = [m for m in unique_msnames if pd.notna(m)]
@@ -79,7 +104,7 @@ def extract_robust_features(
         batch_num = (i // batch_size) + 1
 
         print(
-            f"📦 Extracting features for Batch {batch_num}/{total_batches} ({len(batch)} services)...",
+            f"Extracting features for Batch {batch_num}/{total_batches} ({len(batch)} services)...",
             flush=True,
         )
 
@@ -107,7 +132,7 @@ def extract_robust_features(
         """
         con.execute(query)
 
-    print("✅ Feature extraction complete. Loading results into memory...")
+    print("Feature extraction complete. Loading results into memory...")
     df_pandas = con.execute("SELECT * FROM ms_features").df()
 
     con.close()
@@ -119,8 +144,9 @@ def extract_robust_features(
     return pl.from_pandas(df_pandas)
 
 
-def plot_cluster_samples(df, labels, parquet_dir, n_clusters):
-    os.makedirs(os.path.join(PATHS.ARCHETYPE_DIR, "plots"), exist_ok=True)
+def plot_cluster_samples(df, parquet_dir, n_clusters):
+    plot_path = os.path.join(PATHS.ARCHETYPE_DIR, "plots")
+    os.makedirs(plot_path, exist_ok=True)
 
     for cid in range(n_clusters):
         cluster_members = df.filter(pl.col("archetype_id") == cid)["msname"].to_list()
@@ -152,6 +178,7 @@ def plot_cluster_samples(df, labels, parquet_dir, n_clusters):
             os.path.join(PATHS.ARCHETYPE_DIR, "plots", f"cluster_{cid}_samples.png")
         )
         plt.close()
+        print(f"Cluster sample plots saved in: {plot_path}")
 
 
 def analyze_label_stability(
@@ -163,10 +190,10 @@ def analyze_label_stability(
     ms_names = features_df["msname"].to_list()
     stability_results = []
 
-    print("🚀 Starting Sensitivity Analysis...")
+    print("Starting Sensitivity Analysis...")
 
     for n in time_steps_to_test:
-        print(f"⏱️ Testing window size: {n} minutes...")
+        print(f"Testing window size: {n} minutes...")
 
         query = f"""
         WITH windowed_agg AS (
@@ -200,7 +227,7 @@ def analyze_label_stability(
 
         score = f1_score(ground_truth_labels, predicted_labels, average="weighted")
         stability_results.append(score)
-        print(f"   ✅ Stability Score (F1): {score:.4f}")
+        print(f"Stability Score (F1): {score:.4f}")
 
     con.close()
     return stability_results
@@ -222,7 +249,7 @@ def plot_stability_curve(time_steps, scores):
     plt.grid(True, alpha=0.3)
     plt.legend()
     plt.savefig(os.path.join(PATHS.ARCHETYPE_DIR, "window_stability_curve.png"))
-    print(f"📍 Analysis complete. Suggested deployment window: {optimal_n} minutes.")
+    print(f"Analysis complete. Suggested deployment window: {optimal_n} minutes.")
 
 
 def main():
@@ -284,6 +311,16 @@ def main():
         print(f"  Cluster {cluster_id}: {count} members")
     print()
 
+    save_cluster_metrics(best_k, sil_score, counts)
+
+    model_save_path = os.path.join(PATHS.ARCHETYPE_DIR, "kmeans_model.joblib")
+    scaler_save_path = os.path.join(PATHS.ARCHETYPE_DIR, "scaler.joblib")
+
+    joblib.dump(final_km, model_save_path)
+    joblib.dump(scaler, scaler_save_path)
+    print(f"K-Means model exported to: {model_save_path}")
+    print(f"Scaler exported to: {scaler_save_path}")
+
     features_df = features_df.with_columns(pl.Series("archetype_id", labels))
 
     mapping = {
@@ -291,10 +328,11 @@ def main():
     }
     with open(PATHS.ARCHETYPE_MAPPING, "w") as f:
         json.dump(mapping, f, indent=4)
+    print(f"Archetype mapping saved to: {PATHS.ARCHETYPE_MAPPING}")
 
-    plot_cluster_samples(features_df, labels, PATHS.PARQUET_MSRESOURCE, best_k)
+    plot_cluster_samples(features_df, PATHS.PARQUET_MSRESOURCE, best_k)
 
-    windows = [30, 60, 120, 240, 480, 720]
+    windows = [15, 30, 60, 120, 240, 480, 720, 1440, 2880]
     scores = analyze_label_stability(
         features_df,
         scaler,
