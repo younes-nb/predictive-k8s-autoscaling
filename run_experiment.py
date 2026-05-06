@@ -40,6 +40,15 @@ def main():
         default=PREPROCESSING.FEATURE_SET,
         choices=list(FEATURE_SETS.keys()),
     )
+    ap.add_argument("--skip_fetch", action="store_true")
+    ap.add_argument("--skip_ingest", action="store_true")
+    ap.add_argument("--skip_windows", action="store_true")
+    ap.add_argument(
+        "--delete_raw",
+        action="store_false",
+        dest="keep_raw",
+        help="Delete raw files during preprocessing.",
+    )
     ap.add_argument("--windows_dir", default=PATHS.WINDOWS_DIR)
     ap.add_argument(
         "--archetype_mode",
@@ -97,6 +106,14 @@ def main():
         ]
         if args.max_services is not None:
             cmd_pre.extend(["--max_services", str(args.max_services)])
+        if args.skip_fetch:
+            cmd_pre.append("--skip_fetch")
+        if args.skip_ingest:
+            cmd_pre.append("--skip_ingest")
+        if args.skip_windows:
+            cmd_pre.append("--skip_windows")
+        if not args.keep_raw:
+            cmd_pre.append("--delete_raw")
         total_times["preprocessing"] = run(cmd_pre, "Step 1: Preprocessing")
 
     if args.archetype_mode and not args.skip_clustering:
