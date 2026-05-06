@@ -9,7 +9,7 @@ import duckdb
 import matplotlib.pyplot as plt
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import silhouette_score
+from sklearn.metrics import silhouette_score, f1_score
 from kneed import KneeLocator
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -154,6 +154,77 @@ def plot_cluster_samples(df, labels, parquet_dir, n_clusters):
         plt.close()
 
 
+def analyze_label_stability(
+    features_df, scaler, kmeans_model, parquet_glob, time_steps_to_test
+):
+    con = duckdb.connect(":memory:")
+
+    ground_truth_labels = features_df["archetype_id"].to_numpy()
+    ms_names = features_df["msname"].to_list()
+    stability_results = []
+
+    print("🚀 Starting Sensitivity Analysis...")
+
+    for n in time_steps_to_test:
+        print(f"⏱️ Testing window size: {n} minutes...")
+
+        query = f"""
+        WITH windowed_agg AS (
+            SELECT msname, {PREPROCESSING.TIME_COL}, avg(cpu_utilization) as cpu_utilization
+            FROM read_parquet('{parquet_glob}')
+            GROUP BY msname, {PREPROCESSING.TIME_COL}
+            QUALIFY ROW_NUMBER() OVER (PARTITION BY msname ORDER BY {PREPROCESSING.TIME_COL}) <= {n}
+        )
+        SELECT 
+            msname,
+            avg(cpu_utilization) as cpu_mean,
+            stddev_samp(cpu_utilization) as cpu_std,
+            approx_quantile(cpu_utilization, 0.95) as cpu_p95,
+            skewness(cpu_utilization) as cpu_skew,
+            kurtosis(cpu_utilization) as cpu_kurt,
+            (max(cpu_utilization) / NULLIF(avg(cpu_utilization), 0)) as peak_to_avg,
+            (stddev_samp(cpu_utilization) / NULLIF(avg(cpu_utilization), 0)) as coeff_variation
+        FROM windowed_agg
+        GROUP BY msname
+        """
+
+        partial_df = con.execute(query).df().fillna(0.0)
+
+        partial_df = pd.merge(
+            pd.DataFrame({"msname": ms_names}), partial_df, on="msname", how="left"
+        ).fillna(0.0)
+        partial_data = partial_df.drop(columns=["msname"]).to_numpy()
+
+        scaled_partial = scaler.transform(partial_data)
+        predicted_labels = kmeans_model.predict(scaled_partial)
+
+        score = f1_score(ground_truth_labels, predicted_labels, average="weighted")
+        stability_results.append(score)
+        print(f"   ✅ Stability Score (F1): {score:.4f}")
+
+    con.close()
+    return stability_results
+
+
+def plot_stability_curve(time_steps, scores):
+    plt.figure(figsize=(10, 6))
+    plt.plot(time_steps, scores, marker="o", linestyle="-", color="teal", linewidth=2)
+
+    kn = KneeLocator(time_steps, scores, curve="concave", direction="increasing")
+    optimal_n = kn.knee or time_steps[-1]
+
+    plt.axvline(
+        x=optimal_n, color="red", linestyle="--", label=f"Optimal Window: {optimal_n}m"
+    )
+    plt.title("Archetype Stability vs. Observation Window")
+    plt.xlabel("Minutes of Observation")
+    plt.ylabel("Weighted F1-Score")
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    plt.savefig(os.path.join(PATHS.ARCHETYPE_DIR, "window_stability_curve.png"))
+    print(f"📍 Analysis complete. Suggested deployment window: {optimal_n} minutes.")
+
+
 def main():
     ap = argparse.ArgumentParser(description="Cluster microservice workloads")
     ap.add_argument("--max_services", type=int, default=PREPROCESSING.MAX_SERVICES)
@@ -178,7 +249,15 @@ def main():
         temp_dir=args.temp_dir,
     )
 
-    feature_cols = ["cpu_mean", "cpu_std", "cpu_p95", "cpu_skew", "cpu_kurt", "peak_to_avg", "coeff_variation"]
+    feature_cols = [
+        "cpu_mean",
+        "cpu_std",
+        "cpu_p95",
+        "cpu_skew",
+        "cpu_kurt",
+        "peak_to_avg",
+        "coeff_variation",
+    ]
     data_to_scale = features_df.select(feature_cols).to_numpy()
 
     scaler = StandardScaler()
@@ -214,6 +293,16 @@ def main():
         json.dump(mapping, f, indent=4)
 
     plot_cluster_samples(features_df, labels, PATHS.PARQUET_MSRESOURCE, best_k)
+
+    windows = [30, 60, 120, 240, 480, 720]
+    scores = analyze_label_stability(
+        features_df,
+        scaler,
+        final_km,
+        os.path.join(PATHS.PARQUET_MSRESOURCE, "*.parquet"),
+        windows,
+    )
+    plot_stability_curve(windows, scores)
 
 
 if __name__ == "__main__":
