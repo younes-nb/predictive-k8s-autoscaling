@@ -2,10 +2,11 @@ import os
 import glob
 import argparse
 import sys
+import json
 from pathlib import Path
 from typing import Dict
-
 import numpy as np
+import polars as pl
 import torch
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -13,7 +14,7 @@ REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, os.pardir))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from config.defaults import PATHS, TRAINING
+from config.defaults import DATASET_TABLES, PATHS, TRAINING
 
 
 def natural_key(p: str):
@@ -78,13 +79,34 @@ def main():
 
     sid_to_cluster = {}
     if args.archetype_id is not None:
-        cluster_file = os.path.join(args.windows_dir, "service_clusters.npy")
-        if os.path.exists(cluster_file):
-            clusters = np.load(cluster_file)
+        if os.path.exists(PATHS.ARCHETYPE_MAPPING):
+            print(
+                f"Resolving from {PATHS.ARCHETYPE_MAPPING}..."
+            )
+            with open(PATHS.ARCHETYPE_MAPPING, "r") as f:
+                name_to_cluster = json.load(f)
+
+            pq_dir = DATASET_TABLES["msresource"]["parquet_dir"]
+            all_parts = sorted(glob.glob(os.path.join(pq_dir, "*.parquet")))
+            all_services = set()
+            for p in all_parts:
+                try:
+                    all_services.update(
+                        pl.scan_parquet(p)
+                        .select("msname")
+                        .unique()
+                        .collect()["msname"]
+                        .to_list()
+                    )
+                except:
+                    continue
+
+            sorted_names = sorted(list(all_services))
             sid_to_cluster = {
-                idx: cluster_id for idx, cluster_id in enumerate(clusters)
+                idx: name_to_cluster[name]
+                for idx, name in enumerate(sorted_names)
+                if name in name_to_cluster
             }
-            print(f"Filter Enabled: Processing only Archetype {args.archetype_id}")
         else:
             print(
                 f"[ERROR] Archetype {args.archetype_id} requested but service_clusters.npy not found."

@@ -236,7 +236,6 @@ def table_to_feature_exprs(feature_set: str) -> Dict[str, List[tuple]]:
 
 @dataclass(frozen=True)
 class ArchetypeDefaults:
-    ENABLED: bool = False
     MIN_K: int = 2
     MAX_K: int = 8
     AUTO_K_METHOD: str = "elbow"
@@ -257,7 +256,7 @@ class PreprocessingDefaults:
     ID_COLS: Tuple[str, ...] = ("msname", "msinstanceid")
     SERVICE_COL: str = "msname"
     FREQ: str = "1m"
-    MAX_SERVICES: Optional[int] = 5 if LOCAL_MODE else 2000
+    MAX_SERVICES: Optional[int] = 5 if LOCAL_MODE else None
     SUBSET_SEED: int = 42
     FEATURE_SET: str = "cpu_mem_traffic_diff"
 
@@ -287,7 +286,7 @@ class TrainingDefaults:
     BIDIRECTIONAL: bool = False
     RESIDUAL: bool = False
     DERIV_PENALTY: float = 0.0
-    ARCHETYPE_MODE: bool = False
+    ARCHETYPE_MODE: bool = True
 
 
 ARCHETYPES = ArchetypeDefaults()
