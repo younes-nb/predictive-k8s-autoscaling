@@ -4,9 +4,10 @@ import re
 import json
 import numpy as np
 import torch
+import polars as pl
 from torch.utils.data import Dataset
 from pathlib import Path
-from config.defaults import PATHS  # Added import
+from config.defaults import PATHS
 
 
 class ShardedWindowsDataset(Dataset):
@@ -29,6 +30,8 @@ class ShardedWindowsDataset(Dataset):
         self.valid_indices = []
 
         self.archetype_map = None
+        self.sid_to_name = None
+
         if self.archetype_id is not None:
             if not os.path.exists(PATHS.ARCHETYPE_MAPPING):
                 raise FileNotFoundError(
@@ -36,6 +39,15 @@ class ShardedWindowsDataset(Dataset):
                 )
             with open(PATHS.ARCHETYPE_MAPPING, "r") as f:
                 self.archetype_map = json.load(f)
+
+            pq_dir = PATHS.PARQUET_MSRESOURCE
+            self.sid_to_name = sorted(
+                pl.scan_parquet(os.path.join(pq_dir, "*.parquet"))
+                .select("msname")
+                .unique()
+                .collect()["msname"]
+                .to_list()
+            )
 
         pattern = os.path.join(windows_dir, f"part-*_X_{split}.npy")
         x_files = sorted(glob.glob(pattern), key=self._natural_key)
@@ -50,11 +62,15 @@ class ShardedWindowsDataset(Dataset):
             else f"[{split}] Loading all shards..."
         )
 
-        for s_idx, x_path in enumerate(x_files):
+        for x_path in x_files:
             base = x_path.replace(f"_X_{split}.npy", "")
             y_path = base + f"_y_{split}.npy"
             sid_path = base + f"_sid_{split}.npy"
-            w_path = base + f"_w_{split}.npy"
+
+            if self.archetype_id is not None:
+                w_path = base + f"_arch{self.archetype_id}_w_{split}.npy"
+            else:
+                w_path = base + f"_w_{split}.npy"
 
             if not (os.path.exists(y_path) and os.path.exists(sid_path)):
                 continue
@@ -64,7 +80,8 @@ class ShardedWindowsDataset(Dataset):
             if self.archetype_id is not None:
                 mask = np.array(
                     [
-                        self.archetype_map.get(str(s), -1) == self.archetype_id
+                        self.archetype_map.get(self.sid_to_name[int(s)], -1)
+                        == self.archetype_id
                         for s in sids
                     ]
                 )
@@ -79,17 +96,13 @@ class ShardedWindowsDataset(Dataset):
                     "sid": sid_path,
                     "w": (
                         w_path
-                        if (
-                            self.use_weights
-                            and split != "test"
-                            and os.path.exists(w_path)
-                        )
+                        if (self.use_weights and os.path.exists(w_path))
                         else None
                     ),
                 }
 
-                if self.use_weights and split != "test" and shard_info["w"] is None:
-                    raise RuntimeError(f"Weights requested but missing: {w_path}")
+                if self.use_weights and shard_info["w"] is None:
+                    print(f"[WARN] Weights requested but file missing: {w_path}")
 
                 shard_list_idx = len(self.shard_paths)
                 self.shard_paths.append(shard_info)
@@ -99,7 +112,7 @@ class ShardedWindowsDataset(Dataset):
 
         self.total_len = len(self.valid_indices)
         print(
-            f"[{split}] Filtered to {self.total_len} samples across {len(self.shard_paths)} shards."
+            f"[{split}] Total samples: {self.total_len} (Shards: {len(self.shard_paths)})"
         )
 
     def _natural_key(self, p):
