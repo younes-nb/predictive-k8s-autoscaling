@@ -41,13 +41,24 @@ class ShardedWindowsDataset(Dataset):
                 self.archetype_map = json.load(f)
 
             pq_dir = PATHS.PARQUET_MSRESOURCE
-            self.sid_to_name = sorted(
-                pl.scan_parquet(os.path.join(pq_dir, "*.parquet"))
-                .select("msname")
-                .unique()
-                .collect()["msname"]
-                .to_list()
+            pq_files = glob.glob(os.path.join(pq_dir, "*.parquet"))
+
+            if not pq_files:
+                raise FileNotFoundError(
+                    f"No parquet files found in {pq_dir} to reconstruct mapping."
+                )
+
+            unique_names = set()
+            print(
+                f"[{split}] Reconstructing service mapping from {len(pq_files)} parquet shards..."
             )
+            for f in pq_files:
+                names = (
+                    pl.read_parquet(f, columns=["msname"])["msname"].unique().to_list()
+                )
+                unique_names.update(names)
+
+            self.sid_to_name = sorted(list(unique_names))
 
         pattern = os.path.join(windows_dir, f"part-*_X_{split}.npy")
         x_files = sorted(glob.glob(pattern), key=self._natural_key)
