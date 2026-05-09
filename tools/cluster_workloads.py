@@ -65,7 +65,7 @@ def extract_robust_features(
     print(f"Scanning parquet files in {parquet_dir}...")
 
     if not os.path.exists(temp_dir):
-        print(f"Creating directory: {temp_dir}")
+        print(f"📁 Creating directory: {temp_dir}")
         os.makedirs(temp_dir, exist_ok=True)
 
     db_path = os.path.join(temp_dir, "cluster_processing.db")
@@ -100,6 +100,11 @@ def extract_robust_features(
             cpu_kurt DOUBLE,
             peak_to_avg DOUBLE,
             coeff_variation DOUBLE,
+            cpu_autocorr DOUBLE,
+            cpu_mad DOUBLE,
+            cpu_slope DOUBLE,
+            cpu_iqr DOUBLE,
+            burstiness_ratio DOUBLE,
             sample_count BIGINT
         )
         """)
@@ -127,6 +132,13 @@ def extract_robust_features(
             FROM read_parquet('{parquet_glob}')
             WHERE msname IN ({msnames_sql_list})
             GROUP BY msname, {time_col}
+        ),
+        lagged_agg AS (
+            SELECT 
+                *,
+                lag(cpu_utilization) OVER (PARTITION BY msname ORDER BY {time_col}) as prev_cpu,
+                row_number() OVER (PARTITION BY msname ORDER BY {time_col}) as time_idx
+            FROM minute_agg
         )
         SELECT 
             msname,
@@ -137,8 +149,13 @@ def extract_robust_features(
             kurtosis(cpu_utilization) as cpu_kurt,
             (max(cpu_utilization) / NULLIF(avg(cpu_utilization), 0)) as peak_to_avg,
             (stddev_samp(cpu_utilization) / NULLIF(avg(cpu_utilization), 0)) as coeff_variation,
+            corr(cpu_utilization, prev_cpu) as cpu_autocorr,
+            avg(abs(cpu_utilization - prev_cpu)) as cpu_mad,
+            regr_slope(cpu_utilization, time_idx) as cpu_slope,
+            (approx_quantile(cpu_utilization, 0.75) - approx_quantile(cpu_utilization, 0.25)) as cpu_iqr,
+            (approx_quantile(cpu_utilization, 0.99) / NULLIF(approx_quantile(cpu_utilization, 0.5), 1e-6)) as burstiness_ratio,
             count(*) as sample_count
-        FROM minute_agg
+        FROM lagged_agg
         GROUP BY msname
         HAVING count(*) > 10
         """
@@ -192,7 +209,7 @@ def plot_cluster_samples(df, parquet_dir, n_clusters):
             os.path.join(PATHS.ARCHETYPE_DIR, "plots", f"cluster_{cid}_samples.png")
         )
         plt.close()
-        print(f"Cluster sample plots saved in: {plot_path}")
+    print(f"Cluster sample plots saved in: {plot_path}")
 
 
 def analyze_label_stability(
@@ -217,6 +234,13 @@ def analyze_label_stability(
             FROM read_parquet('{parquet_glob}')
             GROUP BY msname, {PREPROCESSING.TIME_COL}
             QUALIFY ROW_NUMBER() OVER (PARTITION BY msname ORDER BY {PREPROCESSING.TIME_COL}) <= {n}
+        ),
+        lagged_agg AS (
+            SELECT 
+                *,
+                lag(cpu_utilization) OVER (PARTITION BY msname ORDER BY {PREPROCESSING.TIME_COL}) as prev_cpu,
+                row_number() OVER (PARTITION BY msname ORDER BY {PREPROCESSING.TIME_COL}) as time_idx
+            FROM windowed_agg
         )
         SELECT 
             msname,
@@ -226,8 +250,13 @@ def analyze_label_stability(
             skewness(cpu_utilization) as cpu_skew,
             kurtosis(cpu_utilization) as cpu_kurt,
             (max(cpu_utilization) / NULLIF(avg(cpu_utilization), 0)) as peak_to_avg,
-            (stddev_samp(cpu_utilization) / NULLIF(avg(cpu_utilization), 0)) as coeff_variation
-        FROM windowed_agg
+            (stddev_samp(cpu_utilization) / NULLIF(avg(cpu_utilization), 0)) as coeff_variation,
+            corr(cpu_utilization, prev_cpu) as cpu_autocorr,
+            avg(abs(cpu_utilization - prev_cpu)) as cpu_mad,
+            regr_slope(cpu_utilization, time_idx) as cpu_slope,
+            (approx_quantile(cpu_utilization, 0.75) - approx_quantile(cpu_utilization, 0.25)) as cpu_iqr,
+            (approx_quantile(cpu_utilization, 0.99) / NULLIF(approx_quantile(cpu_utilization, 0.5), 1e-6)) as burstiness_ratio
+        FROM lagged_agg
         GROUP BY msname
         """
 
@@ -297,6 +326,7 @@ def main():
 
     print("Determining optimal K and clustering...")
     start_clustering = time.perf_counter()
+
     feature_cols = [
         "cpu_mean",
         "cpu_std",
@@ -305,6 +335,11 @@ def main():
         "cpu_kurt",
         "peak_to_avg",
         "coeff_variation",
+        "cpu_autocorr",
+        "cpu_mad",
+        "cpu_slope",
+        "cpu_iqr",
+        "burstiness_ratio",
     ]
     data_to_scale = features_df.select(feature_cols).to_numpy()
 
