@@ -265,7 +265,9 @@ def analyze_label_stability(
         partial_df = pd.merge(
             pd.DataFrame({"msname": ms_names}), partial_df, on="msname", how="left"
         ).fillna(0.0)
+
         partial_data = partial_df.drop(columns=["msname"]).to_numpy()
+        partial_data = np.nan_to_num(partial_data, nan=0.0, posinf=0.0, neginf=0.0)
 
         scaled_partial = scaler.transform(partial_data)
         predicted_labels = kmeans_model.predict(scaled_partial)
@@ -341,7 +343,9 @@ def main():
         "cpu_iqr",
         "burstiness_ratio",
     ]
+
     data_to_scale = features_df.select(feature_cols).to_numpy()
+    data_to_scale = np.nan_to_num(data_to_scale, nan=0.0, posinf=0.0, neginf=0.0)
 
     scaler = StandardScaler()
     scaled_data = scaler.fit_transform(data_to_scale)
