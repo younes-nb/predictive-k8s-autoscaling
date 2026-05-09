@@ -35,7 +35,7 @@ def get_tehran_timestamp():
     return datetime.now(tehran_tz).strftime("%Y%m%d_%H%M%S")
 
 
-def save_cluster_metrics(best_k, sil_score, counts, durations):
+def save_cluster_metrics(best_k, sil_score, counts, durations, cluster_stats=None):
     os.makedirs(PATHS.LOGS_DIR, exist_ok=True)
     timestamp = get_tehran_timestamp()
     log_file = os.path.join(PATHS.LOGS_DIR, f"cluster_metrics_{timestamp}.log")
@@ -45,10 +45,21 @@ def save_cluster_metrics(best_k, sil_score, counts, durations):
         f.write("-" * 50 + "\n")
         f.write(f"Optimal Clusters (K): {best_k}\n")
         f.write(f"Silhouette Score: {sil_score:.4f}\n\n")
+
         f.write("Cluster Distribution:\n")
         for cluster_id, count in enumerate(counts):
             f.write(f"  - Archetype {cluster_id}: {count} members\n")
-        f.write("Process Durations:\n")
+
+        if cluster_stats is not None:
+            f.write("\nAverage Feature Values per Cluster:\n")
+            stats_dict = cluster_stats.to_dicts()
+            for row in sorted(stats_dict, key=lambda x: x["archetype_id"]):
+                f.write(f"  Archetype {row['archetype_id']}:\n")
+                for feat, val in row.items():
+                    if feat != "archetype_id":
+                        f.write(f"    - {feat:.<20} {val:.4f}\n")
+
+        f.write("\nProcess Durations:\n")
         for key, val in durations.items():
             f.write(f"  - {key}: {format_duration(val)}\n")
 
@@ -73,8 +84,8 @@ def extract_robust_features(
         os.remove(db_path)
 
     con = duckdb.connect(db_path)
-    con.execute("PRAGMA threads=8")
-    con.execute("PRAGMA memory_limit='20GB'")
+    con.execute("PRAGMA threads=12")
+    con.execute("PRAGMA memory_limit='30GB'")
 
     parquet_glob = os.path.join(parquet_dir, "*.parquet")
 
@@ -184,13 +195,11 @@ def plot_cluster_samples(df, parquet_dir, n_clusters):
         if not cluster_members:
             continue
 
-        samples = np.random.choice(
-            cluster_members, min(2, len(cluster_members)), replace=False
-        )
+        n_samples = min(10, len(cluster_members))
+        samples = np.random.choice(cluster_members, n_samples, replace=False)
 
-        fig, axes = plt.subplots(1, len(samples), figsize=(12, 4))
-        if len(samples) == 1:
-            axes = [axes]
+        fig, axes = plt.subplots(2, 5, figsize=(20, 8))
+        axes = axes.flatten()
 
         for i, ms in enumerate(samples):
             raw_data = (
@@ -198,18 +207,25 @@ def plot_cluster_samples(df, parquet_dir, n_clusters):
                 .filter(pl.col("msname") == ms)
                 .collect()
             )
-            axes[i].plot(raw_data["cpu_utilization"].to_numpy(), alpha=0.7)
-            axes[i].set_title(f"MS: {ms}")
-            axes[i].set_ylabel("CPU Util")
+            axes[i].plot(
+                raw_data["cpu_utilization"].to_numpy(), alpha=0.7, color="navy"
+            )
+            axes[i].set_title(f"MS: {ms}", fontsize=9)
             axes[i].set_ylim(0, 1)
+            axes[i].grid(True, alpha=0.2)
 
-        plt.suptitle(f"Archetype {cid} Sample Workloads")
-        plt.tight_layout()
+        for j in range(i + 1, len(axes)):
+            axes[j].axis("off")
+
+        plt.suptitle(
+            f"Archetype {cid} Sample Workloads (10 Random Samples)", fontsize=16
+        )
+        plt.tight_layout(rect=[0, 0.03, 1, 0.95])
         plt.savefig(
             os.path.join(PATHS.ARCHETYPE_DIR, "plots", f"cluster_{cid}_samples.png")
         )
         plt.close()
-    print(f"Cluster sample plots saved in: {plot_path}")
+    print(f"Cluster sample plots (10 per cluster) saved in: {plot_path}")
 
 
 def analyze_label_stability(
@@ -307,7 +323,7 @@ def main():
     ap.add_argument(
         "--batch_size",
         type=int,
-        default=50,
+        default=2048,
     )
     ap.add_argument(
         "--temp_dir",
@@ -381,6 +397,21 @@ def main():
 
     features_df = features_df.with_columns(pl.Series("archetype_id", labels))
 
+    print("Calculating cluster feature averages...")
+    cluster_stats = (
+        features_df.group_by("archetype_id")
+        .agg([pl.col(c).mean() for c in feature_cols])
+        .sort("archetype_id")
+    )
+
+    print("\n" + "-" * 30)
+    print("CLUSTER FEATURE AVERAGES")
+    print("-" * 30)
+    pd.set_option("display.max_columns", None)
+    pd.set_option("display.width", 1000)
+    print(cluster_stats.to_pandas())
+    print("-" * 30 + "\n")
+
     mapping = {
         row["msname"]: int(row["archetype_id"]) for row in features_df.to_dicts()
     }
@@ -400,10 +431,12 @@ def main():
     )
     plot_stability_curve(windows, scores)
 
-    save_cluster_metrics(best_k, sil_score, counts, durations)
+    save_cluster_metrics(
+        best_k, sil_score, counts, durations, cluster_stats=cluster_stats
+    )
 
     print("\n" + "=" * 40)
-    print("       FINAL RUNTIME SUMMARY")
+    print("      FINAL RUNTIME SUMMARY")
     print("=" * 40)
     for stage, dur in durations.items():
         print(f"{stage:.<30} {format_duration(dur)}")
