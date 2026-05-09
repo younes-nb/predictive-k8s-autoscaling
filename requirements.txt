@@ -10,3 +10,4 @@ duckdb>=1.5.2
 kneed>=0.8.6
 scikit-learn>=1.8.0
 joblib>=1.5.3
+pytz>=2026.2
