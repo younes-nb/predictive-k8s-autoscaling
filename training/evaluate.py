@@ -3,7 +3,9 @@ import sys
 import argparse
 import logging
 import time
+import numpy as np
 from datetime import datetime
+from scipy.stats import pearsonr
 
 try:
     from zoneinfo import ZoneInfo
@@ -135,9 +137,9 @@ def evaluate(args):
 
     logging.info("\n--- Starting Deterministic Inference ---")
 
-    mse_sum = 0.0
-    mae_sum = 0.0
-    total_samples = 0
+    all_preds = []
+    all_trues = []
+    all_lasts = []
 
     start_time = time.time()
     total_batches = len(test_loader)
@@ -147,24 +149,45 @@ def evaluate(args):
 
         mu = forward_predict(model, x)
 
-        diff = mu - y
-        mse_sum += (diff**2).sum().item()
-        mae_sum += diff.abs().sum().item()
+        y_last = x[:, -1, 0].cpu().numpy()
 
-        total_samples += x.size(0)
+        all_preds.append(mu.cpu().numpy())
+        all_trues.append(y.cpu().numpy())
+        all_lasts.append(y_last)
 
         print(f"Batch {i+1}/{total_batches} processed...", end="\r", flush=True)
 
     print(" " * 50, end="\r")
-
     inference_time = time.time() - start_time
+
+    y_pred = np.concatenate(all_preds, axis=0)
+    y_true = np.concatenate(all_trues, axis=0)
+    y_last = np.concatenate(all_lasts, axis=0)
+
+    total_samples = y_pred.shape[0]
 
     if total_samples == 0:
         logging.warning("No samples found in test set for the specified archetype.")
         return
 
-    mse = mse_sum / (total_samples * horizon)
-    mae = mae_sum / (total_samples * horizon)
+    mse = np.mean((y_pred - y_true) ** 2)
+    mae = np.mean(np.abs(y_pred - y_true))
+
+    y_true_s1 = y_true[:, 0]
+    y_pred_s1 = y_pred[:, 0]
+
+    mse_naive = np.mean((y_true_s1 - y_last) ** 2)
+    skill_score = 1.0 - (mse / mse_naive)
+
+    actual_dir = np.sign(y_true_s1 - y_last)
+    pred_dir = np.sign(y_pred_s1 - y_last)
+    mda = np.mean(actual_dir == pred_dir)
+
+    corr_0, _ = pearsonr(y_true_s1, y_pred_s1)
+    corr_1, _ = pearsonr(y_last, y_pred_s1)
+
+    is_shadowing = (skill_score < 0.05) or (corr_1 > corr_0) or (mda < 0.55)
+
     avg_inference_time_ms = (inference_time / total_samples) * 1000.0
 
     logging.info("\n=== Test Results (Error & Latency) ===")
@@ -174,6 +197,22 @@ def evaluate(args):
     logging.info("-" * 30)
     logging.info(f"MSE:                   {mse:.6f}")
     logging.info(f"MAE:                   {mae:.6f}")
+    logging.info("-" * 30)
+    logging.info(">>> SHADOWING DIAGNOSTICS <<<")
+    logging.info(f"Skill Score (vs Naive): {skill_score:.4f}  (Should be > 0)")
+    logging.info(f"Directional Acc (MDA):  {mda:.2%} (Should be > 55%)")
+    logging.info(f"Correlation (Lag 0):    {corr_0:.4f}")
+    logging.info(
+        f"Correlation (Lag -1):   {corr_1:.4f}  (If > Lag 0, model is shadowing)"
+    )
+
+    if is_shadowing:
+        logging.warning(
+            "!! WARNING: Model shows signs of SHADOWING (overfitting to last step) !!"
+        )
+    else:
+        logging.info("PASSED: Model appears to have learned temporal dynamics.")
+
     logging.info("-" * 30)
     logging.info(f"Total Inference Time:  {inference_time:.2f}s")
     logging.info(f"Avg Latency per Sample:{avg_inference_time_ms:.4f} ms")
