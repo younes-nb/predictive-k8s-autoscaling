@@ -12,7 +12,7 @@ import joblib
 import pytz
 from datetime import datetime
 from sklearn.cluster import KMeans
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import RobustScaler
 from sklearn.metrics import silhouette_score, f1_score
 from kneed import KneeLocator
 
@@ -156,15 +156,16 @@ def extract_robust_features(
             avg(cpu_utilization) as cpu_mean,
             stddev_samp(cpu_utilization) as cpu_std,
             approx_quantile(cpu_utilization, 0.95) as cpu_p95,
-            skewness(cpu_utilization) as cpu_skew,
-            kurtosis(cpu_utilization) as cpu_kurt,
+            ln(abs(skewness(cpu_utilization)) + 1) as cpu_skew,
+            ln(abs(kurtosis(cpu_utilization)) + 1) as cpu_kurt,
             (max(cpu_utilization) / NULLIF(avg(cpu_utilization), 0)) as peak_to_avg,
             (stddev_samp(cpu_utilization) / NULLIF(avg(cpu_utilization), 0)) as coeff_variation,
             corr(cpu_utilization, prev_cpu) as cpu_autocorr,
             avg(abs(cpu_utilization - prev_cpu)) as cpu_mad,
             regr_slope(cpu_utilization, time_idx) as cpu_slope,
             (approx_quantile(cpu_utilization, 0.75) - approx_quantile(cpu_utilization, 0.25)) as cpu_iqr,
-            (approx_quantile(cpu_utilization, 0.99) / (approx_quantile(cpu_utilization, 0.5) + 0.01)) as burstiness_ratio,
+            (max(cpu_utilization) / (approx_quantile(cpu_utilization, 0.5) + 0.01)) as burstiness_ratio,
+            
             count(*) as sample_count
         FROM lagged_agg
         GROUP BY msname
@@ -263,15 +264,15 @@ def analyze_label_stability(
             avg(cpu_utilization) as cpu_mean,
             stddev_samp(cpu_utilization) as cpu_std,
             approx_quantile(cpu_utilization, 0.95) as cpu_p95,
-            skewness(cpu_utilization) as cpu_skew,
-            kurtosis(cpu_utilization) as cpu_kurt,
+            ln(abs(skewness(cpu_utilization)) + 1) as cpu_skew,
+            ln(abs(kurtosis(cpu_utilization)) + 1) as cpu_kurt,
             (max(cpu_utilization) / NULLIF(avg(cpu_utilization), 0)) as peak_to_avg,
             (stddev_samp(cpu_utilization) / NULLIF(avg(cpu_utilization), 0)) as coeff_variation,
             corr(cpu_utilization, prev_cpu) as cpu_autocorr,
             avg(abs(cpu_utilization - prev_cpu)) as cpu_mad,
             regr_slope(cpu_utilization, time_idx) as cpu_slope,
             (approx_quantile(cpu_utilization, 0.75) - approx_quantile(cpu_utilization, 0.25)) as cpu_iqr,
-            (approx_quantile(cpu_utilization, 0.99) / NULLIF(approx_quantile(cpu_utilization, 0.5), 1e-6)) as burstiness_ratio
+            (max(cpu_utilization) / (approx_quantile(cpu_utilization, 0.5) + 0.01)) as burstiness_ratio
         FROM lagged_agg
         GROUP BY msname
         """
@@ -363,7 +364,7 @@ def main():
     data_to_scale = features_df.select(feature_cols).to_numpy()
     data_to_scale = np.nan_to_num(data_to_scale, nan=0.0, posinf=0.0, neginf=0.0)
 
-    scaler = StandardScaler()
+    scaler = RobustScaler()
     scaled_data = scaler.fit_transform(data_to_scale)
 
     wcss = []
