@@ -11,7 +11,9 @@ import matplotlib.pyplot as plt
 import joblib
 import pytz
 from datetime import datetime
-from sklearn.cluster import KMeans
+from sklearn.decomposition import PCA
+from sklearn.cluster import HDBSCAN
+from sklearn.neighbors import KNeighborsClassifier
 from sklearn.preprocessing import RobustScaler
 from sklearn.metrics import silhouette_score, f1_score
 from kneed import KneeLocator
@@ -35,7 +37,9 @@ def get_tehran_timestamp():
     return datetime.now(tehran_tz).strftime("%Y%m%d_%H%M%S")
 
 
-def save_cluster_metrics(best_k, sil_score, counts, durations, cluster_stats=None):
+def save_cluster_metrics(
+    num_clusters, sil_score, counts, durations, cluster_stats=None
+):
     os.makedirs(PATHS.LOGS_DIR, exist_ok=True)
     timestamp = get_tehran_timestamp()
     log_file = os.path.join(PATHS.LOGS_DIR, f"cluster_metrics_{timestamp}.log")
@@ -43,12 +47,13 @@ def save_cluster_metrics(best_k, sil_score, counts, durations, cluster_stats=Non
     with open(log_file, "w") as f:
         f.write(f"Clustering Run Metrics - {timestamp} (Tehran Time)\n")
         f.write("-" * 50 + "\n")
-        f.write(f"Optimal Clusters (K): {best_k}\n")
-        f.write(f"Silhouette Score: {sil_score:.4f}\n\n")
+        f.write(f"Total Archetypes Found: {num_clusters}\n")
+        f.write(f"Silhouette Score (Excluding Noise): {sil_score:.4f}\n\n")
 
         f.write("Cluster Distribution:\n")
-        for cluster_id, count in enumerate(counts):
-            f.write(f"  - Archetype {cluster_id}: {count} members\n")
+        for cluster_id, count in zip(counts[0], counts[1]):
+            name = "Noise (Label -1)" if cluster_id == -1 else f"Archetype {cluster_id}"
+            f.write(f"  - {name}: {count} members\n")
 
         if cluster_stats is not None:
             f.write("\nAverage Feature Values per Cluster:\n")
@@ -187,11 +192,11 @@ def extract_robust_features(
     return pl.from_pandas(df_pandas.fillna(0.0)), total_extraction_duration
 
 
-def plot_cluster_samples(df, parquet_dir, n_clusters):
+def plot_cluster_samples(df, parquet_dir, unique_labels):
     plot_path = os.path.join(PATHS.ARCHETYPE_DIR, "plots")
     os.makedirs(plot_path, exist_ok=True)
 
-    for cid in range(n_clusters):
+    for cid in unique_labels:
         cluster_members = df.filter(pl.col("archetype_id") == cid)["msname"].to_list()
         if not cluster_members:
             continue
@@ -200,7 +205,10 @@ def plot_cluster_samples(df, parquet_dir, n_clusters):
         samples = np.random.choice(cluster_members, n_samples, replace=False)
 
         fig, axes = plt.subplots(10, 1, figsize=(64, 16))
-        axes = axes.flatten()
+        if n_samples == 1:
+            axes = [axes]
+        else:
+            axes = axes.flatten()
 
         for i, ms in enumerate(samples):
             raw_data = (
@@ -215,22 +223,21 @@ def plot_cluster_samples(df, parquet_dir, n_clusters):
             axes[i].set_ylim(0, 1)
             axes[i].grid(True, alpha=0.2)
 
-        for j in range(i + 1, len(axes)):
+        for j in range(len(samples), len(axes)):
             axes[j].axis("off")
 
-        plt.suptitle(
-            f"Archetype {cid} Sample Workloads (10 Random Samples)", fontsize=16
-        )
+        title = "Noise/General Samples" if cid == -1 else f"Archetype {cid} Samples"
+        plt.suptitle(f"{title} (10 Random)", fontsize=16)
         plt.tight_layout(rect=[0, 0.03, 1, 0.95])
         plt.savefig(
             os.path.join(PATHS.ARCHETYPE_DIR, "plots", f"cluster_{cid}_samples.png")
         )
         plt.close()
-    print(f"Cluster sample plots (10 per cluster) saved in: {plot_path}")
+    print(f"Cluster sample plots saved in: {plot_path}")
 
 
 def analyze_label_stability(
-    features_df, scaler, kmeans_model, parquet_glob, time_steps_to_test
+    features_df, scaler, pca, classifier_model, parquet_glob, time_steps_to_test
 ):
     start_stability = time.perf_counter()
     con = duckdb.connect(":memory:")
@@ -239,7 +246,7 @@ def analyze_label_stability(
     ms_names = features_df["msname"].to_list()
     stability_results = []
 
-    print("Starting Sensitivity Analysis...")
+    print("Starting Sensitivity Analysis (PCA + HDBSCAN + KNN)...")
 
     for n in time_steps_to_test:
         step_start = time.perf_counter()
@@ -296,7 +303,9 @@ def analyze_label_stability(
         )
 
         scaled_partial = scaler.transform(partial_data)
-        predicted_labels = kmeans_model.predict(scaled_partial)
+        pca_partial = pca.transform(scaled_partial)
+
+        predicted_labels = classifier_model.predict(pca_partial)
 
         score = f1_score(ground_truth_labels, predicted_labels, average="weighted")
         stability_results.append(score)
@@ -330,16 +339,8 @@ def plot_stability_curve(time_steps, scores):
 def main():
     ap = argparse.ArgumentParser(description="Cluster microservice workloads")
     ap.add_argument("--max_services", type=int, default=PREPROCESSING.MAX_SERVICES)
-    ap.add_argument(
-        "--batch_size",
-        type=int,
-        default=4096,
-    )
-    ap.add_argument(
-        "--temp_dir",
-        type=str,
-        default="/dataset/duckdb_temp",
-    )
+    ap.add_argument("--batch_size", type=int, default=4096)
+    ap.add_argument("--temp_dir", type=str, default="/dataset/duckdb_temp")
     args, _ = ap.parse_known_args()
 
     os.makedirs(PATHS.ARCHETYPE_DIR, exist_ok=True)
@@ -352,7 +353,7 @@ def main():
         temp_dir=args.temp_dir,
     )
 
-    print("Determining optimal K and clustering...")
+    print("Determining archetypes using PCA + HDBSCAN...")
     start_clustering = time.perf_counter()
 
     feature_cols = [
@@ -371,6 +372,8 @@ def main():
     ]
 
     pdf = features_df.to_pandas()
+
+    # 2. Handle heavy-tailed distributions
     pdf["peak_to_avg"] = np.log1p(pdf["peak_to_avg"])
     pdf["burstiness_ratio"] = np.log1p(pdf["burstiness_ratio"])
 
@@ -386,47 +389,50 @@ def main():
     scaler = RobustScaler()
     scaled_data = scaler.fit_transform(data_to_scale)
 
-    k_range = range(ARCHETYPES.MIN_K, ARCHETYPES.MAX_K + 1)
+    pca = PCA(n_components=0.95, random_state=42)
+    pca_data = pca.fit_transform(scaled_data)
+    print(
+        f"PCA reduced features from {len(feature_cols)} to {pca.n_components_} components."
+    )
 
-    best_sil_score = -1.0
-    best_k = ARCHETYPES.MIN_K
-    best_km = None
-    best_labels = None
+    clusterer = HDBSCAN(min_cluster_size=100, min_samples=15)
+    labels = clusterer.fit_predict(pca_data)
 
-    print("Evaluating K values using Silhouette Score...")
-    for k in k_range:
-        km = KMeans(n_clusters=k, random_state=42, n_init=10)
-        labels = km.fit_predict(scaled_data)
+    print("Training KNN Classifier on HDBSCAN output for stability analysis...")
+    knn = KNeighborsClassifier(n_neighbors=5)
+    knn.fit(pca_data, labels)
 
-        sil = silhouette_score(scaled_data, labels)
-        print(f"  K={k} -> Silhouette Score: {sil:.4f}")
-
-        if sil > best_sil_score:
-            best_sil_score = sil
-            best_k = k
-            best_km = km
-            best_labels = labels
-
-    final_km = best_km
-    labels = best_labels
-    sil_score = best_sil_score
-    durations["Clustering & Silhouette Method"] = time.perf_counter() - start_clustering
-
-    print(f"Optimal K: {best_k} | Best Silhouette Score: {sil_score:.4f}")
+    durations["PCA, Clustering & KNN Training"] = time.perf_counter() - start_clustering
 
     unique_labels, counts = np.unique(labels, return_counts=True)
-    print(f"\nTotal Number of Clusters: {best_k}")
+    valid_mask = labels != -1
+
+    if valid_mask.sum() > 0 and len(set(labels[valid_mask])) > 1:
+        sil_score = silhouette_score(pca_data[valid_mask], labels[valid_mask])
+    else:
+        sil_score = 0.0
+
+    print(
+        f"Total Number of Clusters Found: {len(unique_labels) - (1 if -1 in unique_labels else 0)}"
+    )
+    print(f"Silhouette Score (Excluding Noise): {sil_score:.4f}")
+
     for cluster_id, count in zip(unique_labels, counts):
-        print(f"  Cluster {cluster_id}: {count} members")
+        name = "Noise/General" if cluster_id == -1 else f"Archetype {cluster_id}"
+        print(f"  {name}: {count} members")
     print()
 
-    model_save_path = os.path.join(PATHS.ARCHETYPE_DIR, "kmeans_model.joblib")
+    model_save_path = os.path.join(
+        PATHS.ARCHETYPE_DIR, "kmeans_model.joblib"
+    )
     scaler_save_path = os.path.join(PATHS.ARCHETYPE_DIR, "scaler.joblib")
+    pca_save_path = os.path.join(PATHS.ARCHETYPE_DIR, "pca.joblib")
+    knn_save_path = os.path.join(PATHS.ARCHETYPE_DIR, "knn_classifier.joblib")
 
-    joblib.dump(final_km, model_save_path)
+    joblib.dump(clusterer, model_save_path)
     joblib.dump(scaler, scaler_save_path)
-    print(f"K-Means model exported to: {model_save_path}")
-    print(f"Scaler exported to: {scaler_save_path}")
+    joblib.dump(pca, pca_save_path)
+    joblib.dump(knn, knn_save_path)
 
     features_df = features_df.with_columns(pl.Series("archetype_id", labels))
     pdf["archetype_id"] = labels
@@ -453,20 +459,25 @@ def main():
         json.dump(mapping, f, indent=4)
     print(f"Archetype mapping saved to: {PATHS.ARCHETYPE_MAPPING}")
 
-    plot_cluster_samples(features_df, PATHS.PARQUET_MSRESOURCE, best_k)
+    plot_cluster_samples(features_df, PATHS.PARQUET_MSRESOURCE, unique_labels)
 
     windows = [15, 30, 60, 120, 240, 480, 720, 1440, 2880]
     scores, durations["Stability Analysis (Min Time Steps)"] = analyze_label_stability(
         pdf,
         scaler,
-        final_km,
+        pca,
+        knn,
         os.path.join(PATHS.PARQUET_MSRESOURCE, "*.parquet"),
         windows,
     )
     plot_stability_curve(windows, scores)
 
     save_cluster_metrics(
-        best_k, sil_score, counts, durations, cluster_stats=cluster_stats
+        len(unique_labels) - (1 if -1 in unique_labels else 0),
+        sil_score,
+        (unique_labels, counts),
+        durations,
+        cluster_stats=cluster_stats,
     )
 
     print("\n" + "=" * 40)
