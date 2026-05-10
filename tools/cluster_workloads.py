@@ -169,7 +169,7 @@ def extract_robust_features(
             count(*) as sample_count
         FROM lagged_agg
         GROUP BY msname
-        HAVING count(*) > 10
+        HAVING count(*) > 10 AND avg(cpu_utilization) > 0.005
         """
         con.execute(query)
         batch_end_time = time.perf_counter()
@@ -286,6 +286,12 @@ def analyze_label_stability(
         partial_data = partial_df.drop(columns=["msname"]).to_numpy()
         partial_data = np.nan_to_num(partial_data, nan=0.0, posinf=0.0, neginf=0.0)
 
+        partial_data = np.clip(
+            partial_data,
+            np.percentile(partial_data, 1, axis=0),
+            np.percentile(partial_data, 99, axis=0),
+        )
+
         scaled_partial = scaler.transform(partial_data)
         predicted_labels = kmeans_model.predict(scaled_partial)
 
@@ -363,6 +369,12 @@ def main():
 
     data_to_scale = features_df.select(feature_cols).to_numpy()
     data_to_scale = np.nan_to_num(data_to_scale, nan=0.0, posinf=0.0, neginf=0.0)
+
+    data_to_scale = np.clip(
+        data_to_scale,
+        np.percentile(data_to_scale, 1, axis=0),
+        np.percentile(data_to_scale, 99, axis=0),
+    )
 
     scaler = RobustScaler()
     scaled_data = scaler.fit_transform(data_to_scale)
