@@ -12,7 +12,9 @@ import joblib
 import pytz
 from datetime import datetime
 from sklearn.cluster import KMeans
-from sklearn.preprocessing import StandardScaler
+
+# CHANGE: Switched to RobustScaler for better outlier handling
+from sklearn.preprocessing import RobustScaler
 from sklearn.metrics import silhouette_score, f1_score
 from kneed import KneeLocator
 
@@ -199,7 +201,7 @@ def plot_cluster_samples(df, parquet_dir, n_clusters):
         n_samples = min(10, len(cluster_members))
         samples = np.random.choice(cluster_members, n_samples, replace=False)
 
-        fig, axes = plt.subplots(1, 10, figsize=(64, 16))
+        fig, axes = plt.subplots(10, 1, figsize=(64, 16))
         axes = axes.flatten()
 
         for i, ms in enumerate(samples):
@@ -282,6 +284,9 @@ def analyze_label_stability(
         partial_df = pd.merge(
             pd.DataFrame({"msname": ms_names}), partial_df, on="msname", how="left"
         ).fillna(0.0)
+
+        partial_df["peak_to_avg"] = np.log1p(partial_df["peak_to_avg"])
+        partial_df["burstiness_ratio"] = np.log1p(partial_df["burstiness_ratio"])
 
         partial_data = partial_df.drop(columns=["msname"]).to_numpy()
         partial_data = np.nan_to_num(partial_data, nan=0.0, posinf=0.0, neginf=0.0)
@@ -367,7 +372,11 @@ def main():
         "burstiness_ratio",
     ]
 
-    data_to_scale = features_df.select(feature_cols).to_numpy()
+    pdf = features_df.to_pandas()
+    pdf["peak_to_avg"] = np.log1p(pdf["peak_to_avg"])
+    pdf["burstiness_ratio"] = np.log1p(pdf["burstiness_ratio"])
+
+    data_to_scale = pdf[feature_cols].to_numpy()
     data_to_scale = np.nan_to_num(data_to_scale, nan=0.0, posinf=0.0, neginf=0.0)
 
     data_to_scale = np.clip(
@@ -376,7 +385,7 @@ def main():
         np.percentile(data_to_scale, 99, axis=0),
     )
 
-    scaler = StandardScaler()
+    scaler = RobustScaler()
     scaled_data = scaler.fit_transform(data_to_scale)
 
     k_range = range(ARCHETYPES.MIN_K, ARCHETYPES.MAX_K + 1)
@@ -449,7 +458,7 @@ def main():
 
     windows = [15, 30, 60, 120, 240, 480, 720, 1440, 2880]
     scores, durations["Stability Analysis (Min Time Steps)"] = analyze_label_stability(
-        features_df,
+        pdf,
         scaler,
         final_km,
         os.path.join(PATHS.PARQUET_MSRESOURCE, "*.parquet"),
