@@ -12,7 +12,7 @@ import joblib
 import pytz
 from datetime import datetime
 from sklearn.cluster import KMeans
-from sklearn.preprocessing import RobustScaler
+from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import silhouette_score, f1_score
 from kneed import KneeLocator
 
@@ -69,7 +69,7 @@ def save_cluster_metrics(best_k, sil_score, counts, durations, cluster_stats=Non
 def extract_robust_features(
     parquet_dir: str,
     max_services: int = None,
-    batch_size: int = 50,
+    batch_size: int = 64,
     temp_dir: str = "/dataset/duckdb_temp",
 ):
     start_extraction = time.perf_counter()
@@ -85,7 +85,7 @@ def extract_robust_features(
 
     con = duckdb.connect(db_path)
     con.execute("PRAGMA threads=12")
-    con.execute("PRAGMA memory_limit='30GB'")
+    con.execute("PRAGMA memory_limit='32GB'")
 
     parquet_glob = os.path.join(parquet_dir, "*.parquet")
 
@@ -164,7 +164,7 @@ def extract_robust_features(
             avg(abs(cpu_utilization - prev_cpu)) as cpu_mad,
             regr_slope(cpu_utilization, time_idx) as cpu_slope,
             (approx_quantile(cpu_utilization, 0.75) - approx_quantile(cpu_utilization, 0.25)) as cpu_iqr,
-            (max(cpu_utilization) / (approx_quantile(cpu_utilization, 0.5) + 0.01)) as burstiness_ratio,
+            (max(cpu_utilization) / (approx_quantile(cpu_utilization, 0.5) + 0.00001)) as burstiness_ratio,
             
             count(*) as sample_count
         FROM lagged_agg
@@ -199,7 +199,7 @@ def plot_cluster_samples(df, parquet_dir, n_clusters):
         n_samples = min(10, len(cluster_members))
         samples = np.random.choice(cluster_members, n_samples, replace=False)
 
-        fig, axes = plt.subplots(2, 5, figsize=(20, 8))
+        fig, axes = plt.subplots(1, 10, figsize=(64, 16))
         axes = axes.flatten()
 
         for i, ms in enumerate(samples):
@@ -330,7 +330,7 @@ def main():
     ap.add_argument(
         "--batch_size",
         type=int,
-        default=2048,
+        default=4096,
     )
     ap.add_argument(
         "--temp_dir",
@@ -376,23 +376,36 @@ def main():
         np.percentile(data_to_scale, 99, axis=0),
     )
 
-    scaler = RobustScaler()
+    scaler = StandardScaler()
     scaled_data = scaler.fit_transform(data_to_scale)
 
-    wcss = []
     k_range = range(ARCHETYPES.MIN_K, ARCHETYPES.MAX_K + 1)
+
+    best_sil_score = -1.0
+    best_k = ARCHETYPES.MIN_K
+    best_km = None
+    best_labels = None
+
+    print("Evaluating K values using Silhouette Score...")
     for k in k_range:
-        km = KMeans(n_clusters=k, random_state=42, n_init=10).fit(scaled_data)
-        wcss.append(km.inertia_)
+        km = KMeans(n_clusters=k, random_state=42, n_init=10)
+        labels = km.fit_predict(scaled_data)
 
-    kn = KneeLocator(k_range, wcss, curve="convex", direction="decreasing")
-    best_k = kn.knee or ARCHETYPES.MIN_K
-    final_km = KMeans(n_clusters=best_k, random_state=42, n_init=10)
-    labels = final_km.fit_predict(scaled_data)
-    durations["Clustering & Elbow Method"] = time.perf_counter() - start_clustering
+        sil = silhouette_score(scaled_data, labels)
+        print(f"  K={k} -> Silhouette Score: {sil:.4f}")
 
-    sil_score = silhouette_score(scaled_data, labels)
-    print(f"Optimal K: {best_k} | Silhouette Score: {sil_score:.4f}")
+        if sil > best_sil_score:
+            best_sil_score = sil
+            best_k = k
+            best_km = km
+            best_labels = labels
+
+    final_km = best_km
+    labels = best_labels
+    sil_score = best_sil_score
+    durations["Clustering & Silhouette Method"] = time.perf_counter() - start_clustering
+
+    print(f"Optimal K: {best_k} | Best Silhouette Score: {sil_score:.4f}")
 
     unique_labels, counts = np.unique(labels, return_counts=True)
     print(f"\nTotal Number of Clusters: {best_k}")
