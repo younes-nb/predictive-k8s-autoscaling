@@ -164,7 +164,7 @@ def extract_robust_features(
             avg(abs(cpu_utilization - prev_cpu)) as cpu_mad,
             regr_slope(cpu_utilization, time_idx) as cpu_slope,
             (approx_quantile(cpu_utilization, 0.75) - approx_quantile(cpu_utilization, 0.25)) as cpu_iqr,
-            (approx_quantile(cpu_utilization, 0.99) / (approx_quantile(cpu_utilization, 0.5) + 0.01)) as burstiness_ratio,,
+            (approx_quantile(cpu_utilization, 0.99) / (approx_quantile(cpu_utilization, 0.5) + 0.01)) as burstiness_ratio,
             count(*) as sample_count
         FROM lagged_agg
         GROUP BY msname
