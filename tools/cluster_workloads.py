@@ -23,7 +23,7 @@ REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, os.pardir))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from config.defaults import PATHS, ARCHETYPES, PREPROCESSING
+from config.defaults import PATHS, PREPROCESSING
 
 
 def format_duration(seconds):
@@ -237,7 +237,13 @@ def plot_cluster_samples(df, parquet_dir, unique_labels):
 
 
 def analyze_label_stability(
-    features_df, scaler, pca, classifier_model, parquet_glob, time_steps_to_test
+    features_df,
+    scaler,
+    pca,
+    classifier_model,
+    parquet_glob,
+    time_steps_to_test,
+    clustering_cols,
 ):
     start_stability = time.perf_counter()
     con = duckdb.connect(":memory:")
@@ -279,7 +285,7 @@ def analyze_label_stability(
             avg(abs(cpu_utilization - prev_cpu)) as cpu_mad,
             regr_slope(cpu_utilization, time_idx) as cpu_slope,
             (approx_quantile(cpu_utilization, 0.75) - approx_quantile(cpu_utilization, 0.25)) as cpu_iqr,
-            (max(cpu_utilization) / (approx_quantile(cpu_utilization, 0.5) + 0.00001)) as burstiness_ratio
+            (max(cpu_utilization) / (approx_quantile(cpu_utilization, 0.5) + 0.01)) as burstiness_ratio
         FROM lagged_agg
         GROUP BY msname
         """
@@ -293,7 +299,7 @@ def analyze_label_stability(
         partial_df["peak_to_avg"] = np.log1p(partial_df["peak_to_avg"])
         partial_df["burstiness_ratio"] = np.log1p(partial_df["burstiness_ratio"])
 
-        partial_data = partial_df.drop(columns=["msname"]).to_numpy()
+        partial_data = partial_df[clustering_cols].to_numpy()
         partial_data = np.nan_to_num(partial_data, nan=0.0, posinf=0.0, neginf=0.0)
 
         partial_data = np.clip(
@@ -371,12 +377,22 @@ def main():
         "burstiness_ratio",
     ]
 
+    clustering_cols = [
+        "cpu_skew",
+        "cpu_kurt",
+        "peak_to_avg",
+        "coeff_variation",
+        "cpu_autocorr",
+        "cpu_slope",
+        "burstiness_ratio",
+    ]
+
     pdf = features_df.to_pandas()
 
     pdf["peak_to_avg"] = np.log1p(pdf["peak_to_avg"])
     pdf["burstiness_ratio"] = np.log1p(pdf["burstiness_ratio"])
 
-    data_to_scale = pdf[feature_cols].to_numpy()
+    data_to_scale = pdf[clustering_cols].to_numpy()
     data_to_scale = np.nan_to_num(data_to_scale, nan=0.0, posinf=0.0, neginf=0.0)
 
     data_to_scale = np.clip(
@@ -391,7 +407,7 @@ def main():
     pca = PCA(n_components=0.95, random_state=42)
     pca_data = pca.fit_transform(scaled_data)
     print(
-        f"PCA reduced features from {len(feature_cols)} to {pca.n_components_} components."
+        f"PCA reduced behavioral features from {len(clustering_cols)} to {pca.n_components_} components."
     )
 
     clusterer = HDBSCAN(min_cluster_size=100, min_samples=10)
@@ -437,7 +453,9 @@ def main():
     print("Calculating cluster feature averages...")
     cluster_stats = (
         features_df.group_by("archetype_id")
-        .agg([pl.col(c).mean() for c in feature_cols])
+        .agg(
+            [pl.col(c).mean() for c in feature_cols]
+        ) 
         .sort("archetype_id")
     )
 
@@ -466,6 +484,7 @@ def main():
         knn,
         os.path.join(PATHS.PARQUET_MSRESOURCE, "*.parquet"),
         windows,
+        clustering_cols,
     )
     plot_stability_curve(windows, scores)
 
