@@ -279,7 +279,7 @@ def analyze_label_stability(
             avg(abs(cpu_utilization - prev_cpu)) as cpu_mad,
             regr_slope(cpu_utilization, time_idx) as cpu_slope,
             (approx_quantile(cpu_utilization, 0.75) - approx_quantile(cpu_utilization, 0.25)) as cpu_iqr,
-            (max(cpu_utilization) / (approx_quantile(cpu_utilization, 0.5) + 0.01)) as burstiness_ratio
+            (max(cpu_utilization) / (approx_quantile(cpu_utilization, 0.5) + 0.00001)) as burstiness_ratio
         FROM lagged_agg
         GROUP BY msname
         """
@@ -373,7 +373,6 @@ def main():
 
     pdf = features_df.to_pandas()
 
-    # 2. Handle heavy-tailed distributions
     pdf["peak_to_avg"] = np.log1p(pdf["peak_to_avg"])
     pdf["burstiness_ratio"] = np.log1p(pdf["burstiness_ratio"])
 
@@ -395,7 +394,7 @@ def main():
         f"PCA reduced features from {len(feature_cols)} to {pca.n_components_} components."
     )
 
-    clusterer = HDBSCAN(min_cluster_size=100, min_samples=15)
+    clusterer = HDBSCAN(min_cluster_size=100, min_samples=10)
     labels = clusterer.fit_predict(pca_data)
 
     print("Training KNN Classifier on HDBSCAN output for stability analysis...")
@@ -422,9 +421,7 @@ def main():
         print(f"  {name}: {count} members")
     print()
 
-    model_save_path = os.path.join(
-        PATHS.ARCHETYPE_DIR, "kmeans_model.joblib"
-    )
+    model_save_path = os.path.join(PATHS.ARCHETYPE_DIR, "hdbscan_model.joblib")
     scaler_save_path = os.path.join(PATHS.ARCHETYPE_DIR, "scaler.joblib")
     pca_save_path = os.path.join(PATHS.ARCHETYPE_DIR, "pca.joblib")
     knn_save_path = os.path.join(PATHS.ARCHETYPE_DIR, "knn_classifier.joblib")
