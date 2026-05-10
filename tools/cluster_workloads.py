@@ -12,8 +12,6 @@ import joblib
 import pytz
 from datetime import datetime
 from sklearn.cluster import KMeans
-
-# CHANGE: Switched to RobustScaler for better outlier handling
 from sklearn.preprocessing import RobustScaler
 from sklearn.metrics import silhouette_score, f1_score
 from kneed import KneeLocator
@@ -431,6 +429,7 @@ def main():
     print(f"Scaler exported to: {scaler_save_path}")
 
     features_df = features_df.with_columns(pl.Series("archetype_id", labels))
+    pdf["archetype_id"] = labels
 
     print("Calculating cluster feature averages...")
     cluster_stats = (
