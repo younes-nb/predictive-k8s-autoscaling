@@ -269,8 +269,8 @@ def analyze_label_stability(
                 f"avg(cpu_utilization) FILTER (WHERE delta_mins <= {n}) as cpu_mean_{n}",
                 f"stddev_samp(cpu_utilization) FILTER (WHERE delta_mins <= {n}) as cpu_std_{n}",
                 f"approx_quantile(cpu_utilization, 0.95) FILTER (WHERE delta_mins <= {n}) as cpu_p95_{n}",
-                f"ln(abs(skewness(cpu_utilization)) + 1) FILTER (WHERE delta_mins <= {n}) as cpu_skew_{n}",
-                f"ln(abs(kurtosis(cpu_utilization)) + 1) FILTER (WHERE delta_mins <= {n}) as cpu_kurt_{n}",
+                f"ln(abs(skewness(cpu_utilization) FILTER (WHERE delta_mins <= {n})) + 1) as cpu_skew_{n}",
+                f"ln(abs(kurtosis(cpu_utilization) FILTER (WHERE delta_mins <= {n})) + 1) as cpu_kurt_{n}",
                 f"(max(cpu_utilization) FILTER (WHERE delta_mins <= {n}) / "
                 f"NULLIF(avg(cpu_utilization) FILTER (WHERE delta_mins <= {n}), 0)) "
                 f"as peak_to_avg_{n}",
