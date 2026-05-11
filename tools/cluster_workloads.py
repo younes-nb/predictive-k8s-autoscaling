@@ -251,9 +251,9 @@ def analyze_label_stability(
         os.remove(temp_db_path)
 
     con = duckdb.connect(temp_db_path)
-    con.execute("PRAGMA threads=12")
+    con.execute("PRAGMA threads=8")
     con.execute("PRAGMA memory_limit='32GB'")
-    con.execute("PRAGMA max_temp_directory_size='200GiB'")
+    con.execute("PRAGMA max_temp_directory_size='300GiB'")
     con.execute("SET preserve_insertion_order=false")
 
     ground_truth_labels = features_df["archetype_id"].to_numpy()
@@ -262,14 +262,15 @@ def analyze_label_stability(
 
     print("Starting Sensitivity Analysis (PCA + HDBSCAN + KNN)...")
 
-    print("Pre-calculating and materializing time indices...")
+    print("Pre-calculating and physically ordering workloads by time index...")
     con.execute(f"""
         CREATE OR REPLACE TABLE ranked_workloads AS 
-        SELECT msname, cpu_utilization, 
-            row_number() OVER (PARTITION BY msname ORDER BY {PREPROCESSING.TIME_COL}) as r
-        FROM read_parquet('{parquet_glob}')
+        SELECT * FROM (
+            SELECT msname, cpu_utilization, 
+                   row_number() OVER (PARTITION BY msname ORDER BY {PREPROCESSING.TIME_COL}) as r
+            FROM read_parquet('{parquet_glob}')
+        ) ORDER BY r
     """)
-    con.execute("CREATE INDEX idx_r ON ranked_workloads (r)")
 
     for n in time_steps_to_test:
         step_start = time.perf_counter()
@@ -300,7 +301,7 @@ def analyze_label_stability(
         partial_df["burstiness_ratio"] = np.log1p(partial_df["burstiness_ratio"])
 
         partial_data = partial_df[clustering_cols].to_numpy()
-        partial_data = np.nan_to_num(partial_data, nan=0.0, posinf=0.0, neginf=0.0)
+        partial_data = np.nan_to_num(partial_data, nan=0.0)
 
         partial_data = np.clip(
             partial_data,
@@ -310,7 +311,6 @@ def analyze_label_stability(
 
         scaled_partial = scaler.transform(partial_data)
         pca_partial = pca.transform(scaled_partial)
-
         predicted_labels = classifier_model.predict(pca_partial)
 
         score = f1_score(ground_truth_labels, predicted_labels, average="weighted")
@@ -319,8 +319,7 @@ def analyze_label_stability(
         print(f"Window {n}m: F1={score:.4f} ({format_duration(step_end - step_start)})")
 
     con.close()
-    total_stability_duration = time.perf_counter() - start_stability
-    return stability_results, total_stability_duration
+    return stability_results, time.perf_counter() - start_stability
 
 
 def plot_stability_curve(time_steps, scores):
