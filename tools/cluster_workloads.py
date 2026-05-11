@@ -253,7 +253,8 @@ def analyze_label_stability(
     con = duckdb.connect(temp_db_path)
     con.execute("PRAGMA threads=12")
     con.execute("PRAGMA memory_limit='32GB'")
-    con.execute("PRAGMA max_temp_directory_size='100GiB'")
+    con.execute("PRAGMA max_temp_directory_size='200GiB'")
+    con.execute("SET preserve_insertion_order=false")
 
     ground_truth_labels = features_df["archetype_id"].to_numpy()
     ms_names = features_df["msname"].to_list()
@@ -261,13 +262,14 @@ def analyze_label_stability(
 
     print("Starting Sensitivity Analysis (PCA + HDBSCAN + KNN)...")
 
-    print("Pre-calculating time indices...")
+    print("Pre-calculating and materializing time indices...")
     con.execute(f"""
-        CREATE OR REPLACE VIEW ranked_workloads AS 
+        CREATE OR REPLACE TABLE ranked_workloads AS 
         SELECT msname, cpu_utilization, 
-               row_number() OVER (PARTITION BY msname ORDER BY {PREPROCESSING.TIME_COL}) as r
+            row_number() OVER (PARTITION BY msname ORDER BY {PREPROCESSING.TIME_COL}) as r
         FROM read_parquet('{parquet_glob}')
     """)
+    con.execute("CREATE INDEX idx_r ON ranked_workloads (r)")
 
     for n in time_steps_to_test:
         step_start = time.perf_counter()
@@ -401,10 +403,7 @@ def main():
     )
 
     clusterer = HDBSCAN(
-        min_cluster_size=100,
-        min_samples=15,
-        cluster_selection_method="leaf",
-        copy=True
+        min_cluster_size=100, min_samples=15, cluster_selection_method="leaf", copy=True
     )
     labels = clusterer.fit_predict(pca_data)
 
