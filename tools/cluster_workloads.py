@@ -14,7 +14,7 @@ from datetime import datetime
 from sklearn.decomposition import PCA
 from sklearn.cluster import HDBSCAN
 from sklearn.neighbors import KNeighborsClassifier
-from sklearn.preprocessing import QuantileTransformer  # Changed from RobustScaler
+from sklearn.preprocessing import QuantileTransformer
 from sklearn.metrics import (
     silhouette_score,
     f1_score,
@@ -181,11 +181,11 @@ def plot_archetype_projection(pca_data, labels):
     plt.figure(figsize=(12, 8))
 
     unique_labels = np.unique(labels)
-    colors = plt.cm.get_cmap("tab10", len(unique_labels))
+    cmap = plt.get_cmap("tab10")
 
     for i, label in enumerate(unique_labels):
         mask = labels == label
-        color = "gray" if label == -1 else colors(i)
+        color = "gray" if label == -1 else cmap(i % 10)
         alpha = 0.3 if label == -1 else 0.6
         name = "General/Noise" if label == -1 else f"Archetype {label}"
 
@@ -246,7 +246,14 @@ def analyze_label_stability(
     clustering_cols,
 ):
     start_stability = time.perf_counter()
-    con = duckdb.connect(":memory:")
+    temp_db_path = os.path.join("/dataset/duckdb_temp", "stability_check.db")
+    if os.path.exists(temp_db_path):
+        os.remove(temp_db_path)
+
+    con = duckdb.connect(temp_db_path)
+    con.execute("PRAGMA threads=12")
+    con.execute("PRAGMA memory_limit='32GB'")
+    con.execute("PRAGMA max_temp_directory_size='100GiB'")
 
     ground_truth_labels = features_df["archetype_id"].to_numpy()
     ms_names = features_df["msname"].to_list()
@@ -254,18 +261,31 @@ def analyze_label_stability(
 
     print("Starting Sensitivity Analysis (PCA + HDBSCAN + KNN)...")
 
+    print("Pre-calculating time indices...")
+    con.execute(f"""
+        CREATE OR REPLACE VIEW ranked_workloads AS 
+        SELECT msname, cpu_utilization, 
+               row_number() OVER (PARTITION BY msname ORDER BY {PREPROCESSING.TIME_COL}) as r
+        FROM read_parquet('{parquet_glob}')
+    """)
+
     for n in time_steps_to_test:
         step_start = time.perf_counter()
         print(f"Testing window size: {n} minutes...")
 
         query = f"""
-        SELECT msname, avg(cpu_utilization) as cpu_mean, stddev_samp(cpu_utilization) as cpu_std,
-        approx_quantile(cpu_utilization, 0.95) as cpu_p95, ln(abs(skewness(cpu_utilization)) + 1) as cpu_skew,
-        ln(abs(kurtosis(cpu_utilization)) + 1) as cpu_kurt, (max(cpu_utilization) / NULLIF(avg(cpu_utilization), 0)) as peak_to_avg,
-        (stddev_samp(cpu_utilization) / NULLIF(avg(cpu_utilization), 0)) as coeff_variation,
-        (max(cpu_utilization) / (approx_quantile(cpu_utilization, 0.5) + 0.01)) as burstiness_ratio
-        FROM (SELECT msname, cpu_utilization, row_number() OVER (PARTITION BY msname ORDER BY {PREPROCESSING.TIME_COL}) as r 
-              FROM read_parquet('{parquet_glob}')) WHERE r <= {n} GROUP BY msname
+        SELECT msname, 
+               avg(cpu_utilization) as cpu_mean, 
+               stddev_samp(cpu_utilization) as cpu_std,
+               approx_quantile(cpu_utilization, 0.95) as cpu_p95, 
+               ln(abs(skewness(cpu_utilization)) + 1) as cpu_skew,
+               ln(abs(kurtosis(cpu_utilization)) + 1) as cpu_kurt, 
+               (max(cpu_utilization) / NULLIF(avg(cpu_utilization), 0)) as peak_to_avg,
+               (stddev_samp(cpu_utilization) / NULLIF(avg(cpu_utilization), 0)) as coeff_variation,
+               (max(cpu_utilization) / (approx_quantile(cpu_utilization, 0.5) + 0.01)) as burstiness_ratio
+        FROM ranked_workloads 
+        WHERE r <= {n} 
+        GROUP BY msname
         """
 
         partial_df = con.execute(query).df().fillna(0.0)
@@ -384,6 +404,7 @@ def main():
         min_cluster_size=100,
         min_samples=15,
         cluster_selection_method="leaf",
+        copy=True
     )
     labels = clusterer.fit_predict(pca_data)
 
@@ -408,6 +429,8 @@ def main():
         f"Total Number of Clusters Found: {len(unique_labels) - (1 if -1 in unique_labels else 0)}"
     )
     print(f"Silhouette Score (Excluding Noise): {sil_score:.4f}")
+    print(f"Davies-Bouldin Index: {db_score:.4f}")
+    print(f"Calinski-Harabasz Index: {ch_score:.4f}\n")
 
     for cluster_id, count in zip(unique_labels, counts):
         name = "Noise/General" if cluster_id == -1 else f"Archetype {cluster_id}"
@@ -451,7 +474,7 @@ def main():
 
     plot_cluster_samples(features_df, PATHS.PARQUET_MSRESOURCE, unique_labels)
 
-    windows = [15, 30, 60, 120, 240, 480, 720, 1440, 2880]
+    windows = [15, 30, 60, 120, 240, 480, 720, 1440, 2880, 5760, 10080]
     scores, durations["Stability Analysis (Min Time Steps)"] = analyze_label_stability(
         pdf,
         scaler,
