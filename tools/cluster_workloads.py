@@ -267,15 +267,18 @@ def analyze_label_stability(
         print(f"Testing window size: {n} minutes...")
 
         query = f"""
-        WITH windowed AS (
+        WITH ms_start AS (
             SELECT
                 msname,
-                cpu_utilization
+                min({PREPROCESSING.TIME_COL}) AS start_ts
             FROM read_parquet('{parquet_glob}')
-            QUALIFY row_number() OVER (
-                PARTITION BY msname
-                ORDER BY {PREPROCESSING.TIME_COL}
-            ) <= {n}
+            GROUP BY msname
+        ),
+        windowed AS (
+            SELECT r.msname, r.cpu_utilization
+            FROM read_parquet('{parquet_glob}') r
+            JOIN ms_start s ON r.msname = s.msname
+            WHERE r.{PREPROCESSING.TIME_COL} <= s.start_ts + INTERVAL '{n} minutes'
         )
         SELECT msname, 
                avg(cpu_utilization) as cpu_mean, 
