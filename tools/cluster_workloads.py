@@ -14,8 +14,13 @@ from datetime import datetime
 from sklearn.decomposition import PCA
 from sklearn.cluster import HDBSCAN
 from sklearn.neighbors import KNeighborsClassifier
-from sklearn.preprocessing import RobustScaler
-from sklearn.metrics import silhouette_score, f1_score
+from sklearn.preprocessing import QuantileTransformer  # Changed from RobustScaler
+from sklearn.metrics import (
+    silhouette_score,
+    f1_score,
+    davies_bouldin_score,
+    calinski_harabasz_score,
+)
 from kneed import KneeLocator
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -38,7 +43,7 @@ def get_tehran_timestamp():
 
 
 def save_cluster_metrics(
-    num_clusters, sil_score, counts, durations, cluster_stats=None
+    num_clusters, sil_score, db_score, ch_score, counts, durations, cluster_stats=None
 ):
     os.makedirs(PATHS.LOGS_DIR, exist_ok=True)
     timestamp = get_tehran_timestamp()
@@ -48,7 +53,9 @@ def save_cluster_metrics(
         f.write(f"Clustering Run Metrics - {timestamp} (Tehran Time)\n")
         f.write("-" * 50 + "\n")
         f.write(f"Total Archetypes Found: {num_clusters}\n")
-        f.write(f"Silhouette Score (Excluding Noise): {sil_score:.4f}\n\n")
+        f.write(f"Silhouette Score (Higher is better): {sil_score:.4f}\n")
+        f.write(f"Davies-Bouldin Index (Lower is better): {db_score:.4f}\n")
+        f.write(f"Calinski-Harabasz Index (Higher is better): {ch_score:.4f}\n\n")
 
         f.write("Cluster Distribution:\n")
         for cluster_id, count in zip(counts[0], counts[1]):
@@ -68,7 +75,7 @@ def save_cluster_metrics(
         for key, val in durations.items():
             f.write(f"  - {key}: {format_duration(val)}\n")
 
-    print(f"Results saved to: {log_file}")
+    print(f"Detailed metrics saved to: {log_file}")
 
 
 def extract_robust_features(
@@ -108,22 +115,13 @@ def extract_robust_features(
 
     con.execute("""
         CREATE TABLE ms_features (
-            msname VARCHAR,
-            cpu_mean DOUBLE,
-            cpu_std DOUBLE,
-            cpu_p95 DOUBLE,
-            cpu_skew DOUBLE,
-            cpu_kurt DOUBLE,
-            peak_to_avg DOUBLE,
-            coeff_variation DOUBLE,
-            cpu_autocorr DOUBLE,
-            cpu_mad DOUBLE,
-            cpu_slope DOUBLE,
-            cpu_iqr DOUBLE,
-            burstiness_ratio DOUBLE,
+            msname VARCHAR, cpu_mean DOUBLE, cpu_std DOUBLE, cpu_p95 DOUBLE,
+            cpu_skew DOUBLE, cpu_kurt DOUBLE, peak_to_avg DOUBLE,
+            coeff_variation DOUBLE, cpu_autocorr DOUBLE, cpu_mad DOUBLE,
+            cpu_slope DOUBLE, cpu_iqr DOUBLE, burstiness_ratio DOUBLE,
             sample_count BIGINT
         )
-        """)
+    """)
 
     total_batches = (total_services + batch_size - 1) // batch_size
     print(f"Phase 2: Processing in {total_batches} batches...")
@@ -150,31 +148,20 @@ def extract_robust_features(
             GROUP BY msname, {time_col}
         ),
         lagged_agg AS (
-            SELECT 
-                *,
-                lag(cpu_utilization) OVER (PARTITION BY msname ORDER BY {time_col}) as prev_cpu,
-                row_number() OVER (PARTITION BY msname ORDER BY {time_col}) as time_idx
+            SELECT *, lag(cpu_utilization) OVER (PARTITION BY msname ORDER BY {time_col}) as prev_cpu,
+            row_number() OVER (PARTITION BY msname ORDER BY {time_col}) as time_idx
             FROM minute_agg
         )
         SELECT 
-            msname,
-            avg(cpu_utilization) as cpu_mean,
-            stddev_samp(cpu_utilization) as cpu_std,
-            approx_quantile(cpu_utilization, 0.95) as cpu_p95,
-            ln(abs(skewness(cpu_utilization)) + 1) as cpu_skew,
-            ln(abs(kurtosis(cpu_utilization)) + 1) as cpu_kurt,
-            (max(cpu_utilization) / NULLIF(avg(cpu_utilization), 0)) as peak_to_avg,
-            (stddev_samp(cpu_utilization) / NULLIF(avg(cpu_utilization), 0)) as coeff_variation,
-            corr(cpu_utilization, prev_cpu) as cpu_autocorr,
-            avg(abs(cpu_utilization - prev_cpu)) as cpu_mad,
-            regr_slope(cpu_utilization, time_idx) as cpu_slope,
-            (approx_quantile(cpu_utilization, 0.75) - approx_quantile(cpu_utilization, 0.25)) as cpu_iqr,
-            (max(cpu_utilization) / (approx_quantile(cpu_utilization, 0.5) + 0.00001)) as burstiness_ratio,
-            
-            count(*) as sample_count
-        FROM lagged_agg
-        GROUP BY msname
-        HAVING count(*) > 10 AND avg(cpu_utilization) > 0.005
+            msname, avg(cpu_utilization), stddev_samp(cpu_utilization),
+            approx_quantile(cpu_utilization, 0.95), ln(abs(skewness(cpu_utilization)) + 1),
+            ln(abs(kurtosis(cpu_utilization)) + 1), (max(cpu_utilization) / NULLIF(avg(cpu_utilization), 0)),
+            (stddev_samp(cpu_utilization) / NULLIF(avg(cpu_utilization), 0)), corr(cpu_utilization, prev_cpu),
+            avg(abs(cpu_utilization - prev_cpu)), regr_slope(cpu_utilization, time_idx),
+            (approx_quantile(cpu_utilization, 0.75) - approx_quantile(cpu_utilization, 0.25)),
+            (max(cpu_utilization) / (approx_quantile(cpu_utilization, 0.5) + 0.00001)),
+            count(*)
+        FROM lagged_agg GROUP BY msname HAVING count(*) > 10 AND avg(cpu_utilization) > 0.005
         """
         con.execute(query)
         batch_end_time = time.perf_counter()
@@ -187,51 +174,64 @@ def extract_robust_features(
     con.close()
     if os.path.exists(db_path):
         os.remove(db_path)
+    return pl.from_pandas(df_pandas.fillna(0.0)), time.perf_counter() - start_extraction
 
-    total_extraction_duration = time.perf_counter() - start_extraction
-    return pl.from_pandas(df_pandas.fillna(0.0)), total_extraction_duration
+
+def plot_archetype_projection(pca_data, labels):
+    plt.figure(figsize=(12, 8))
+
+    unique_labels = np.unique(labels)
+    colors = plt.cm.get_cmap("tab10", len(unique_labels))
+
+    for i, label in enumerate(unique_labels):
+        mask = labels == label
+        color = "gray" if label == -1 else colors(i)
+        alpha = 0.3 if label == -1 else 0.6
+        name = "General/Noise" if label == -1 else f"Archetype {label}"
+
+        plt.scatter(
+            pca_data[mask, 0],
+            pca_data[mask, 1],
+            c=[color],
+            label=name,
+            alpha=alpha,
+            s=15,
+            edgecolors="none",
+        )
+
+    plt.title("Workload Archetype Projection (PCA Space)", fontsize=14)
+    plt.xlabel("Principal Component 1 (Shape Variance)")
+    plt.ylabel("Principal Component 2 (Intensity Variance)")
+    plt.legend(loc="best", markerscale=2)
+    plt.grid(True, alpha=0.2)
+
+    save_path = os.path.join(PATHS.ARCHETYPE_DIR, "archetype_projection_2d.png")
+    plt.savefig(save_path, dpi=300)
+    plt.close()
+    print(f"Cluster projection plot saved to: {save_path}")
 
 
 def plot_cluster_samples(df, parquet_dir, unique_labels):
     plot_path = os.path.join(PATHS.ARCHETYPE_DIR, "plots")
     os.makedirs(plot_path, exist_ok=True)
-
     for cid in unique_labels:
-        cluster_members = df.filter(pl.col("archetype_id") == cid)["msname"].to_list()
-        if not cluster_members:
+        members = df.filter(pl.col("archetype_id") == cid)["msname"].to_list()
+        if not members:
             continue
-
-        n_samples = min(10, len(cluster_members))
-        samples = np.random.choice(cluster_members, n_samples, replace=False)
-
-        fig, axes = plt.subplots(10, 1, figsize=(64, 16))
-        if n_samples == 1:
-            axes = [axes]
-        else:
-            axes = axes.flatten()
-
+        n_samples = min(10, len(members))
+        samples = np.random.choice(members, n_samples, replace=False)
+        fig, axes = plt.subplots(10, 1, figsize=(20, 12))
+        axes = axes.flatten()
         for i, ms in enumerate(samples):
-            raw_data = (
+            raw = (
                 pl.scan_parquet(os.path.join(parquet_dir, "*.parquet"))
                 .filter(pl.col("msname") == ms)
                 .collect()
             )
-            axes[i].plot(
-                raw_data["cpu_utilization"].to_numpy(), alpha=0.7, color="navy"
-            )
-            axes[i].set_title(f"MS: {ms}", fontsize=9)
+            axes[i].plot(raw["cpu_utilization"].to_numpy(), color="navy")
             axes[i].set_ylim(0, 1)
-            axes[i].grid(True, alpha=0.2)
-
-        for j in range(len(samples), len(axes)):
-            axes[j].axis("off")
-
-        title = "Noise/General Samples" if cid == -1 else f"Archetype {cid} Samples"
-        plt.suptitle(f"{title} (10 Random)", fontsize=16)
-        plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-        plt.savefig(
-            os.path.join(PATHS.ARCHETYPE_DIR, "plots", f"cluster_{cid}_samples.png")
-        )
+        plt.tight_layout()
+        plt.savefig(os.path.join(plot_path, f"cluster_{cid}_samples.png"))
         plt.close()
     print(f"Cluster sample plots saved in: {plot_path}")
 
@@ -259,35 +259,13 @@ def analyze_label_stability(
         print(f"Testing window size: {n} minutes...")
 
         query = f"""
-        WITH windowed_agg AS (
-            SELECT msname, {PREPROCESSING.TIME_COL}, avg(cpu_utilization) as cpu_utilization
-            FROM read_parquet('{parquet_glob}')
-            GROUP BY msname, {PREPROCESSING.TIME_COL}
-            QUALIFY ROW_NUMBER() OVER (PARTITION BY msname ORDER BY {PREPROCESSING.TIME_COL}) <= {n}
-        ),
-        lagged_agg AS (
-            SELECT 
-                *,
-                lag(cpu_utilization) OVER (PARTITION BY msname ORDER BY {PREPROCESSING.TIME_COL}) as prev_cpu,
-                row_number() OVER (PARTITION BY msname ORDER BY {PREPROCESSING.TIME_COL}) as time_idx
-            FROM windowed_agg
-        )
-        SELECT 
-            msname,
-            avg(cpu_utilization) as cpu_mean,
-            stddev_samp(cpu_utilization) as cpu_std,
-            approx_quantile(cpu_utilization, 0.95) as cpu_p95,
-            ln(abs(skewness(cpu_utilization)) + 1) as cpu_skew,
-            ln(abs(kurtosis(cpu_utilization)) + 1) as cpu_kurt,
-            (max(cpu_utilization) / NULLIF(avg(cpu_utilization), 0)) as peak_to_avg,
-            (stddev_samp(cpu_utilization) / NULLIF(avg(cpu_utilization), 0)) as coeff_variation,
-            corr(cpu_utilization, prev_cpu) as cpu_autocorr,
-            avg(abs(cpu_utilization - prev_cpu)) as cpu_mad,
-            regr_slope(cpu_utilization, time_idx) as cpu_slope,
-            (approx_quantile(cpu_utilization, 0.75) - approx_quantile(cpu_utilization, 0.25)) as cpu_iqr,
-            (max(cpu_utilization) / (approx_quantile(cpu_utilization, 0.5) + 0.01)) as burstiness_ratio
-        FROM lagged_agg
-        GROUP BY msname
+        SELECT msname, avg(cpu_utilization) as cpu_mean, stddev_samp(cpu_utilization) as cpu_std,
+        approx_quantile(cpu_utilization, 0.95) as cpu_p95, ln(abs(skewness(cpu_utilization)) + 1) as cpu_skew,
+        ln(abs(kurtosis(cpu_utilization)) + 1) as cpu_kurt, (max(cpu_utilization) / NULLIF(avg(cpu_utilization), 0)) as peak_to_avg,
+        (stddev_samp(cpu_utilization) / NULLIF(avg(cpu_utilization), 0)) as coeff_variation,
+        (max(cpu_utilization) / (approx_quantile(cpu_utilization, 0.5) + 0.01)) as burstiness_ratio
+        FROM (SELECT msname, cpu_utilization, row_number() OVER (PARTITION BY msname ORDER BY {PREPROCESSING.TIME_COL}) as r 
+              FROM read_parquet('{parquet_glob}')) WHERE r <= {n} GROUP BY msname
         """
 
         partial_df = con.execute(query).df().fillna(0.0)
@@ -343,7 +321,7 @@ def plot_stability_curve(time_steps, scores):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Cluster microservice workloads")
+    ap = argparse.ArgumentParser()
     ap.add_argument("--max_services", type=int, default=PREPROCESSING.MAX_SERVICES)
     ap.add_argument("--batch_size", type=int, default=4096)
     ap.add_argument("--temp_dir", type=str, default="/dataset/duckdb_temp")
@@ -382,8 +360,6 @@ def main():
         "cpu_kurt",
         "peak_to_avg",
         "coeff_variation",
-        "cpu_autocorr",
-        "cpu_slope",
         "burstiness_ratio",
     ]
 
@@ -393,15 +369,9 @@ def main():
     pdf["burstiness_ratio"] = np.log1p(pdf["burstiness_ratio"])
 
     data_to_scale = pdf[clustering_cols].to_numpy()
-    data_to_scale = np.nan_to_num(data_to_scale, nan=0.0, posinf=0.0, neginf=0.0)
+    data_to_scale = np.nan_to_num(data_to_scale, nan=0.0)
 
-    data_to_scale = np.clip(
-        data_to_scale,
-        np.percentile(data_to_scale, 1, axis=0),
-        np.percentile(data_to_scale, 99, axis=0),
-    )
-
-    scaler = RobustScaler()
+    scaler = QuantileTransformer(output_distribution="normal", random_state=42)
     scaled_data = scaler.fit_transform(data_to_scale)
 
     pca = PCA(n_components=0.95, random_state=42)
@@ -410,23 +380,31 @@ def main():
         f"PCA reduced behavioral features from {len(clustering_cols)} to {pca.n_components_} components."
     )
 
-    clusterer = HDBSCAN(min_cluster_size=100, min_samples=10)
+    clusterer = HDBSCAN(
+        min_cluster_size=100,
+        min_samples=15,
+        cluster_selection_method="leaf",
+        prediction_data=True,
+    )
     labels = clusterer.fit_predict(pca_data)
 
-    print("Training KNN Classifier on HDBSCAN output for stability analysis...")
-    knn = KNeighborsClassifier(n_neighbors=5)
-    knn.fit(pca_data, labels)
+    plot_archetype_projection(pca_data, labels)
 
+    print("Training KNN Classifier for stability analysis...")
+    knn = KNeighborsClassifier(n_neighbors=5).fit(pca_data, labels)
     durations["PCA, Clustering & KNN Training"] = time.perf_counter() - start_clustering
 
     unique_labels, counts = np.unique(labels, return_counts=True)
     valid_mask = labels != -1
 
-    if valid_mask.sum() > 0 and len(set(labels[valid_mask])) > 1:
+    if valid_mask.sum() > 0:
         sil_score = silhouette_score(pca_data[valid_mask], labels[valid_mask])
+        db_score = davies_bouldin_score(pca_data[valid_mask], labels[valid_mask])
+        ch_score = calinski_harabasz_score(pca_data[valid_mask], labels[valid_mask])
     else:
-        sil_score = 0.0
+        sil_score, db_score, ch_score = 0, 0, 0
 
+    print(f"Clusters Found: {len(unique_labels) - (1 if -1 in unique_labels else 0)}")
     print(
         f"Total Number of Clusters Found: {len(unique_labels) - (1 if -1 in unique_labels else 0)}"
     )
@@ -453,9 +431,7 @@ def main():
     print("Calculating cluster feature averages...")
     cluster_stats = (
         features_df.group_by("archetype_id")
-        .agg(
-            [pl.col(c).mean() for c in feature_cols]
-        ) 
+        .agg([pl.col(c).mean() for c in feature_cols])
         .sort("archetype_id")
     )
 
@@ -491,6 +467,8 @@ def main():
     save_cluster_metrics(
         len(unique_labels) - (1 if -1 in unique_labels else 0),
         sil_score,
+        db_score,
+        ch_score,
         (unique_labels, counts),
         durations,
         cluster_stats=cluster_stats,
