@@ -262,38 +262,67 @@ def analyze_label_stability(
 
     print("Starting Sensitivity Analysis (PCA + HDBSCAN + KNN)...")
 
+    window_exprs = []
+    for n in time_steps_to_test:
+        window_exprs.extend(
+            [
+                f"avg(cpu_utilization) FILTER (WHERE delta_mins <= {n}) as cpu_mean_{n}",
+                f"stddev_samp(cpu_utilization) FILTER (WHERE delta_mins <= {n}) as cpu_std_{n}",
+                f"approx_quantile(cpu_utilization, 0.95) FILTER (WHERE delta_mins <= {n}) as cpu_p95_{n}",
+                f"ln(abs(skewness(cpu_utilization)) + 1) FILTER (WHERE delta_mins <= {n}) as cpu_skew_{n}",
+                f"ln(abs(kurtosis(cpu_utilization)) + 1) FILTER (WHERE delta_mins <= {n}) as cpu_kurt_{n}",
+                f"(max(cpu_utilization) / NULLIF(avg(cpu_utilization), 0)) FILTER (WHERE delta_mins <= {n}) as peak_to_avg_{n}",
+                f"(stddev_samp(cpu_utilization) / NULLIF(avg(cpu_utilization), 0)) FILTER (WHERE delta_mins <= {n}) as coeff_variation_{n}",
+                f"(max(cpu_utilization) / (approx_quantile(cpu_utilization, 0.5) + 0.01)) FILTER (WHERE delta_mins <= {n}) as burstiness_ratio_{n}",
+            ]
+        )
+
+    query = f"""
+    WITH base AS (
+        SELECT
+            msname,
+            cpu_utilization,
+            datediff(
+                'minute',
+                min({PREPROCESSING.TIME_COL}) OVER (PARTITION BY msname),
+                {PREPROCESSING.TIME_COL}
+            ) as delta_mins
+        FROM read_parquet('{parquet_glob}')
+    )
+    SELECT
+        msname,
+        {', '.join(window_exprs)}
+    FROM base
+    GROUP BY msname
+    """
+    agg_df = con.execute(query).df().fillna(0.0)
+
     for n in time_steps_to_test:
         step_start = time.perf_counter()
         print(f"Testing window size: {n} minutes...")
 
-        query = f"""
-        WITH ms_start AS (
-            SELECT
-                msname,
-                min({PREPROCESSING.TIME_COL}) AS start_ts
-            FROM read_parquet('{parquet_glob}')
-            GROUP BY msname
-        ),
-        windowed AS (
-            SELECT r.msname, r.cpu_utilization
-            FROM read_parquet('{parquet_glob}') r
-            JOIN ms_start s ON r.msname = s.msname
-            WHERE r.{PREPROCESSING.TIME_COL} <= s.start_ts + INTERVAL '{n} minutes'
-        )
-        SELECT msname, 
-               avg(cpu_utilization) as cpu_mean, 
-               stddev_samp(cpu_utilization) as cpu_std,
-               approx_quantile(cpu_utilization, 0.95) as cpu_p95, 
-               ln(abs(skewness(cpu_utilization)) + 1) as cpu_skew,
-               ln(abs(kurtosis(cpu_utilization)) + 1) as cpu_kurt, 
-               (max(cpu_utilization) / NULLIF(avg(cpu_utilization), 0)) as peak_to_avg,
-               (stddev_samp(cpu_utilization) / NULLIF(avg(cpu_utilization), 0)) as coeff_variation,
-               (max(cpu_utilization) / (approx_quantile(cpu_utilization, 0.5) + 0.01)) as burstiness_ratio
-        FROM windowed
-        GROUP BY msname
-        """
-
-        partial_df = con.execute(query).df().fillna(0.0)
+        cols = [
+            f"cpu_mean_{n}",
+            f"cpu_std_{n}",
+            f"cpu_p95_{n}",
+            f"cpu_skew_{n}",
+            f"cpu_kurt_{n}",
+            f"peak_to_avg_{n}",
+            f"coeff_variation_{n}",
+            f"burstiness_ratio_{n}",
+        ]
+        partial_df = agg_df[["msname"] + cols].copy()
+        partial_df.columns = [
+            "msname",
+            "cpu_mean",
+            "cpu_std",
+            "cpu_p95",
+            "cpu_skew",
+            "cpu_kurt",
+            "peak_to_avg",
+            "coeff_variation",
+            "burstiness_ratio",
+        ]
 
         partial_df = pd.merge(
             pd.DataFrame({"msname": ms_names}), partial_df, on="msname", how="left"
