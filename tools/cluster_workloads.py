@@ -251,7 +251,7 @@ def analyze_label_stability(
         os.remove(temp_db_path)
 
     con = duckdb.connect(temp_db_path)
-    con.execute("PRAGMA threads=8")
+    con.execute("PRAGMA threads=4")
     con.execute("PRAGMA memory_limit='32GB'")
     con.execute("PRAGMA max_temp_directory_size='300GiB'")
     con.execute("SET preserve_insertion_order=false")
