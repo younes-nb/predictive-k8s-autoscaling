@@ -384,7 +384,6 @@ def main():
         min_cluster_size=100,
         min_samples=15,
         cluster_selection_method="leaf",
-        prediction_data=True,
     )
     labels = clusterer.fit_predict(pca_data)
 
