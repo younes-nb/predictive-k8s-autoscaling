@@ -251,10 +251,8 @@ def analyze_label_stability(
         os.remove(temp_db_path)
 
     con = duckdb.connect(temp_db_path)
-    con.execute("PRAGMA threads=4")
+    con.execute("PRAGMA threads=8")
     con.execute("PRAGMA memory_limit='32GB'")
-    con.execute("PRAGMA max_temp_directory_size='300GiB'")
-    con.execute("SET preserve_insertion_order=false")
 
     ground_truth_labels = features_df["archetype_id"].to_numpy()
     ms_names = features_df["msname"].to_list()
@@ -283,25 +281,35 @@ def analyze_label_stability(
             ]
         )
 
-    query = f"""
-    WITH base AS (
+    batch_size = 200
+    agg_batches = []
+
+    for i in range(0, len(ms_names), batch_size):
+        batch = ms_names[i : i + batch_size]
+        ms_list = ", ".join([f"'{m}'" for m in batch])
+
+        query = f"""
+        WITH base AS (
+            SELECT
+                msname,
+                cpu_utilization,
+                datediff(
+                    'minute',
+                    min({PREPROCESSING.TIME_COL}) OVER (PARTITION BY msname),
+                    {PREPROCESSING.TIME_COL}
+                ) as delta_mins
+            FROM read_parquet('{parquet_glob}')
+            WHERE msname IN ({ms_list})
+        )
         SELECT
             msname,
-            cpu_utilization,
-            datediff(
-                'minute',
-                min({PREPROCESSING.TIME_COL}) OVER (PARTITION BY msname),
-                {PREPROCESSING.TIME_COL}
-            ) as delta_mins
-        FROM read_parquet('{parquet_glob}')
-    )
-    SELECT
-        msname,
-        {', '.join(window_exprs)}
-    FROM base
-    GROUP BY msname
-    """
-    agg_df = con.execute(query).df().fillna(0.0)
+            {', '.join(window_exprs)}
+        FROM base
+        GROUP BY msname
+        """
+        agg_batches.append(con.execute(query).df())
+
+    agg_df = pd.concat(agg_batches, ignore_index=True).fillna(0.0)
 
     for n in time_steps_to_test:
         step_start = time.perf_counter()
