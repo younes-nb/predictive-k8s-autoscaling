@@ -262,21 +262,21 @@ def analyze_label_stability(
 
     print("Starting Sensitivity Analysis (PCA + HDBSCAN + KNN)...")
 
-    print("Pre-calculating and physically ordering workloads by time index...")
-    con.execute(f"""
-        CREATE OR REPLACE TABLE ranked_workloads AS 
-        SELECT * FROM (
-            SELECT msname, cpu_utilization, 
-                   row_number() OVER (PARTITION BY msname ORDER BY {PREPROCESSING.TIME_COL}) as r
-            FROM read_parquet('{parquet_glob}')
-        ) ORDER BY r
-    """)
-
     for n in time_steps_to_test:
         step_start = time.perf_counter()
         print(f"Testing window size: {n} minutes...")
 
         query = f"""
+        WITH windowed AS (
+            SELECT
+                msname,
+                cpu_utilization
+            FROM read_parquet('{parquet_glob}')
+            QUALIFY row_number() OVER (
+                PARTITION BY msname
+                ORDER BY {PREPROCESSING.TIME_COL}
+            ) <= {n}
+        )
         SELECT msname, 
                avg(cpu_utilization) as cpu_mean, 
                stddev_samp(cpu_utilization) as cpu_std,
@@ -286,8 +286,7 @@ def analyze_label_stability(
                (max(cpu_utilization) / NULLIF(avg(cpu_utilization), 0)) as peak_to_avg,
                (stddev_samp(cpu_utilization) / NULLIF(avg(cpu_utilization), 0)) as coeff_variation,
                (max(cpu_utilization) / (approx_quantile(cpu_utilization, 0.5) + 0.01)) as burstiness_ratio
-        FROM ranked_workloads 
-        WHERE r <= {n} 
+        FROM windowed
         GROUP BY msname
         """
 
