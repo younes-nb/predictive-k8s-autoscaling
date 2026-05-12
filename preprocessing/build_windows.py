@@ -125,7 +125,7 @@ def main():
         pl.scan_parquet(table_parts[base_table])
         .select(args.service_col)
         .unique()
-        .collect()
+        .collect(streaming=True)
     )
     all_services_list = sorted(all_services_df[args.service_col].to_list())
 
