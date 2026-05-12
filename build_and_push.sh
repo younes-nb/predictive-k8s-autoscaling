@@ -18,8 +18,8 @@ if [ ! -f "model.pt" ]; then
     exit 1
 fi
 
-if [ ! -f "common/models.py" ]; then
-    echo -e "${RED}Error: common/models.py not found!${NC}"
+if [ ! -f "core/models.py" ]; then
+    echo -e "${RED}Error: core/models.py not found!${NC}"
     exit 1
 fi
 

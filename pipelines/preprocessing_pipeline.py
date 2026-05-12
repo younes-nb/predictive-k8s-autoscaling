@@ -5,7 +5,7 @@ import argparse
 import subprocess
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-REPO_ROOT = THIS_DIR
+REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, os.pardir))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
@@ -107,9 +107,9 @@ def main():
             args.windows_dir,
             "--feature_set",
             args.feature_set,
-            "--max_services",
-            str(args.max_services),
         ]
+        if args.max_services is not None:
+            cmd.extend(["--max_services", str(args.max_services)])
         run(cmd, "Step 3: Build windows (join tables)")
     else:
         print("\n=== Skipping windows ===")

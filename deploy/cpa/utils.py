@@ -6,7 +6,7 @@ import sys
 import torch
 import requests
 import config
-from common.models import RNNForecaster
+from core.models import RNNForecaster
 
 
 def query_prometheus(query, is_range=False, params=None):
@@ -69,7 +69,6 @@ def load_model():
         horizon=config.HORIZON,
         rnn_type=config.RNN_TYPE,
         bidirectional=config.BIDIRECTIONAL,
-        residual=config.RESIDUAL,
     )
     if os.path.exists(config.MODEL_PATH):
         checkpoint = torch.load(config.MODEL_PATH, map_location="cpu")

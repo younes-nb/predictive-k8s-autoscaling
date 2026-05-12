@@ -5,7 +5,7 @@ import argparse
 import subprocess
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-REPO_ROOT = THIS_DIR
+REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, os.pardir))
 
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
@@ -64,11 +64,13 @@ def main():
 
     args = ap.parse_args()
 
-    preprocess_script = os.path.join(REPO_ROOT, "run_preprocessing.py")
+    preprocess_script = os.path.join(
+        REPO_ROOT, "pipelines", "preprocessing_pipeline.py"
+    )
     train_script = os.path.join(REPO_ROOT, "training", "train.py")
     test_script = os.path.join(REPO_ROOT, "training", "evaluate.py")
     compute_weights_script = os.path.join(
-        REPO_ROOT, "tools", "compute_boundary_weights.py"
+        REPO_ROOT, "tooling", "compute_boundary_weights.py"
     )
 
     total_times = {}

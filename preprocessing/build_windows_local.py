@@ -20,7 +20,7 @@ from config.defaults import (
     tables_for_feature_set,
     table_to_feature_exprs,
 )
-from common.utils import windowize_multivariate, moving_average
+from core.utils import windowize_multivariate, moving_average
 
 
 def list_parquet_parts(parquet_dir: str):

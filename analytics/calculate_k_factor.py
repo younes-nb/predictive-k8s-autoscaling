@@ -14,8 +14,8 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from config.defaults import PATHS, TRAINING
-from common.dataset import ShardedWindowsDataset
-from common.models import RNNForecaster
+from core.dataset import ShardedWindowsDataset
+from core.models import RNNForecaster
 from training.evaluate import setup_logging
 
 
