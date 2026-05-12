@@ -22,7 +22,7 @@ if REPO_ROOT not in sys.path:
 
 from config.defaults import PATHS, TRAINING, PREPROCESSING
 from common.dataset import ShardedWindowsDataset
-from common.models import RNNForecaster
+from common.models import RNNForecaster, UncertaintyAwareForecaster
 
 
 def setup_logging(mode="test"):
@@ -61,9 +61,15 @@ def setup_logging(mode="test"):
 
 
 @torch.no_grad()
-def forward_predict(model: torch.nn.Module, x: torch.Tensor) -> torch.Tensor:
+def forward_predict(
+    model: torch.nn.Module, x: torch.Tensor, model_type: str
+) -> torch.Tensor:
     model.eval()
-    return model(x)
+    outputs = model(x)
+
+    if model_type == "uncertainty_aware":
+        return outputs[:, :, 0]
+    return outputs
 
 
 def evaluate(args):
@@ -87,6 +93,7 @@ def evaluate(args):
     checkpoint = torch.load(args.checkpoint_path, map_location=device)
     ckpt_args = checkpoint.get("args", {})
 
+    model_type = ckpt_args.get("model_type", TRAINING.MODEL_TYPE)
     hidden_size = ckpt_args.get("hidden_size", TRAINING.HIDDEN_SIZE)
     num_layers = ckpt_args.get("num_layers", TRAINING.NUM_LAYERS)
     dropout = ckpt_args.get("dropout", TRAINING.DROPOUT)
@@ -94,26 +101,25 @@ def evaluate(args):
     rnn_type = ckpt_args.get("rnn_type", "lstm")
     input_len = ckpt_args.get("input_len", PREPROCESSING.INPUT_LEN)
     feature_set = ckpt_args.get("feature_set", PREPROCESSING.FEATURE_SET)
-    bidirectional = ckpt_args.get("bidirectional", args.bidirectional)
-    residual_mode = ckpt_args.get("residual", args.residual)
+    bidirectional = ckpt_args.get("bidirectional", TRAINING.BIDIRECTIONAL)
 
-    logging.info(f"Model trained on feature_set: {feature_set}")
-    logging.info(f"RNN Type: {rnn_type}")
+    logging.info(f"Detected Model Type: {model_type}")
+    logging.info(
+        f"RNN Architecture:   {rnn_type} (Layers: {num_layers}, Hidden: {hidden_size})"
+    )
 
     logging.info("\n--- Loading Test Dataset ---")
 
     test_ds = ShardedWindowsDataset(
-        args.windows_dir, "test", input_len, horizon, archetype_id=args.archetype_id
+        args.windows_dir, "test", input_len, horizon, use_weights=False
     )
-    logging.info(f"Test samples (Archetype {args.archetype_id}): {len(test_ds)}")
+    logging.info(f"Test samples: {len(test_ds)}")
 
     if len(test_ds) > 0:
         first_x, *_ = test_ds[0]
-        input_size = first_x.shape[-1] if first_x.ndim > 1 else 1
-        logging.info(f"Inferred input_size={input_size} from dataset.")
+        input_size = first_x.shape[-1]
     else:
-        input_size = checkpoint.get("input_size", ckpt_args.get("input_size", 1))
-        logging.warning(f"Test dataset empty. Fallback input_size={input_size}.")
+        input_size = checkpoint.get("input_size", 1)
 
     test_loader = DataLoader(
         test_ds,
@@ -123,19 +129,29 @@ def evaluate(args):
         pin_memory=(device.type == "cuda"),
     )
 
-    model = RNNForecaster(
-        input_size=input_size,
-        hidden_size=hidden_size,
-        num_layers=num_layers,
-        dropout=dropout,
-        horizon=horizon,
-        rnn_type=rnn_type,
-        bidirectional=bidirectional,
-        residual=residual_mode,
-    ).to(device)
+    if model_type == "uncertainty_aware":
+        model = UncertaintyAwareForecaster(
+            input_size=input_size,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            dropout=dropout,
+            horizon=horizon,
+            rnn_type=rnn_type,
+        ).to(device)
+    else:
+        model = RNNForecaster(
+            input_size=input_size,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            dropout=dropout,
+            horizon=horizon,
+            rnn_type=rnn_type,
+            bidirectional=bidirectional,
+        ).to(device)
+
     model.load_state_dict(checkpoint["model_state_dict"])
 
-    logging.info("\n--- Starting Deterministic Inference ---")
+    logging.info("\n--- Starting Inference ---")
 
     all_preds = []
     all_trues = []
@@ -144,10 +160,10 @@ def evaluate(args):
     start_time = time.time()
     total_batches = len(test_loader)
 
-    for i, (x, y, *_) in enumerate(test_loader):
-        x, y = x.to(device), y.to(device)
+    for i, batch in enumerate(test_loader):
+        x, y = batch[0].to(device), batch[1].to(device)
 
-        mu = forward_predict(model, x)
+        mu = forward_predict(model, x, model_type)
 
         y_last = x[:, -1, 0].cpu().numpy()
 
@@ -165,9 +181,8 @@ def evaluate(args):
     y_last = np.concatenate(all_lasts, axis=0)
 
     total_samples = y_pred.shape[0]
-
     if total_samples == 0:
-        logging.warning("No samples found in test set for the specified archetype.")
+        logging.warning("No samples found in test set.")
         return
 
     mse = np.mean((y_pred - y_true) ** 2)
@@ -190,21 +205,17 @@ def evaluate(args):
 
     avg_inference_time_ms = (inference_time / total_samples) * 1000.0
 
-    logging.info("\n=== Test Results (Error & Latency) ===")
-    logging.info(f"feature_set:  {feature_set}")
-    logging.info(f"Archetype ID: {args.archetype_id}")
-    logging.info(f"RNN Type:     {rnn_type}")
+    logging.info("\n=== Performance Metrics ===")
+    logging.info(f"Model: {model_type} ({rnn_type})")
     logging.info("-" * 30)
     logging.info(f"MSE:                   {mse:.6f}")
     logging.info(f"MAE:                   {mae:.6f}")
     logging.info("-" * 30)
     logging.info(">>> SHADOWING DIAGNOSTICS <<<")
-    logging.info(f"Skill Score (vs Naive): {skill_score:.4f}  (Should be > 0)")
-    logging.info(f"Directional Acc (MDA):  {mda:.2%} (Should be > 55%)")
+    logging.info(f"Skill Score (vs Naive): {skill_score:.4f}  (Ideal: > 0.1)")
+    logging.info(f"Directional Acc (MDA):  {mda:.2%} (Ideal: > 60%)")
     logging.info(f"Correlation (Lag 0):    {corr_0:.4f}")
-    logging.info(
-        f"Correlation (Lag -1):   {corr_1:.4f}  (If > Lag 0, model is shadowing)"
-    )
+    logging.info(f"Correlation (Lag -1):   {corr_1:.4f}")
 
     if is_shadowing:
         logging.warning(
@@ -224,18 +235,10 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--windows_dir", required=True)
     p.add_argument("--checkpoint_path", required=True)
-    p.add_argument(
-        "--archetype_id",
-        type=int,
-        default=None,
-    )
-    p.add_argument("--batch_size", type=int, default=TRAINING.BATCH_SIZE)
+    p.add_argument("--batch_size", type=int, default=TRAISING.BATCH_SIZE)
     p.add_argument("--num_workers", type=int, default=TRAINING.NUM_WORKERS)
     p.add_argument("--cpu", action="store_true", default=False)
-    p.add_argument(
-        "--bidirectional", action="store_true", default=TRAINING.BIDIRECTIONAL
-    )
-    p.add_argument("--residual", action="store_true", default=TRAINING.RESIDUAL)
+
     try:
         evaluate(p.parse_args())
     except Exception:

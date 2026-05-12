@@ -3,7 +3,6 @@ import sys
 import time
 import argparse
 import subprocess
-import json
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = THIS_DIR
@@ -31,8 +30,7 @@ def run(cmd, title: str):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Run full pipeline")
-
+    ap = argparse.ArgumentParser(description="Run full pipeline (Uncertainty-Aware)")
     ap.add_argument("--start_date", default="0d0")
     ap.add_argument("--end_date", default="7d0")
     ap.add_argument(
@@ -44,45 +42,29 @@ def main():
     ap.add_argument("--skip_ingest", action="store_true")
     ap.add_argument("--skip_windows", action="store_true")
     ap.add_argument(
-        "--delete_raw",
-        action="store_false",
-        dest="keep_raw",
-        help="Delete raw files during preprocessing.",
+        "--model_type",
+        choices=["rnn", "uncertainty_aware"],
+        default="uncertainty_aware",
     )
+    ap.add_argument("--rnn_type", choices=["lstm", "gru"], default="lstm")
     ap.add_argument("--windows_dir", default=PATHS.WINDOWS_DIR)
-    ap.add_argument(
-        "--archetype_mode",
-        action="store_true",
-        default=TRAINING.ARCHETYPE_MODE,
-        help="Enable loop over all detected cluster archetypes.",
-    )
-    ap.add_argument(
-        "--archetype_id",
-        type=int,
-        default=None,
-        help="Run pipeline for a specific cluster archetype only.",
-    )
     ap.add_argument("--skip_preprocessing", action="store_true")
-    ap.add_argument("--skip_clustering", action="store_true")
     ap.add_argument("--skip_training", action="store_true")
     ap.add_argument("--skip_testing", action="store_true")
-    ap.add_argument("--rnn_type", choices=["lstm", "gru"], default="lstm")
     ap.add_argument("--cpu", action="store_true")
     ap.add_argument(
         "--bidirectional", action="store_true", default=TRAINING.BIDIRECTIONAL
     )
-    ap.add_argument("--residual", action="store_true", default=TRAINING.RESIDUAL)
     ap.add_argument(
         "--max_services",
         type=int,
         default=PREPROCESSING.MAX_SERVICES,
-        help="Number of microservices to process. None uses all microservices.",
+        help="Limit number of services for faster testing.",
     )
 
     args = ap.parse_args()
 
     preprocess_script = os.path.join(REPO_ROOT, "run_preprocessing.py")
-    cluster_script = os.path.join(REPO_ROOT, "tools", "cluster_workloads.py")
     train_script = os.path.join(REPO_ROOT, "training", "train.py")
     test_script = os.path.join(REPO_ROOT, "training", "evaluate.py")
     compute_weights_script = os.path.join(
@@ -112,90 +94,70 @@ def main():
             cmd_pre.append("--skip_ingest")
         if args.skip_windows:
             cmd_pre.append("--skip_windows")
-        if not args.keep_raw:
-            cmd_pre.append("--delete_raw")
+
         total_times["preprocessing"] = run(cmd_pre, "Step 1: Preprocessing")
 
-    if args.archetype_mode and not args.skip_clustering:
-        cmd_cluster = [
+    if TRAINING.USE_WEIGHTS and not args.skip_training:
+        base_cmd_w = [
             sys.executable,
-            cluster_script,
+            compute_weights_script,
+            "--windows_dir",
+            args.windows_dir,
+            "--theta_mode",
+            TRAINING.THETA_MODE,
         ]
-        if args.max_services is not None:
-            cmd_cluster.extend(["--max_services", str(args.max_services)])
-        total_times["clustering"] = run(cmd_cluster, "Step 1.5: Clustering Workloads")
+        run(base_cmd_w + ["--split", "train"], "Weights Generation (Train)")
+        run(base_cmd_w + ["--split", "val"], "Weights Generation (Val)")
 
-    ids_to_run = [None]
-    if args.archetype_id is not None:
-        ids_to_run = [args.archetype_id]
-    elif args.archetype_mode:
-        if os.path.exists(PATHS.ARCHETYPE_MAPPING):
-            with open(PATHS.ARCHETYPE_MAPPING, "r") as f:
-                mapping = json.load(f)
-                ids_to_run = sorted(list(set(mapping.values())))
-        else:
-            print(
-                f"[WARN] Archetype mapping not found at {PATHS.ARCHETYPE_MAPPING}. Using global model."
-            )
+    current_checkpoint = get_checkpoint_path(None)
 
-    for arch_id in ids_to_run:
-        arch_label = f"ARCH {arch_id}" if arch_id is not None else "GLOBAL"
-        print(f"\n--- Processing {arch_label} ---")
+    if not args.skip_training:
+        cmd_train = [
+            sys.executable,
+            train_script,
+            "--windows_dir",
+            args.windows_dir,
+            "--checkpoint_path",
+            current_checkpoint,
+            "--model_type",
+            args.model_type,
+            "--rnn_type",
+            args.rnn_type,
+            "--feature_set",
+            args.feature_set,
+            "--batch_size",
+            str(TRAINING.BATCH_SIZE),
+            "--epochs",
+            str(TRAINING.EPOCHS),
+        ]
+        if TRAINING.USE_WEIGHTS:
+            cmd_train.append("--use_weights")
+        if args.cpu:
+            cmd_train.append("--cpu")
 
-        current_checkpoint = get_checkpoint_path(arch_id)
+        total_times["training"] = run(
+            cmd_train, f"Step 2: Training ({args.model_type})"
+        )
 
-        if TRAINING.USE_WEIGHTS and not args.skip_training:
-            base_cmd_w = [
-                sys.executable,
-                compute_weights_script,
-                "--windows_dir",
-                args.windows_dir,
-                "--theta_mode",
-                TRAINING.THETA_MODE,
-            ]
-            if arch_id is not None:
-                base_cmd_w.extend(["--archetype_id", str(arch_id)])
+    if not args.skip_testing:
+        cmd_test = [
+            sys.executable,
+            test_script,
+            "--windows_dir",
+            args.windows_dir,
+            "--checkpoint_path",
+            current_checkpoint,
+            "--batch_size",
+            str(TRAINING.BATCH_SIZE),
+        ]
+        if args.cpu:
+            cmd_test.append("--cpu")
 
-            run(base_cmd_w + ["--split", "train"], f"Weights Train ({arch_label})")
-            run(base_cmd_w + ["--split", "val"], f"Weights Val ({arch_label})")
-
-        if not args.skip_training:
-            cmd_train = [
-                sys.executable,
-                train_script,
-                "--windows_dir",
-                args.windows_dir,
-                "--checkpoint_path",
-                current_checkpoint,
-                "--rnn_type",
-                args.rnn_type,
-                "--feature_set",
-                args.feature_set,
-            ]
-            if arch_id is not None:
-                cmd_train.extend(["--archetype_id", str(arch_id)])
-            if TRAINING.USE_WEIGHTS:
-                cmd_train.append("--use_weights")
-
-            total_times[f"train_{arch_id}"] = run(cmd_train, f"Training ({arch_label})")
-
-        if not args.skip_testing:
-            cmd_test = [
-                sys.executable,
-                test_script,
-                "--windows_dir",
-                args.windows_dir,
-                "--checkpoint_path",
-                current_checkpoint,
-            ]
-            if arch_id is not None:
-                cmd_test.extend(["--archetype_id", str(arch_id)])
-
-            total_times[f"test_{arch_id}"] = run(cmd_test, f"Testing ({arch_label})")
+        total_times["testing"] = run(cmd_test, "Step 3: Evaluation & Diagnostics")
 
     print("\n========== PIPELINE COMPLETE ==========")
     for stage, t in total_times.items():
-        print(f"{stage:>25}: {t:.2f}s")
+        print(f"{stage:>20}: {t:.2f}s")
     print("=======================================")
 
 

@@ -235,15 +235,6 @@ def table_to_feature_exprs(feature_set: str) -> Dict[str, List[tuple]]:
 
 
 @dataclass(frozen=True)
-class ArchetypeDefaults:
-    MIN_K: int = 2
-    MAX_K: int = 8
-    AUTO_K_METHOD: str = "elbow"
-    CLUSTERING_FEATURES: Tuple[str, ...] = ("mean", "std", "p95", "skew", "kurtosis")
-    RANDOM_STATE: int = 42
-
-
-@dataclass(frozen=True)
 class PreprocessingDefaults:
     INPUT_LEN: int = 60
     PRED_HORIZON: int = 5
@@ -258,7 +249,7 @@ class PreprocessingDefaults:
     FREQ: str = "1m"
     MAX_SERVICES: Optional[int] = 5 if LOCAL_MODE else None
     SUBSET_SEED: int = 42
-    FEATURE_SET: str = "cpu_mem_traffic_diff"
+    FEATURE_SET: str = "cpu_mem"
 
 
 @dataclass(frozen=True)
@@ -284,11 +275,9 @@ class TrainingDefaults:
     INFERENCE_REPEATS: int = 100
     GLOBAL_THRESHOLD: bool = False
     BIDIRECTIONAL: bool = False
-    RESIDUAL: bool = False
     DERIV_PENALTY: float = 0.0
-    ARCHETYPE_MODE: bool = True
+    MODEL_TYPE: str = "uncertainty_aware"
 
 
-ARCHETYPES = ArchetypeDefaults()
 PREPROCESSING = PreprocessingDefaults()
 TRAINING = TrainingDefaults()

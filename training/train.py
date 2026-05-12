@@ -20,7 +20,8 @@ if REPO_ROOT not in sys.path:
 
 from config.defaults import PATHS, PREPROCESSING, TRAINING, DEFAULT_CHECKPOINT_PATH
 from common.dataset import ShardedWindowsDataset
-from common.models import RNNForecaster
+
+from common.models import RNNForecaster, UncertaintyAwareForecaster
 
 
 def setup_logging(mode="train"):
@@ -58,29 +59,32 @@ def setup_logging(mode="train"):
     return log_path
 
 
-def weighted_mse(preds, target, w=None, under_penalty=5.0, deriv_penalty=2.0):
+def gaussian_nll_loss(outputs, target, under_penalty=5.0):
+    mu = outputs[:, :, 0]
+    log_var = outputs[:, :, 1]
+    var = torch.exp(log_var)
+
+    loss = 0.5 * (torch.exp(-log_var) * (target - mu) ** 2 + log_var)
+
+    under_mask = (mu < target).float()
+    asym_weight = 1.0 + (under_mask * (under_penalty - 1.0))
+
+    weighted_loss = loss * asym_weight
+    return weighted_loss.mean()
+
+
+def weighted_mse(preds, target, w=None, under_penalty=5.0):
     diff = preds - target
     sq_err = diff**2
     under_mask = (preds < target).float()
     asym_weight = 1.0 + (under_mask * (under_penalty - 1.0))
-    value_loss_matrix = sq_err * asym_weight
-    value_loss = value_loss_matrix.mean(dim=1)
-
-    if preds.size(1) > 1:
-        preds_deriv = preds[:, 1:] - preds[:, :-1]
-        target_deriv = target[:, 1:] - target[:, :-1]
-        deriv_loss = (preds_deriv - target_deriv) ** 2
-        deriv_loss = deriv_loss.mean(dim=1)
-    else:
-        deriv_loss = 0.0
-
-    total_per_sample = value_loss + (deriv_penalty * deriv_loss)
+    value_loss = (sq_err * asym_weight).mean(dim=1)
 
     if w is None:
-        return total_per_sample.mean()
+        return value_loss.mean()
 
     w = w.clamp(min=0.1, max=15.0)
-    return (w * total_per_sample).sum() / w.sum().clamp_min(1e-6)
+    return (w * value_loss).sum() / w.sum().clamp_min(1e-6)
 
 
 def train(args):
@@ -100,21 +104,11 @@ def train(args):
     logging.info("\n--- Loading Datasets ---")
 
     train_ds = ShardedWindowsDataset(
-        args.windows_dir,
-        "train",
-        args.input_len,
-        args.pred_horizon,
-        args.use_weights,
-        archetype_id=args.archetype_id,
+        args.windows_dir, "train", args.input_len, args.pred_horizon, args.use_weights
     )
 
     val_ds = ShardedWindowsDataset(
-        args.windows_dir,
-        "val",
-        args.input_len,
-        args.pred_horizon,
-        use_weights=args.use_weights,
-        archetype_id=args.archetype_id,
+        args.windows_dir, "val", args.input_len, args.pred_horizon, args.use_weights
     )
 
     logging.info(f"Train samples: {len(train_ds)}")
@@ -138,16 +132,25 @@ def train(args):
         val_ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers
     )
 
-    model = RNNForecaster(
-        input_size=input_size,
-        hidden_size=args.hidden_size,
-        num_layers=args.num_layers,
-        dropout=args.dropout,
-        horizon=args.pred_horizon,
-        rnn_type=args.rnn_type,
-        bidirectional=args.bidirectional,
-        residual=args.residual,
-    ).to(device)
+    if args.model_type == "uncertainty_aware":
+        model = UncertaintyAwareForecaster(
+            input_size=input_size,
+            hidden_size=args.hidden_size,
+            num_layers=args.num_layers,
+            dropout=args.dropout,
+            horizon=args.pred_horizon,
+            rnn_type=args.rnn_type,
+        ).to(device)
+    else:
+        model = RNNForecaster(
+            input_size=input_size,
+            hidden_size=args.hidden_size,
+            num_layers=args.num_layers,
+            dropout=args.dropout,
+            horizon=args.pred_horizon,
+            rnn_type=args.rnn_type,
+            bidirectional=args.bidirectional,
+        ).to(device)
 
     optimizer = torch.optim.Adam(
         model.parameters(), lr=args.lr, weight_decay=args.weight_decay
@@ -175,13 +178,12 @@ def train(args):
 
             optimizer.zero_grad()
             preds = model(x)
-            loss = weighted_mse(
-                preds,
-                y,
-                w,
-                under_penalty=args.under_penalty,
-                deriv_penalty=args.deriv_penalty,
-            )
+
+            if args.model_type == "uncertainty_aware":
+                loss = gaussian_nll_loss(preds, y, under_penalty=args.under_penalty)
+            else:
+                loss = weighted_mse(preds, y, w, under_penalty=args.under_penalty)
+
             loss.backward()
 
             if args.grad_clip:
@@ -206,13 +208,11 @@ def train(args):
                 x, y = x.to(device), y.to(device)
                 preds = model(x)
 
-                loss = weighted_mse(
-                    preds,
-                    y,
-                    w,
-                    under_penalty=args.under_penalty,
-                    deriv_penalty=args.deriv_penalty,
-                )
+                if args.model_type == "uncertainty_aware":
+                    loss = gaussian_nll_loss(preds, y, under_penalty=args.under_penalty)
+                else:
+                    loss = weighted_mse(preds, y, w, under_penalty=args.under_penalty)
+
                 val_loss_accum += loss.item() * x.size(0)
 
         avg_val_loss = val_loss_accum / len(val_ds) if len(val_ds) > 0 else 0.0
@@ -254,11 +254,7 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--windows_dir", required=True)
     p.add_argument("--checkpoint_path", default=DEFAULT_CHECKPOINT_PATH)
-    p.add_argument(
-        "--archetype_id",
-        type=int,
-        default=None,
-    )
+    p.add_argument("--model_type", default="rnn", choices=["rnn", "uncertainty_aware"])
     p.add_argument("--use_weights", action="store_true")
     p.add_argument("--input_len", type=int, default=PREPROCESSING.INPUT_LEN)
     p.add_argument("--pred_horizon", type=int, default=PREPROCESSING.PRED_HORIZON)
@@ -270,25 +266,14 @@ if __name__ == "__main__":
     p.add_argument("--lr", type=float, default=TRAINING.LR)
     p.add_argument("--grad_clip", type=float, default=TRAINING.GRAD_CLIP)
     p.add_argument("--weight_decay", type=float, default=TRAINING.WEIGHT_DECAY)
-    p.add_argument(
-        "--under_penalty",
-        type=float,
-        default=TRAINING.UNDER_PENALTY,
-    )
+    p.add_argument("--under_penalty", type=float, default=TRAINING.UNDER_PENALTY)
     p.add_argument("--num_workers", type=int, default=TRAINING.NUM_WORKERS)
     p.add_argument("--seed", type=int, default=TRAINING.SEED)
     p.add_argument("--cpu", action="store_true")
     p.add_argument("--rnn_type", default="lstm")
     p.add_argument("--feature_set", default=PREPROCESSING.FEATURE_SET)
-    p.add_argument(
-        "--bidirectional", action="store_true", default=TRAINING.BIDIRECTIONAL
-    )
-    p.add_argument("--residual", action="store_true", default=TRAINING.RESIDUAL)
-    p.add_argument(
-        "--deriv_penalty",
-        type=float,
-        default=TRAINING.DERIV_PENALTY,
-    )
+    p.add_argument("--bidirectional", action="store_true", default=TRAINING.BIDIRECTIONAL)
+    
     try:
         train(p.parse_args())
     except Exception as e:
