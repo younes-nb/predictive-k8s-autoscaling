@@ -292,18 +292,11 @@ def main():
                             .tanh()
                         ).alias("mcr_diff")
                     )
-                joined = (
-                    joined_lazy.drop_nulls(feature_names)
-                    .sort(
-                        list(
-                            set(args.id_cols).intersection(
-                                joined_lazy.collect_schema().names()
-                            )
-                        )
-                        + ["_t"]
-                    )
-                    .collect()
-                )
+
+                sort_cols = list(
+                    set(args.id_cols).intersection(joined_lazy.collect_schema().names())
+                ) + ["_t"]
+                joined = joined_lazy.drop_nulls(feature_names).sort(sort_cols).collect()
                 del joined_lazy
                 gc.collect()
 
@@ -347,33 +340,34 @@ def main():
                     if not valid_group:
                         continue
 
-                    X_all, Y_all, S_all = windowize_multivariate(
-                        feat_processed,
-                        feat_processed[:, target_idx],
-                        args.input_len,
-                        args.pred_horizon,
-                        args.stride,
-                    )
+                    n = len(feat_processed)
+                    idx_tr = int(n * args.train_frac)
+                    idx_val = int(n * (args.train_frac + args.val_frac))
 
-                    n_w = len(X_all)
-                    if n_w == 0:
-                        continue
+                    split_configs = [
+                        ("train", 0, idx_tr),
+                        ("val", idx_tr, idx_val),
+                        ("test", idx_val, n),
+                    ]
 
-                    cut_tr = max(int(n_w * args.train_frac), 1)
-                    cut_val = min(
-                        max(int(n_w * (args.train_frac + args.val_frac)), cut_tr + 1),
-                        n_w - 1,
-                    )
+                    for split_name, start, end in split_configs:
+                        sub_feat = feat_processed[start:end]
 
-                    for split, start, end in [
-                        ("train", 0, cut_tr),
-                        ("val", cut_tr, cut_val),
-                        ("test", cut_val, None),
-                    ]:
-                        if X_all[start:end].size:
-                            shard_data[split][0].append(X_all[start:end])
-                            shard_data[split][1].append(Y_all[start:end])
-                            shard_data[split][2].append(S_all[start:end])
+                        if len(sub_feat) < args.input_len + args.pred_horizon:
+                            continue
+
+                        Xs, Ys, Ss = windowize_multivariate(
+                            sub_feat,
+                            sub_feat[:, target_idx],
+                            args.input_len,
+                            args.pred_horizon,
+                            args.stride,
+                        )
+
+                        if Xs.size > 0:
+                            shard_data[split_name][0].append(Xs)
+                            shard_data[split_name][1].append(Ys)
+                            shard_data[split_name][2].append(Ss)
 
                 if save_chunk(args.out_dir, shard_idx, chunk_idx, shard_data):
                     chunk_idx += 1
