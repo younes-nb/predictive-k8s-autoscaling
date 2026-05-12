@@ -19,9 +19,9 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from config.defaults import PATHS, PREPROCESSING, TRAINING, DEFAULT_CHECKPOINT_PATH
-from common.dataset import ShardedWindowsDataset
+from core.dataset import ShardedWindowsDataset
 
-from common.models import RNNForecaster, UncertaintyAwareForecaster
+from core.models import RNNForecaster, UncertaintyAwareForecaster
 
 
 def setup_logging(mode="train"):

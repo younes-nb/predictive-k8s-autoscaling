@@ -20,7 +20,7 @@ from config.defaults import (
     tables_for_feature_set,
     table_to_feature_exprs,
 )
-from common.utils import windowize_multivariate, moving_average
+from core.utils import windowize_multivariate, moving_average
 
 
 def list_parquet_parts(parquet_dir: str):
@@ -111,7 +111,7 @@ def main():
     print(f"Feature set: {args.feature_set} | Base Table: {base_table}")
 
     selected_services = None
-    if args.max_services > 0:
+    if args.max_services is not None and args.max_services > 0:
         base_dir = DATASET_TABLES[base_table]["parquet_dir"]
         base_parts = list_parquet_parts(base_dir)
         all_services = set()

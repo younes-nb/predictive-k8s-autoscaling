@@ -21,8 +21,8 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from config.defaults import PATHS, TRAINING, PREPROCESSING
-from common.dataset import ShardedWindowsDataset
-from common.models import RNNForecaster, UncertaintyAwareForecaster
+from core.dataset import ShardedWindowsDataset
+from core.models import RNNForecaster, UncertaintyAwareForecaster
 
 
 def setup_logging(mode="test"):
@@ -235,7 +235,7 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--windows_dir", required=True)
     p.add_argument("--checkpoint_path", required=True)
-    p.add_argument("--batch_size", type=int, default=TRAISING.BATCH_SIZE)
+    p.add_argument("--batch_size", type=int, default=TRAINING.BATCH_SIZE)
     p.add_argument("--num_workers", type=int, default=TRAINING.NUM_WORKERS)
     p.add_argument("--cpu", action="store_true", default=False)
 

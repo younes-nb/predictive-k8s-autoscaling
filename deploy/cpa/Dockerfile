@@ -12,10 +12,10 @@ RUN curl -L https://github.com/jthomperoo/custom-pod-autoscaler/releases/downloa
     rm cpa.tar.gz
 
 COPY deploy/cpa/*.py ./
-COPY common/models.py common/
+COPY core/models.py core/
 COPY model.pt .
 COPY deploy/cpa/config.yaml /config.yaml
 
-RUN touch common/__init__.py && chmod +x metric.py evaluate.py
+RUN touch core/__init__.py && chmod +x metric.py evaluate.py
 
 ENTRYPOINT ["/custom-pod-autoscaler"]

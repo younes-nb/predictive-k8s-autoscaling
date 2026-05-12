@@ -10,8 +10,8 @@ from torch.utils.data import DataLoader
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config.defaults import PATHS, PREPROCESSING, TRAINING
-from common.dataset import ShardedWindowsDataset
-from common.models import RNNForecaster
+from core.dataset import ShardedWindowsDataset
+from core.models import RNNForecaster
 
 
 def get_ground_truth_weights(y_batch, sid_batch, device, gamma, delta, theta_min, theta_mode="adaptive"):

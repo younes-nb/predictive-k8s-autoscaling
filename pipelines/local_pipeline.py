@@ -5,7 +5,7 @@ import subprocess
 import time
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-REPO_ROOT = THIS_DIR
+REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, os.pardir))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
@@ -57,7 +57,9 @@ def main():
 
     print(f"\n🚀 STARTING LOCAL LIGHTWEIGHT PIPELINE")
     print(f"Feature Set: {args.feature_set}")
-    print(f"Local Data Root: {os.path.abspath(os.path.join(THIS_DIR, 'local_data'))}")
+    print(
+        f"Local Data Root: {os.path.abspath(os.path.join(REPO_ROOT, 'local_data'))}"
+    )
 
     fetch_script = os.path.join(REPO_ROOT, "preprocessing", "fetch_traces.py")
     ingest_script = os.path.join(REPO_ROOT, "preprocessing", "ingest_traces_parquet.py")
