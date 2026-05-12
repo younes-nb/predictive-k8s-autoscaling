@@ -45,21 +45,6 @@ class Paths:
     LOGS_DIR: str = (
         f"{LOCAL_DIR}/logs" if LOCAL_MODE else "/proj/k8sautoscaledl-PG0/logs"
     )
-    ARCHETYPE_DIR: str = (
-        f"{LOCAL_DIR}/archetypes"
-        if LOCAL_MODE
-        else "/proj/k8sautoscaledl-PG0/archetypes"
-    )
-    ARCHETYPE_MAPPING: str = (
-        os.path.join(f"{LOCAL_DIR}/archetypes", "mapping.json")
-        if LOCAL_MODE
-        else "/proj/k8sautoscaledl-PG0/archetypes/mapping.json"
-    )
-    CLUSTER_STATS: str = (
-        os.path.join(f"{LOCAL_DIR}/archetypes", "k_selection_metrics.csv")
-        if LOCAL_MODE
-        else "/proj/k8sautoscaledl-PG0/archetypes/k_selection_metrics.csv"
-    )
 
 
 PATHS = Paths()
@@ -110,8 +95,6 @@ FEATURES: Dict[str, Dict[str, str]] = {
     "http_mcr": {"table": "msrtmcre", "column": "http_mcr"},
     "providermq_rt": {"table": "msrtmcre", "column": "providermq_rt"},
     "providermq_mcr": {"table": "msrtmcre", "column": "providermq_mcr"},
-    "cpu_diff": {"table": "msresource", "column": "cpu_utilization"},
-    "mcr_diff": {"table": "msrtmcre", "column": "total_mcr"},
 }
 
 
@@ -139,15 +122,6 @@ FEATURE_SETS: Dict[str, Dict[str, Any]] = {
     },
     "cpu_mem_traffic": {
         "features": ["cpu_utilization", "memory_utilization", "total_mcr"],
-        "target": "cpu_utilization",
-        "base_table": "msresource",
-        "join_keys": {
-            "msresource": ["msname", "msinstanceid"],
-            "msrtmcre": ["msname", "msinstanceid"],
-        },
-    },
-    "cpu_mem_traffic_diff": {
-        "features": ["cpu_utilization", "memory_utilization", "mcr_diff"],
         "target": "cpu_utilization",
         "base_table": "msresource",
         "join_keys": {
@@ -275,7 +249,6 @@ class TrainingDefaults:
     INFERENCE_REPEATS: int = 100
     GLOBAL_THRESHOLD: bool = False
     BIDIRECTIONAL: bool = False
-    DERIV_PENALTY: float = 0.0
     MODEL_TYPE: str = "uncertainty_aware"
 
 
