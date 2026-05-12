@@ -62,7 +62,7 @@ def save_chunk(out_dir, shard_idx, chunk_idx, shard_data):
 
 def main():
     p = argparse.ArgumentParser(
-        description="Build windows using service batching to bypass OOM limits."
+        description="Build windows using global service batching to ensure correct splitting and bypass OOM."
     )
 
     p.add_argument("--out_dir", required=True)
@@ -87,7 +87,9 @@ def main():
     p.add_argument("--max_services", type=int, default=PREPROCESSING.MAX_SERVICES)
     p.add_argument("--subset_seed", type=int, default=PREPROCESSING.SUBSET_SEED)
     p.add_argument(
-        "--batch_size", type=int, default=50, help="Number of services to join at once"
+        "--batch_size",
+        type=int,
+        default=50,
     )
 
     args = p.parse_args()
@@ -108,46 +110,45 @@ def main():
     table_exprs = table_to_feature_exprs(args.feature_set)
     base_table = FEATURES[target_feature]["table"]
 
-    print(f"Feature set: {args.feature_set} | Base Table: {base_table}")
-
-    selected_services = None
-    if args.max_services is not None and args.max_services > 0:
-        base_dir = DATASET_TABLES[base_table]["parquet_dir"]
-        base_parts = list_parquet_parts(base_dir)
-        all_services = set()
-        for part in base_parts:
-            try:
-                df_part_s = (
-                    pl.scan_parquet(part).select(args.service_col).unique().collect()
-                )
-                all_services.update(df_part_s[args.service_col].to_list())
-            except Exception as e:
-                print(f"Warning: Could not read {part}: {e}")
-
-        all_services_list = sorted(list(all_services))
-        if len(all_services_list) > args.max_services:
-            rng = np.random.default_rng(args.subset_seed)
-            idxs = rng.choice(
-                len(all_services_list), size=args.max_services, replace=False
-            )
-            selected_services = set(np.array(all_services_list)[idxs].tolist())
-            print(f"Selected subset: {len(selected_services)} services")
-        else:
-            print(f"Using all {len(all_services_list)} services")
-
     table_parts: dict[str, list[str]] = {}
     for t in needed_tables:
         pq_dir = DATASET_TABLES[t]["parquet_dir"]
         parts = list_parquet_parts(pq_dir)
         if not parts:
-            raise SystemExit(f"No parquet parts found for table='{t}' in {pq_dir}")
+            raise SystemExit(f"No parquet parts found for table='{t}'")
         table_parts[t] = parts
 
-    os.makedirs(args.out_dir, exist_ok=True)
+    print(
+        f"Discovering unique services across all {len(table_parts[base_table])} base shards..."
+    )
+    all_services_df = (
+        pl.scan_parquet(table_parts[base_table])
+        .select(args.service_col)
+        .unique()
+        .collect()
+    )
+    all_services_list = sorted(all_services_df[args.service_col].to_list())
 
-    for shard_idx, base_pq in enumerate(table_parts[base_table]):
+    if args.max_services and len(all_services_list) > args.max_services:
+        rng = np.random.default_rng(args.subset_seed)
+        idxs = rng.choice(len(all_services_list), size=args.max_services, replace=False)
+        all_services_list = sorted(np.array(all_services_list)[idxs].tolist())
+        print(f"Selected subset: {len(all_services_list)} services")
+    else:
+        print(f"Processing all {len(all_services_list)} services globally")
+
+    os.makedirs(args.out_dir, exist_ok=True)
+    total_batches = (len(all_services_list) + args.batch_size - 1) // args.batch_size
+
+    for batch_idx in range(total_batches):
         gc.collect()
-        print(f"\n=== Shard {shard_idx:04d} (base={os.path.basename(base_pq)}) ===")
+        start_idx = batch_idx * args.batch_size
+        end_idx = start_idx + args.batch_size
+        current_batch_ids = all_services_list[start_idx:end_idx]
+
+        print(
+            f"\n=== Global Batch {batch_idx+1}/{total_batches} ({len(current_batch_ids)} services) ==="
+        )
 
         base_id_cols = DATASET_TABLES[base_table]["key_cols"]
         base_need_cols = list(
@@ -160,226 +161,131 @@ def main():
             )
         )
 
-        try:
-            lf_base_schema = pl.scan_parquet(base_pq).collect_schema().names()
-            if args.service_col not in lf_base_schema:
-                print(f"Skipping {base_pq}, missing {args.service_col}")
-                continue
-
-            shard_services = (
-                pl.scan_parquet(base_pq)
-                .select(args.service_col)
-                .unique()
-                .collect()[args.service_col]
-                .to_list()
-            )
-            if selected_services is not None:
-                shard_services = list(
-                    set(shard_services).intersection(selected_services)
-                )
-        except Exception as e:
-            print(f"Error reading services from {base_pq}: {e}")
-            continue
-
-        if not shard_services:
-            continue
-
-        total_batches = (len(shard_services) + args.batch_size - 1) // args.batch_size
-        print(
-            f"Found {len(shard_services)} services. Processing in {total_batches} batches..."
+        lf_base = (
+            pl.scan_parquet(table_parts[base_table])
+            .filter(pl.col(args.service_col).is_in(current_batch_ids))
+            .select(base_need_cols)
         )
 
-        chunk_idx = 0
-        for i in range(0, len(shard_services), args.batch_size):
-            batch = shard_services[i : i + args.batch_size]
-            batch_num = (i // args.batch_size) + 1
-            print(f"  -> Batch {batch_num}/{total_batches} ({len(batch)} services)")
+        joined_lazy = build_table_agg(
+            lf_base, args.time_col, base_id_cols, args.freq, table_exprs[base_table]
+        )
 
-            try:
-                lf_base = (
-                    pl.scan_parquet(base_pq)
-                    .select(base_need_cols)
-                    .filter(pl.col(args.service_col).is_in(batch))
-                )
+        bounds = lf_base.select(
+            [
+                pl.col(args.time_col).min().alias("min_t"),
+                pl.col(args.time_col).max().alias("max_t"),
+            ]
+        ).collect()
 
-                joined_lazy = build_table_agg(
-                    lf_base,
-                    args.time_col,
-                    base_id_cols,
-                    args.freq,
-                    table_exprs[base_table],
-                )
+        if bounds.height == 0 or bounds["min_t"][0] is None:
+            continue
+        min_t, max_t = bounds["min_t"][0], bounds["max_t"][0]
 
-                bounds = lf_base.select(
-                    [
-                        pl.col(args.time_col).min().alias("min_t"),
-                        pl.col(args.time_col).max().alias("max_t"),
-                    ]
-                ).collect()
+        for t in needed_tables:
+            if t == base_table:
+                continue
+            t_id_cols = DATASET_TABLES[t]["key_cols"]
+            t_need_cols = list(
+                set([args.time_col, *t_id_cols, *[raw for _, raw in table_exprs[t]]])
+            )
 
-                if bounds.height == 0 or bounds["min_t"][0] is None:
-                    continue
-                min_t, max_t = bounds["min_t"][0], bounds["max_t"][0]
+            lf_t = pl.scan_parquet(table_parts[t]).filter(
+                (pl.col(args.time_col).cast(pl.Datetime) >= min_t)
+                & (pl.col(args.time_col).cast(pl.Datetime) <= max_t)
+            )
 
-                for t in needed_tables:
-                    if t == base_table:
-                        continue
-                    t_id_cols = DATASET_TABLES[t]["key_cols"]
-                    need_cols = list(
-                        set(
-                            [
-                                args.time_col,
-                                *t_id_cols,
-                                *[raw for _, raw in table_exprs[t]],
-                            ]
-                        )
-                    )
+            t_schema = pl.scan_parquet(table_parts[t]).collect_schema().names()
+            if args.service_col in t_schema:
+                lf_t = lf_t.filter(pl.col(args.service_col).is_in(current_batch_ids))
 
-                    lf_t = (
-                        pl.scan_parquet(table_parts[t])
-                        .filter(
-                            (pl.col(args.time_col).cast(pl.Datetime) >= min_t)
-                            & (pl.col(args.time_col).cast(pl.Datetime) <= max_t)
-                        )
-                        .select(need_cols)
-                    )
+            lf_t_agg = build_table_agg(
+                lf_t.select(t_need_cols),
+                args.time_col,
+                t_id_cols,
+                args.freq,
+                table_exprs[t],
+            )
 
-                    if (
-                        args.service_col
-                        in pl.scan_parquet(table_parts[t]).collect_schema().names()
-                    ):
-                        lf_t = lf_t.filter(pl.col(args.service_col).is_in(batch))
+            join_on = ["_t"] + FEATURE_SETS[args.feature_set].get("join_keys", {}).get(
+                t, []
+            )
+            joined_lazy = joined_lazy.join(lf_t_agg, on=join_on, how="left")
 
-                    lf_t_agg = build_table_agg(
-                        lf_t, args.time_col, t_id_cols, args.freq, table_exprs[t]
-                    )
+        for feat in feature_names:
+            is_resource = "cpu" in feat.lower() or "mem" in feat.lower()
+            if is_resource and "diff" not in feat.lower():
+                joined_lazy = joined_lazy.with_columns(pl.col(feat).clip(0.0, 1.0))
 
-                    join_on = ["_t"] + FEATURE_SETS[args.feature_set].get(
-                        "join_keys", {}
-                    ).get(t, [])
-                    if len(join_on) == 1:
-                        schema_joined = joined_lazy.collect_schema().names()
-                        schema_t = lf_t_agg.collect_schema().names()
-                        join_on = list(set(schema_joined).intersection(schema_t))
+        sort_cols = list(
+            set(args.id_cols).intersection(joined_lazy.collect_schema().names())
+        ) + ["_t"]
+        joined = joined_lazy.drop_nulls(feature_names).sort(sort_cols).collect()
+        del joined_lazy
+        gc.collect()
 
-                    joined_lazy = joined_lazy.join(lf_t_agg, on=join_on, how="left")
+        if joined.height == 0:
+            continue
 
-                for feat in feature_names:
-                    is_resource = "cpu" in feat.lower() or "mem" in feat.lower()
-                    is_absolute = "diff" not in feat.lower()
-                    if is_resource and is_absolute:
-                        joined_lazy = joined_lazy.with_columns(
-                            pl.col(feat).clip(0.0, 1.0)
-                        )
+        shard_data = {"train": ([], [], []), "val": ([], [], []), "test": ([], [], [])}
+        group_cols = [c for c in args.id_cols if c in joined.columns]
 
-                if "cpu_diff" in feature_names:
-                    joined_lazy = joined_lazy.with_columns(
-                        pl.col("cpu_diff")
-                        .diff()
-                        .over(base_id_cols)
-                        .fill_null(0.0)
-                        .clip(-1.0, 1.0)
-                    )
-                if "mcr_diff" in feature_names:
-                    epsilon = 1e-6
-                    joined_lazy = joined_lazy.with_columns(
-                        (
-                            (pl.col("mcr_diff") + epsilon)
-                            .log()
-                            .diff()
-                            .over(["msname", "msinstanceid"])
-                            .fill_null(0.0)
-                            .tanh()
-                        ).alias("mcr_diff")
-                    )
-
-                sort_cols = list(
-                    set(args.id_cols).intersection(joined_lazy.collect_schema().names())
-                ) + ["_t"]
-                joined = joined_lazy.drop_nulls(feature_names).sort(sort_cols).collect()
-                del joined_lazy
-                gc.collect()
-
-                if joined.height == 0:
-                    continue
-
-                shard_data = {
-                    "train": ([], [], []),
-                    "val": ([], [], []),
-                    "test": ([], [], []),
-                }
-                group_cols = [c for c in args.id_cols if c in joined.columns]
-
-                for _, g in joined.group_by(group_cols, maintain_order=True):
-                    if g.height < args.input_len + args.pred_horizon:
-                        continue
-
-                    feat_raw = np.stack(
-                        [
-                            g[feat].to_numpy().astype("float32")
-                            for feat in feature_names
-                        ],
-                        axis=1,
-                    )
-
-                    feat_processed = np.zeros_like(feat_raw)
-                    valid_group = True
-
-                    for j in range(len(feature_names)):
-                        vals = moving_average(feat_raw[:, j], args.smoothing_window)
-
-                        if vals is None:
-                            if j == target_idx:
-                                valid_group = False
-                                break
-                            feat_processed[:, j] = 0.0
-                            continue
-
-                        feat_processed[:, j] = vals
-
-                    if not valid_group:
-                        continue
-
-                    n = len(feat_processed)
-                    idx_tr = int(n * args.train_frac)
-                    idx_val = int(n * (args.train_frac + args.val_frac))
-
-                    split_configs = [
-                        ("train", 0, idx_tr),
-                        ("val", idx_tr, idx_val),
-                        ("test", idx_val, n),
-                    ]
-
-                    for split_name, start, end in split_configs:
-                        sub_feat = feat_processed[start:end]
-
-                        if len(sub_feat) < args.input_len + args.pred_horizon:
-                            continue
-
-                        Xs, Ys, Ss = windowize_multivariate(
-                            sub_feat,
-                            sub_feat[:, target_idx],
-                            args.input_len,
-                            args.pred_horizon,
-                            args.stride,
-                        )
-
-                        if Xs.size > 0:
-                            shard_data[split_name][0].append(Xs)
-                            shard_data[split_name][1].append(Ys)
-                            shard_data[split_name][2].append(Ss)
-
-                if save_chunk(args.out_dir, shard_idx, chunk_idx, shard_data):
-                    chunk_idx += 1
-
-                del joined, shard_data
-                gc.collect()
-
-            except Exception as e:
-                print(f"Error processing batch {batch_num} in shard {shard_idx}: {e}")
+        for _, g in joined.group_by(group_cols, maintain_order=True):
+            if g.height < args.input_len + args.pred_horizon:
                 continue
 
-    print("\nAll shards processed.")
+            feat_raw = np.stack(
+                [g[feat].to_numpy().astype("float32") for feat in feature_names], axis=1
+            )
+            feat_processed = np.zeros_like(feat_raw)
+            valid_group = True
+
+            for j in range(len(feature_names)):
+                vals = moving_average(feat_raw[:, j], args.smoothing_window)
+                if vals is None:
+                    if j == target_idx:
+                        valid_group = False
+                        break
+                    feat_processed[:, j] = 0.0
+                    continue
+                feat_processed[:, j] = vals
+
+            if not valid_group:
+                continue
+
+            n = len(feat_processed)
+            idx_tr = int(n * args.train_frac)
+            idx_val = int(n * (args.train_frac + args.val_frac))
+
+            split_configs = [
+                ("train", 0, idx_tr),
+                ("val", idx_tr, idx_val),
+                ("test", idx_val, n),
+            ]
+
+            for split_name, start, end in split_configs:
+                sub_feat = feat_processed[start:end]
+                if len(sub_feat) < args.input_len + args.pred_horizon:
+                    continue
+
+                Xs, Ys, Ss = windowize_multivariate(
+                    sub_feat,
+                    sub_feat[:, target_idx],
+                    args.input_len,
+                    args.pred_horizon,
+                    args.stride,
+                )
+
+                if Xs.size > 0:
+                    shard_data[split_name][0].append(Xs)
+                    shard_data[split_name][1].append(Ys)
+                    shard_data[split_name][2].append(Ss)
+
+        save_chunk(args.out_dir, batch_idx, 0, shard_data)
+        del joined, shard_data
+        gc.collect()
+
+    print("\nAll global batches processed.")
 
 
 if __name__ == "__main__":
