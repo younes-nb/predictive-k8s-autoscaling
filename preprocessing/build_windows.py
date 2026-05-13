@@ -5,6 +5,8 @@ import argparse
 import polars as pl
 import numpy as np
 import gc
+import shutil
+import tempfile
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, os.pardir))
@@ -49,14 +51,34 @@ def build_table_agg(
 
 
 def save_chunk(out_dir, shard_idx, chunk_idx, shard_data):
-    base = os.path.join(out_dir, f"part-{shard_idx:04d}_chunk-{chunk_idx:04d}")
+    base_name = f"part-{shard_idx:04d}_chunk-{chunk_idx:04d}"
     saved_any = False
-    for split, (Xs, Ys, Ss) in shard_data.items():
-        if Xs:
-            np.save(f"{base}_X_{split}.npy", np.concatenate(Xs))
-            np.save(f"{base}_y_{split}.npy", np.concatenate(Ys))
-            np.save(f"{base}_sid_{split}.npy", np.concatenate(Ss))
-            saved_any = True
+
+    try:
+        with tempfile.TemporaryDirectory(dir="/dev/shm") as tmp_dir:
+            tmp_base = os.path.join(tmp_dir, base_name)
+
+            for split, (Xs, Ys, Ss) in shard_data.items():
+                if Xs:
+                    np.save(f"{tmp_base}_X_{split}.npy", np.concatenate(Xs))
+                    np.save(f"{tmp_base}_y_{split}.npy", np.concatenate(Ys))
+                    np.save(f"{tmp_base}_sid_{split}.npy", np.concatenate(Ss))
+                    saved_any = True
+
+            if saved_any:
+                for src_file in glob.glob(f"{tmp_base}*"):
+                    file_name = os.path.basename(src_file)
+                    dest_file = os.path.join(out_dir, file_name)
+
+                    shutil.move(src_file, dest_file)
+
+    except OSError as e:
+        if "Read-only file system" in str(e):
+            print(f"\nCRITICAL: /dataset drive locked up during move: {e}")
+        else:
+            print(f"\nStaging Error: {e}")
+        raise
+
     return saved_any
 
 
@@ -89,7 +111,7 @@ def main():
     p.add_argument(
         "--batch_size",
         type=int,
-        default=50,
+        default=256,
     )
 
     args = p.parse_args()
