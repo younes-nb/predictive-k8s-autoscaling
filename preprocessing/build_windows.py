@@ -111,7 +111,7 @@ def main():
     p.add_argument(
         "--batch_size",
         type=int,
-        default=64,
+        default=32,
     )
 
     args = p.parse_args()
