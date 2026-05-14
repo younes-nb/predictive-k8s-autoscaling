@@ -7,6 +7,7 @@ import numpy as np
 import gc
 import shutil
 import tempfile
+import time
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, os.pardir))
@@ -66,19 +67,18 @@ def save_chunk(out_dir, shard_idx, chunk_idx, shard_data):
                     saved_any = True
 
             if saved_any:
-                for src_file in glob.glob(f"{tmp_base}*"):
+                files_to_move = glob.glob(f"{tmp_base}*")
+                for src_file in files_to_move:
                     file_name = os.path.basename(src_file)
                     dest_file = os.path.join(out_dir, file_name)
-
                     shutil.move(src_file, dest_file)
+                    os.sync() 
+                    time.sleep(2.0)
 
     except OSError as e:
-        if "Read-only file system" in str(e):
-            print(f"\nCRITICAL: /dataset drive locked up during move: {e}")
-        else:
-            print(f"\nStaging Error: {e}")
+        print(f"\nStaging Error: {e}")
         raise
-
+    
     return saved_any
 
 
@@ -111,7 +111,7 @@ def main():
     p.add_argument(
         "--batch_size",
         type=int,
-        default=256,
+        default=64,
     )
 
     args = p.parse_args()
