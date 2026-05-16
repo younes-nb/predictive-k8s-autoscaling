@@ -18,6 +18,31 @@ class Attention(nn.Module):
         return context, weights
 
 
+class StochasticAttention(nn.Module):
+    def __init__(self, hidden_size, bidirectional=False):
+        super(StochasticAttention, self).__init__()
+        input_dim = hidden_size * 2 if bidirectional else hidden_size
+        self.fc_a = nn.Linear(input_dim, input_dim)
+        self.fc_mu = nn.Linear(input_dim, 1)
+        self.fc_sigma = nn.Linear(input_dim, 1)
+
+    def forward(self, encoder_outputs):
+        a = torch.tanh(self.fc_a(encoder_outputs))
+        mu = self.fc_mu(a)
+        log_sigma = self.fc_sigma(a)
+        sigma = torch.exp(log_sigma)
+        
+        if self.training:
+            epsilon = torch.randn_like(mu)
+            energy = mu + sigma * epsilon
+        else:
+            energy = mu
+            
+        weights = F.softmax(energy, dim=1)
+        context = torch.sum(weights * encoder_outputs, dim=1)
+        return context, weights
+
+
 class UncertaintyAwareForecaster(nn.Module):
     def __init__(
         self,
@@ -43,7 +68,7 @@ class UncertaintyAwareForecaster(nn.Module):
             bidirectional=True,
         )
 
-        self.attention = Attention(hidden_size, bidirectional=True)
+        self.attention = StochasticAttention(hidden_size, bidirectional=True)
 
         decoder_hidden_dim = hidden_size * 2
         if self.rnn_type == "lstm":
