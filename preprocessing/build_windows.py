@@ -72,13 +72,13 @@ def save_chunk(out_dir, shard_idx, chunk_idx, shard_data):
                     file_name = os.path.basename(src_file)
                     dest_file = os.path.join(out_dir, file_name)
                     shutil.move(src_file, dest_file)
-                    os.sync() 
+                    os.sync()
                     time.sleep(2.0)
 
     except OSError as e:
         print(f"\nStaging Error: {e}")
         raise
-    
+
     return saved_any
 
 
@@ -111,7 +111,7 @@ def main():
     p.add_argument(
         "--batch_size",
         type=int,
-        default=32,
+        default=256,
     )
 
     args = p.parse_args()
@@ -164,6 +164,14 @@ def main():
 
     for batch_idx in range(total_batches):
         gc.collect()
+
+        done_marker = os.path.join(args.out_dir, f"part-{batch_idx:04d}.done")
+        if os.path.exists(done_marker):
+            print(
+                f"\n=== Skipping Global Batch {batch_idx+1}/{total_batches} (Already completed) ==="
+            )
+            continue
+
         start_idx = batch_idx * args.batch_size
         end_idx = start_idx + args.batch_size
         current_batch_ids = all_services_list[start_idx:end_idx]
@@ -171,6 +179,8 @@ def main():
         print(
             f"\n=== Global Batch {batch_idx+1}/{total_batches} ({len(current_batch_ids)} services) ==="
         )
+
+        batch_start_time = time.time()
 
         base_id_cols = DATASET_TABLES[base_table]["key_cols"]
         base_need_cols = list(
@@ -201,7 +211,9 @@ def main():
         ).collect()
 
         if bounds.height == 0 or bounds["min_t"][0] is None:
+            open(done_marker, "a").close()
             continue
+
         min_t, max_t = bounds["min_t"][0], bounds["max_t"][0]
 
         for t in needed_tables:
@@ -236,7 +248,7 @@ def main():
 
         for feat in feature_names:
             is_resource = "cpu" in feat.lower() or "mem" in feat.lower()
-            if is_resource and "diff" not in feat.lower():
+            if is_resource:
                 joined_lazy = joined_lazy.with_columns(pl.col(feat).clip(0.0, 1.0))
 
         sort_cols = list(
@@ -247,6 +259,7 @@ def main():
         gc.collect()
 
         if joined.height == 0:
+            open(done_marker, "a").close()
             continue
 
         shard_data = {"train": ([], [], []), "val": ([], [], []), "test": ([], [], [])}
@@ -304,8 +317,14 @@ def main():
                     shard_data[split_name][2].append(Ss)
 
         save_chunk(args.out_dir, batch_idx, 0, shard_data)
+
+        open(done_marker, "a").close()
+
         del joined, shard_data
         gc.collect()
+
+        batch_duration = time.time() - batch_start_time
+        print(f"--> Batch {batch_idx+1} completed in {batch_duration:.2f} seconds")
 
     print("\nAll global batches processed.")
 
