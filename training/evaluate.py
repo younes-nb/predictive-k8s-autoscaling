@@ -68,7 +68,10 @@ def forward_predict(
     outputs = model(x)
 
     if model_type == "uncertainty_aware":
-        return outputs[:, :, 0]
+        mu = outputs[:, :, 0]
+        log_var = outputs[:, :, 1]
+        sigma = torch.exp(0.5 * log_var)
+        return mu + sigma
     return outputs
 
 
