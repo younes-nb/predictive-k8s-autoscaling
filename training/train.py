@@ -121,15 +121,20 @@ def train(args):
     else:
         raise RuntimeError("Train dataset is empty.")
 
+    pin_memory = device.type == "cuda"
     train_loader = DataLoader(
         train_ds,
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=args.num_workers,
-        pin_memory=True,
+        pin_memory=pin_memory,
     )
     val_loader = DataLoader(
-        val_ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers
+        val_ds,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        pin_memory=pin_memory,
     )
 
     if args.model_type == "uncertainty_aware":
