@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from typing import Tuple, Dict, Any, List, Set, Optional
 import os
 
+
 @dataclass(frozen=True)
 class Paths:
     RAW_ROOT: str = "/dataset/raw"
@@ -23,9 +24,7 @@ class Paths:
 PATHS = Paths()
 
 
-def get_checkpoint_path(archetype_id: int = None) -> str:
-    if archetype_id is not None:
-        return os.path.join(PATHS.MODELS_DIR, f"model_arch_{archetype_id}.pt")
+def get_checkpoint_path() -> str:
     return os.path.join(PATHS.MODELS_DIR, "model_global.pt")
 
 
