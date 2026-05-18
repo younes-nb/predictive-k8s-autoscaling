@@ -2,49 +2,22 @@ from dataclasses import dataclass
 from typing import Tuple, Dict, Any, List, Set, Optional
 import os
 
-LOCAL_MODE = os.getenv("PIPELINE_ENV") == "local"
-LOCAL_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "local_data"))
-
-
 @dataclass(frozen=True)
 class Paths:
-    RAW_ROOT: str = f"{LOCAL_DIR}/raw" if LOCAL_MODE else "/dataset/raw"
-    PARQUET_ROOT: str = f"{LOCAL_DIR}/parquet" if LOCAL_MODE else "/dataset/parquet"
-    RAW_MSRESOURCE: str = (
-        f"{LOCAL_DIR}/raw/msresource" if LOCAL_MODE else "/dataset/raw/msresource"
-    )
-    PARQUET_MSRESOURCE: str = (
-        f"{LOCAL_DIR}/parquet/msresource"
-        if LOCAL_MODE
-        else "/dataset/parquet/msresource"
-    )
-    RAW_NODE: str = f"{LOCAL_DIR}/raw/node" if LOCAL_MODE else "/dataset/raw/node"
-    PARQUET_NODE: str = (
-        f"{LOCAL_DIR}/parquet/node" if LOCAL_MODE else "/dataset/parquet/node"
-    )
-    RAW_MSRTMCRE: str = (
-        f"{LOCAL_DIR}/raw/msrtmcre" if LOCAL_MODE else "/dataset/raw/msrtmcre"
-    )
-    PARQUET_MSRTMCRE: str = (
-        f"{LOCAL_DIR}/parquet/msrtmcre" if LOCAL_MODE else "/dataset/parquet/msrtmcre"
-    )
-    PARQUET_THRESHOLD_MSRESOURCE: str = (
-        f"{LOCAL_DIR}/threshold/msresource"
-        if LOCAL_MODE
-        else "/dataset/threshold/msresource"
-    )
-    PARQUET_THRESHOLD_MSRTMCRE: str = (
-        f"{LOCAL_DIR}/threshold/msrtmcre"
-        if LOCAL_MODE
-        else "/dataset/threshold/msrtmcre"
-    )
-    WINDOWS_DIR: str = f"{LOCAL_DIR}/windows" if LOCAL_MODE else "/dataset/windows"
-    MODELS_DIR: str = (
-        f"{LOCAL_DIR}/models" if LOCAL_MODE else "/proj/k8sautoscaledl-PG0/models"
-    )
-    LOGS_DIR: str = (
-        f"{LOCAL_DIR}/logs" if LOCAL_MODE else "/proj/k8sautoscaledl-PG0/logs"
-    )
+    RAW_ROOT: str = "/dataset/raw"
+    PARQUET_ROOT: str = "/dataset/parquet"
+    RAW_MSRESOURCE: str = "/dataset/raw/msresource"
+    PARQUET_MSRESOURCE: str = "/dataset/parquet/msresource"
+    RAW_NODE: str = "/dataset/raw/node"
+    PARQUET_NODE: str = "/dataset/parquet/node"
+    RAW_MSRTMCRE: str = "/dataset/raw/msrtmcre"
+    PARQUET_MSRTMCRE: str = "/dataset/parquet/msrtmcre"
+    PARQUET_THRESHOLD_MSRESOURCE: str = "/dataset/threshold/msresource"
+    PARQUET_THRESHOLD_MSRTMCRE: str = "/dataset/threshold/msrtmcre"
+    WINDOWS_DIR: str = "/dataset/windows"
+    MODELS_DIR: str = "/proj/k8sautoscaledl-PG0/models"
+    LOGS_DIR: str = "/proj/k8sautoscaledl-PG0/logs"
+    RESUME_STATE_FILE: str = "/proj/k8sautoscaledl-PG0/train_resume_state.pt"
 
 
 PATHS = Paths()
@@ -88,13 +61,18 @@ FEATURES: Dict[str, Dict[str, str]] = {
     "memory_utilization": {"table": "msresource", "column": "memory_utilization"},
     "node_cpu_utilization": {"table": "node", "column": "cpu_utilization"},
     "node_memory_utilization": {"table": "node", "column": "memory_utilization"},
-    "total_mcr": {"table": "msrtmcre", "column": "total_mcr"},
     "providerrpc_rt": {"table": "msrtmcre", "column": "providerrpc_rt"},
     "providerrpc_mcr": {"table": "msrtmcre", "column": "providerrpc_mcr"},
+    "consumerrpc_mcr": {"table": "msrtmcre", "column": "consumerrpc_mcr"},
     "http_rt": {"table": "msrtmcre", "column": "http_rt"},
     "http_mcr": {"table": "msrtmcre", "column": "http_mcr"},
     "providermq_rt": {"table": "msrtmcre", "column": "providermq_rt"},
     "providermq_mcr": {"table": "msrtmcre", "column": "providermq_mcr"},
+    "consumermq_mcr": {"table": "msrtmcre", "column": "consumermq_mcr"},
+    "writemc_mcr": {"table": "msrtmcre", "column": "writemc_mcr"},
+    "readmc_mcr": {"table": "msrtmcre", "column": "readmc_mcr"},
+    "writedb_mcr": {"table": "msrtmcre", "column": "writedb_mcr"},
+    "readdb_mcr": {"table": "msrtmcre", "column": "readdb_mcr"},
 }
 
 
@@ -120,8 +98,20 @@ FEATURE_SETS: Dict[str, Dict[str, Any]] = {
         "base_table": "msresource",
         "join_keys": {"msresource": ["nodeid"], "node": ["nodeid"]},
     },
-    "cpu_mem_traffic": {
-        "features": ["cpu_utilization", "memory_utilization", "total_mcr"],
+    "cpu_mem_mcr": {
+        "features": [
+            "cpu_utilization",
+            "memory_utilization",
+            "providerrpc_mcr",
+            "consumerrpc_mcr",
+            "providermq_mcr",
+            "consumermq_mcr",
+            "http_mcr",
+            "writemc_mcr",
+            "readmc_mcr",
+            "writedb_mcr",
+            "readdb_mcr",
+        ],
         "target": "cpu_utilization",
         "base_table": "msresource",
         "join_keys": {
@@ -216,14 +206,14 @@ class PreprocessingDefaults:
     TRAIN_FRAC: float = 0.7
     VAL_FRAC: float = 0.1
     SMOOTHING_WINDOW: int = 5
-    REPARTITION: int = 1 if LOCAL_MODE else 4
+    REPARTITION: int = 4
     TIME_COL: str = "timestamp_dt"
     ID_COLS: Tuple[str, ...] = ("msname", "msinstanceid")
     SERVICE_COL: str = "msname"
     FREQ: str = "1m"
-    MAX_SERVICES: Optional[int] = 5 if LOCAL_MODE else None
+    MAX_SERVICES: Optional[int] = None
     SUBSET_SEED: int = 42
-    FEATURE_SET: str = "cpu_mem"
+    FEATURE_SET: str = "cpu_mem_mcr"
 
 
 @dataclass(frozen=True)
@@ -231,13 +221,13 @@ class TrainingDefaults:
     HIDDEN_SIZE: int = 128
     NUM_LAYERS: int = 3
     DROPOUT: float = 0.3
-    BATCH_SIZE: int = 64 if LOCAL_MODE else 512
-    EPOCHS: int = 10
+    BATCH_SIZE: int = 512
+    EPOCHS: int = 1000
     LR: float = 0.00127
     GRAD_CLIP: float = 1.0
     WEIGHT_DECAY: float = 1e-4
     UNDER_PENALTY: float = 5.0
-    NUM_WORKERS: int = 2 if LOCAL_MODE else 8
+    NUM_WORKERS: int = 8
     SEED: int = 42
     LOG_INTERVAL: int = 2000
     USE_WEIGHTS: bool = True
@@ -249,7 +239,6 @@ class TrainingDefaults:
     INFERENCE_REPEATS: int = 100
     GLOBAL_THRESHOLD: bool = False
     BIDIRECTIONAL: bool = False
-    MODEL_TYPE: str = "uncertainty_aware"
 
 
 PREPROCESSING = PreprocessingDefaults()

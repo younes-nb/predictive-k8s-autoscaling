@@ -9,8 +9,6 @@ REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, os.pardir))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-os.environ["PIPELINE_ENV"] = "local"
-
 from config.defaults import PATHS, PREPROCESSING, TRAINING, tables_for_feature_set
 
 
@@ -57,9 +55,7 @@ def main():
 
     print(f"\n🚀 STARTING LOCAL LIGHTWEIGHT PIPELINE")
     print(f"Feature Set: {args.feature_set}")
-    print(
-        f"Local Data Root: {os.path.abspath(os.path.join(REPO_ROOT, 'local_data'))}"
-    )
+    print(f"Data Root: {PATHS.RAW_ROOT}")
 
     fetch_script = os.path.join(REPO_ROOT, "preprocessing", "fetch_traces.py")
     ingest_script = os.path.join(REPO_ROOT, "preprocessing", "ingest_traces_parquet.py")
