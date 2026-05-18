@@ -116,7 +116,7 @@ def load_resume_state(path):
     try:
         return torch.load(path, map_location="cpu")
     except Exception as exc:
-        sys.stderr.write(f"[WARN] Failed to load resume state: {exc}\n")
+        logging.warning("Failed to load resume state: %s", exc)
         return None
 
 
@@ -151,7 +151,10 @@ def train(args):
         current_hyperparams = sample_hyperparams(rng, used_keys)
 
     if current_hyperparams is None:
-        raise RuntimeError("Unable to select a unique hyperparameter set.")
+        raise RuntimeError(
+            "Unable to select a unique hyperparameter set after "
+            f"{HYPERPARAM_SAMPLE_ATTEMPTS} attempts. All combinations may be exhausted."
+        )
 
     apply_hyperparams(args, current_hyperparams)
 
