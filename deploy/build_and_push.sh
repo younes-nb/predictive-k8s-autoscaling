@@ -3,7 +3,10 @@
 REGISTRY="docker.io/younesnb"
 IMAGE_NAME="predictive-k8s-autoscaler"
 TAG="v1.0.0"
-DOCKERFILE_PATH="deploy/cpa/Dockerfile"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+DOCKERFILE_PATH="${SCRIPT_DIR}/cpa/Dockerfile"
+MODEL_PATH="${SCRIPT_DIR}/model.pt"
 FULL_IMAGE_NAME="$REGISTRY/$IMAGE_NAME:$TAG"
 
 GREEN='\033[0;32m'
@@ -12,19 +15,19 @@ NC='\033[0m'
 
 echo -e "${GREEN}Starting build process for $FULL_IMAGE_NAME...${NC}"
 
-if [ ! -f "model.pt" ]; then
-    echo -e "${RED}Error: model.pt not found in root directory!${NC}"
-    echo "Please ensure your trained model is named model.pt and located in the repo root."
+if [ ! -f "$MODEL_PATH" ]; then
+    echo -e "${RED}Error: model.pt not found in deploy directory!${NC}"
+    echo "Please ensure your trained model is named model.pt and located in deploy/."
     exit 1
 fi
 
-if [ ! -f "core/models.py" ]; then
+if [ ! -f "${REPO_ROOT}/core/models.py" ]; then
     echo -e "${RED}Error: core/models.py not found!${NC}"
     exit 1
 fi
 
 echo -e "${GREEN}Building Docker image...${NC}"
-docker build -t "$FULL_IMAGE_NAME" -f "$DOCKERFILE_PATH" .
+docker build -t "$FULL_IMAGE_NAME" -f "$DOCKERFILE_PATH" "$REPO_ROOT"
 
 if [ $? -ne 0 ]; then
     echo -e "${RED}Docker build failed.${NC}"

@@ -30,7 +30,7 @@ def run(cmd, title: str):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Run full pipeline (Uncertainty-Aware)")
+    ap = argparse.ArgumentParser(description="Run full pipeline")
     ap.add_argument("--start_date", default="0d0")
     ap.add_argument("--end_date", default="7d0")
     ap.add_argument(
@@ -41,11 +41,6 @@ def main():
     ap.add_argument("--skip_fetch", action="store_true")
     ap.add_argument("--skip_ingest", action="store_true")
     ap.add_argument("--skip_windows", action="store_true")
-    ap.add_argument(
-        "--model_type",
-        choices=["rnn", "uncertainty_aware"],
-        default="uncertainty_aware",
-    )
     ap.add_argument("--rnn_type", choices=["lstm", "gru"], default="lstm")
     ap.add_argument("--windows_dir", default=PATHS.WINDOWS_DIR)
     ap.add_argument("--skip_preprocessing", action="store_true")
@@ -121,8 +116,6 @@ def main():
             args.windows_dir,
             "--checkpoint_path",
             current_checkpoint,
-            "--model_type",
-            args.model_type,
             "--rnn_type",
             args.rnn_type,
             "--feature_set",
@@ -138,7 +131,7 @@ def main():
             cmd_train.append("--cpu")
 
         total_times["training"] = run(
-            cmd_train, f"Step 2: Training ({args.model_type})"
+            cmd_train, "Step 2: Training"
         )
 
     if not args.skip_testing:

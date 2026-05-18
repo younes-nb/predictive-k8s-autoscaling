@@ -22,7 +22,7 @@ if REPO_ROOT not in sys.path:
 
 from config.defaults import PATHS, TRAINING, PREPROCESSING
 from core.dataset import ShardedWindowsDataset
-from core.models import RNNForecaster, UncertaintyAwareForecaster
+from core.models import RNNForecaster
 
 
 def setup_logging(mode="test"):
@@ -61,18 +61,9 @@ def setup_logging(mode="test"):
 
 
 @torch.no_grad()
-def forward_predict(
-    model: torch.nn.Module, x: torch.Tensor, model_type: str
-) -> torch.Tensor:
+def forward_predict(model: torch.nn.Module, x: torch.Tensor) -> torch.Tensor:
     model.eval()
-    outputs = model(x)
-
-    if model_type == "uncertainty_aware":
-        mu = outputs[:, :, 0]
-        log_var = outputs[:, :, 1]
-        sigma = torch.exp(0.5 * log_var)
-        return mu + sigma
-    return outputs
+    return model(x)
 
 
 def evaluate(args):
@@ -96,7 +87,6 @@ def evaluate(args):
     checkpoint = torch.load(args.checkpoint_path, map_location=device)
     ckpt_args = checkpoint.get("args", {})
 
-    model_type = ckpt_args.get("model_type", TRAINING.MODEL_TYPE)
     hidden_size = ckpt_args.get("hidden_size", TRAINING.HIDDEN_SIZE)
     num_layers = ckpt_args.get("num_layers", TRAINING.NUM_LAYERS)
     dropout = ckpt_args.get("dropout", TRAINING.DROPOUT)
@@ -106,7 +96,6 @@ def evaluate(args):
     feature_set = ckpt_args.get("feature_set", PREPROCESSING.FEATURE_SET)
     bidirectional = ckpt_args.get("bidirectional", TRAINING.BIDIRECTIONAL)
 
-    logging.info(f"Detected Model Type: {model_type}")
     logging.info(
         f"RNN Architecture:   {rnn_type} (Layers: {num_layers}, Hidden: {hidden_size})"
     )
@@ -132,25 +121,15 @@ def evaluate(args):
         pin_memory=(device.type == "cuda"),
     )
 
-    if model_type == "uncertainty_aware":
-        model = UncertaintyAwareForecaster(
-            input_size=input_size,
-            hidden_size=hidden_size,
-            num_layers=num_layers,
-            dropout=dropout,
-            horizon=horizon,
-            rnn_type=rnn_type,
-        ).to(device)
-    else:
-        model = RNNForecaster(
-            input_size=input_size,
-            hidden_size=hidden_size,
-            num_layers=num_layers,
-            dropout=dropout,
-            horizon=horizon,
-            rnn_type=rnn_type,
-            bidirectional=bidirectional,
-        ).to(device)
+    model = RNNForecaster(
+        input_size=input_size,
+        hidden_size=hidden_size,
+        num_layers=num_layers,
+        dropout=dropout,
+        horizon=horizon,
+        rnn_type=rnn_type,
+        bidirectional=bidirectional,
+    ).to(device)
 
     model.load_state_dict(checkpoint["model_state_dict"])
 
@@ -166,7 +145,7 @@ def evaluate(args):
     for i, batch in enumerate(test_loader):
         x, y = batch[0].to(device), batch[1].to(device)
 
-        mu = forward_predict(model, x, model_type)
+        mu = forward_predict(model, x)
 
         y_last = x[:, -1, 0].cpu().numpy()
 
@@ -209,10 +188,10 @@ def evaluate(args):
     avg_inference_time_ms = (inference_time / total_samples) * 1000.0
 
     logging.info("\n=== Performance Metrics ===")
-    logging.info(f"Model: {model_type} ({rnn_type})")
+    logging.info(f"Model: {rnn_type}")
     logging.info("-" * 30)
-    logging.info(f"MSE:                   {mse:.6f}")
-    logging.info(f"MAE:                   {mae:.6f}")
+    logging.info(f"MSE:                   {mse:.4f}")
+    logging.info(f"MAE:                   {mae:.4f}")
     logging.info("-" * 30)
     logging.info(">>> SHADOWING DIAGNOSTICS <<<")
     logging.info(f"Skill Score (vs Naive): {skill_score:.4f}  (Ideal: > 0.1)")

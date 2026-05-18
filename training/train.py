@@ -2,6 +2,8 @@ import os
 import sys
 import argparse
 import logging
+import math
+import random
 from datetime import datetime
 
 try:
@@ -21,10 +23,10 @@ if REPO_ROOT not in sys.path:
 from config.defaults import PATHS, PREPROCESSING, TRAINING, DEFAULT_CHECKPOINT_PATH
 from core.dataset import ShardedWindowsDataset
 
-from core.models import RNNForecaster, UncertaintyAwareForecaster
+from core.models import RNNForecaster
 
 
-def setup_logging(mode="train"):
+def setup_logging(mode="train", log_path=None):
     os.makedirs(PATHS.LOGS_DIR, exist_ok=True)
 
     try:
@@ -34,16 +36,18 @@ def setup_logging(mode="train"):
         tehran_tz = None
 
     now = datetime.now(tehran_tz)
-    timestamp = now.strftime("%Y%m%d_%H%M%S")
-
-    log_filename = f"{mode}_{timestamp}.log"
-    log_path = os.path.join(PATHS.LOGS_DIR, log_filename)
+    if log_path is None:
+        timestamp = now.strftime("%Y%m%d_%H%M%S")
+        log_filename = f"{mode}_{timestamp}.log"
+        log_path = os.path.join(PATHS.LOGS_DIR, log_filename)
+    else:
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
 
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.INFO)
     root_logger.handlers = []
 
-    file_handler = logging.FileHandler(log_path)
+    file_handler = logging.FileHandler(log_path, mode="a")
     file_handler.setFormatter(
         logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
     )
@@ -57,20 +61,6 @@ def setup_logging(mode="train"):
     logging.info(f"Log file: {log_path}")
     logging.info(f"Timestamp (Tehran): {now}")
     return log_path
-
-
-def gaussian_nll_loss(outputs, target, under_penalty=5.0):
-    mu = outputs[:, :, 0]
-    log_var = outputs[:, :, 1]
-    var = torch.exp(log_var)
-
-    loss = 0.5 * (torch.exp(-log_var) * (target - mu) ** 2 + log_var)
-
-    under_mask = (mu < target).float()
-    asym_weight = 1.0 + (under_mask * (under_penalty - 1.0))
-
-    weighted_loss = loss * asym_weight
-    return weighted_loss.mean()
 
 
 def weighted_mse(preds, target, w=None, under_penalty=5.0):
@@ -87,13 +77,112 @@ def weighted_mse(preds, target, w=None, under_penalty=5.0):
     return (w * value_loss).sum() / w.sum().clamp_min(1e-6)
 
 
+HIDDEN_SIZE_OPTIONS = [64, 128, 256]
+NUM_LAYERS_OPTIONS = [1, 2, 3, 4]
+DROPOUT_RANGE = (0.1, 0.5)
+LR_RANGE = (5e-4, 5e-3)
+HYPERPARAM_SAMPLE_ATTEMPTS = 5000
+HYPERPARAM_CHECK_INTERVAL = 50
+LOSS_CHANGE_THRESHOLD = 1e-4
+
+
+def hyperparam_key(hyperparams):
+    return (
+        int(hyperparams["hidden_size"]),
+        int(hyperparams["num_layers"]),
+        round(float(hyperparams["dropout"]), 4),
+        round(float(hyperparams["lr"]), 8),
+    )
+
+
+def sample_hyperparams(rng, used_keys):
+    log_min = math.log10(LR_RANGE[0])
+    log_max = math.log10(LR_RANGE[1])
+    for _ in range(HYPERPARAM_SAMPLE_ATTEMPTS):
+        candidate = {
+            "hidden_size": rng.choice(HIDDEN_SIZE_OPTIONS),
+            "num_layers": rng.choice(NUM_LAYERS_OPTIONS),
+            "dropout": round(rng.uniform(*DROPOUT_RANGE), 4),
+            "lr": round(10 ** rng.uniform(log_min, log_max), 8),
+        }
+        key = hyperparam_key(candidate)
+        if key not in used_keys:
+            used_keys.add(key)
+            return candidate
+    return None
+
+
+def load_resume_state(path):
+    if not os.path.exists(path):
+        return None
+    try:
+        return torch.load(path, map_location="cpu")
+    except Exception as exc:
+        logging.warning("Failed to load resume state: %s", exc)
+        return None
+
+
+def save_resume_state(path, state):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    torch.save(state, path)
+
+
+def apply_hyperparams(args, hyperparams):
+    args.hidden_size = hyperparams["hidden_size"]
+    args.num_layers = hyperparams["num_layers"]
+    args.dropout = hyperparams["dropout"]
+    args.lr = hyperparams["lr"]
+
+
 def train(args):
-    log_path = setup_logging("train")
+    resume_state = load_resume_state(PATHS.RESUME_STATE_FILE)
+    if resume_state and "args" in resume_state:
+        args = argparse.Namespace(**resume_state["args"])
+
+    rng = random.Random(args.seed)
+    log_path = setup_logging(
+        "train", log_path=resume_state.get("log_path") if resume_state else None
+    )
+
+    used_keys = (
+        {tuple(k) for k in resume_state.get("used_hyperparams", [])}
+        if resume_state
+        else set()
+    )
+    current_hyperparams = resume_state.get("hyperparams") if resume_state else None
+    if current_hyperparams is not None:
+        used_keys.add(hyperparam_key(current_hyperparams))
+
+    if current_hyperparams is None:
+        current_hyperparams = sample_hyperparams(rng, used_keys)
+
+    if current_hyperparams is None:
+        raise RuntimeError(
+            "Unable to select a unique hyperparameter set after "
+            f"{HYPERPARAM_SAMPLE_ATTEMPTS} attempts. All combinations may be exhausted."
+        )
+
+    apply_hyperparams(args, current_hyperparams)
+
+    start_epoch = resume_state.get("epoch", 0) + 1 if resume_state else 1
+    best_score = resume_state.get("best_score", float("inf")) if resume_state else float("inf")
+    window_start_epoch = resume_state.get("window_start_epoch") if resume_state else None
+    window_start_loss = resume_state.get("window_start_loss") if resume_state else None
+
+    if resume_state:
+        logging.info("=== RESUMED TRAINING SESSION ===")
+        logging.info(
+            f"Resuming training from epoch {start_epoch} using {PATHS.RESUME_STATE_FILE}"
+        )
 
     logging.info("\n--- Configuration Inputs ---")
     for key, value in vars(args).items():
         logging.info(f"{key:<20}: {value}")
     logging.info("-" * 30)
+
+    if start_epoch > args.epochs:
+        logging.info("Resume state indicates training has already completed.")
+        return
 
     device = torch.device(
         "cuda" if torch.cuda.is_available() and not args.cpu else "cpu"
@@ -137,36 +226,33 @@ def train(args):
         pin_memory=pin_memory,
     )
 
-    if args.model_type == "uncertainty_aware":
-        model = UncertaintyAwareForecaster(
-            input_size=input_size,
-            hidden_size=args.hidden_size,
-            num_layers=args.num_layers,
-            dropout=args.dropout,
-            horizon=args.pred_horizon,
-            rnn_type=args.rnn_type,
-        ).to(device)
-    else:
-        model = RNNForecaster(
-            input_size=input_size,
-            hidden_size=args.hidden_size,
-            num_layers=args.num_layers,
-            dropout=args.dropout,
-            horizon=args.pred_horizon,
-            rnn_type=args.rnn_type,
-            bidirectional=args.bidirectional,
-        ).to(device)
+    model = RNNForecaster(
+        input_size=input_size,
+        hidden_size=args.hidden_size,
+        num_layers=args.num_layers,
+        dropout=args.dropout,
+        horizon=args.pred_horizon,
+        rnn_type=args.rnn_type,
+        bidirectional=args.bidirectional,
+    ).to(device)
 
     optimizer = torch.optim.Adam(
         model.parameters(), lr=args.lr, weight_decay=args.weight_decay
     )
 
+    if resume_state:
+        model_state = resume_state.get("model_state_dict")
+        if model_state:
+            model.load_state_dict(model_state)
+        optimizer_state = resume_state.get("optimizer_state_dict")
+        if optimizer_state:
+            optimizer.load_state_dict(optimizer_state)
+
     logging.info("\n--- Starting Training Loop ---")
-    best_score = float("inf")
 
     history = []
 
-    for epoch in range(1, args.epochs + 1):
+    for epoch in range(start_epoch, args.epochs + 1):
         start_time = datetime.now()
         model.train()
         train_loss_accum = 0.0
@@ -183,11 +269,7 @@ def train(args):
 
             optimizer.zero_grad()
             preds = model(x)
-
-            if args.model_type == "uncertainty_aware":
-                loss = gaussian_nll_loss(preds, y, under_penalty=args.under_penalty)
-            else:
-                loss = weighted_mse(preds, y, w, under_penalty=args.under_penalty)
+            loss = weighted_mse(preds, y, w, under_penalty=args.under_penalty)
 
             loss.backward()
 
@@ -212,11 +294,7 @@ def train(args):
 
                 x, y = x.to(device), y.to(device)
                 preds = model(x)
-
-                if args.model_type == "uncertainty_aware":
-                    loss = gaussian_nll_loss(preds, y, under_penalty=args.under_penalty)
-                else:
-                    loss = weighted_mse(preds, y, w, under_penalty=args.under_penalty)
+                loss = weighted_mse(preds, y, w, under_penalty=args.under_penalty)
 
                 val_loss_accum += loss.item() * x.size(0)
 
@@ -225,8 +303,8 @@ def train(args):
 
         log_msg = (
             f"Epoch {epoch}/{args.epochs} | "
-            f"Train Loss: {avg_train_loss:.6f} | "
-            f"Val Loss: {avg_val_loss:.6f} | "
+            f"Train Loss: {avg_train_loss:.4f} | "
+            f"Val Loss: {avg_val_loss:.4f} | "
             f"Time: {epoch_duration:.1f}s"
         )
 
@@ -249,8 +327,65 @@ def train(args):
             {"epoch": epoch, "train_loss": avg_train_loss, "val_loss": avg_val_loss}
         )
 
+        if window_start_loss is None:
+            window_start_epoch = epoch
+            window_start_loss = avg_train_loss
+
+        window_span = None
+        if window_start_epoch is not None:
+            window_span = epoch - window_start_epoch + 1
+
+        if (
+            window_span is not None
+            and window_span >= HYPERPARAM_CHECK_INTERVAL
+            and epoch < args.epochs
+        ):
+            delta = abs(avg_train_loss - window_start_loss)
+            if delta < LOSS_CHANGE_THRESHOLD:
+                new_hyperparams = sample_hyperparams(rng, used_keys)
+                if new_hyperparams is not None:
+                    logging.info(
+                        "No train loss change between epochs "
+                        f"{window_start_epoch} and {epoch} (Δ={delta:.4f}). "
+                        "Switching hyperparameters."
+                    )
+                    apply_hyperparams(args, new_hyperparams)
+                    model = RNNForecaster(
+                        input_size=input_size,
+                        hidden_size=args.hidden_size,
+                        num_layers=args.num_layers,
+                        dropout=args.dropout,
+                        horizon=args.pred_horizon,
+                        rnn_type=args.rnn_type,
+                        bidirectional=args.bidirectional,
+                    ).to(device)
+                    optimizer = torch.optim.Adam(
+                        model.parameters(), lr=args.lr, weight_decay=args.weight_decay
+                    )
+                    current_hyperparams = new_hyperparams
+                else:
+                    logging.info(
+                        "No unused hyperparameter combinations remain; keeping current settings."
+                    )
+            window_start_epoch = epoch + 1
+            window_start_loss = None
+
+        resume_payload = {
+            "epoch": epoch,
+            "args": vars(args),
+            "hyperparams": current_hyperparams,
+            "used_hyperparams": list(used_keys),
+            "best_score": best_score,
+            "window_start_epoch": window_start_epoch,
+            "window_start_loss": window_start_loss,
+            "log_path": log_path,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+        }
+        save_resume_state(PATHS.RESUME_STATE_FILE, resume_payload)
+
     logging.info("\n--- Training Completed ---")
-    logging.info(f"Best Validation Loss: {best_score:.6f}")
+    logging.info(f"Best Validation Loss: {best_score:.4f}")
     logging.info(f"Final Model Saved to: {args.checkpoint_path}")
     logging.info(f"Full Log Saved to:    {log_path}")
 
@@ -259,16 +394,11 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--windows_dir", required=True)
     p.add_argument("--checkpoint_path", default=DEFAULT_CHECKPOINT_PATH)
-    p.add_argument("--model_type", default="rnn", choices=["rnn", "uncertainty_aware"])
     p.add_argument("--use_weights", action="store_true")
     p.add_argument("--input_len", type=int, default=PREPROCESSING.INPUT_LEN)
     p.add_argument("--pred_horizon", type=int, default=PREPROCESSING.PRED_HORIZON)
-    p.add_argument("--hidden_size", type=int, default=TRAINING.HIDDEN_SIZE)
-    p.add_argument("--num_layers", type=int, default=TRAINING.NUM_LAYERS)
-    p.add_argument("--dropout", type=float, default=TRAINING.DROPOUT)
     p.add_argument("--batch_size", type=int, default=TRAINING.BATCH_SIZE)
     p.add_argument("--epochs", type=int, default=TRAINING.EPOCHS)
-    p.add_argument("--lr", type=float, default=TRAINING.LR)
     p.add_argument("--grad_clip", type=float, default=TRAINING.GRAD_CLIP)
     p.add_argument("--weight_decay", type=float, default=TRAINING.WEIGHT_DECAY)
     p.add_argument("--under_penalty", type=float, default=TRAINING.UNDER_PENALTY)
