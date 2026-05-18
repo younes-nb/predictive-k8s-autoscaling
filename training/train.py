@@ -77,7 +77,7 @@ def weighted_mse(preds, target, w=None, under_penalty=5.0):
     return (w * value_loss).sum() / w.sum().clamp_min(1e-6)
 
 
-HIDDEN_SIZE_OPTIONS = [64, 128, 256]
+HIDDEN_SIZE_OPTIONS = [32, 64, 128, 256]
 NUM_LAYERS_OPTIONS = [1, 2, 3, 4]
 DROPOUT_RANGE = (0.1, 0.5)
 LR_RANGE = (5e-4, 5e-3)
