@@ -144,7 +144,11 @@ def train(args):
         "train", log_path=resume_state.get("log_path") if resume_state else None
     )
 
-    used_keys = set(resume_state.get("used_hyperparams", [])) if resume_state else set()
+    used_keys = (
+        {tuple(k) for k in resume_state.get("used_hyperparams", [])}
+        if resume_state
+        else set()
+    )
     current_hyperparams = resume_state.get("hyperparams") if resume_state else None
     if current_hyperparams is not None:
         used_keys.add(hyperparam_key(current_hyperparams))
@@ -166,6 +170,7 @@ def train(args):
     window_start_loss = resume_state.get("window_start_loss") if resume_state else None
 
     if resume_state:
+        logging.info("=== RESUMED TRAINING SESSION ===")
         logging.info(
             f"Resuming training from epoch {start_epoch} using {PATHS.RESUME_STATE_FILE}"
         )
