@@ -79,6 +79,7 @@ HIDDEN_SIZE_OPTIONS = [64, 128, 256]
 NUM_LAYERS_OPTIONS = [1, 2, 3, 4]
 DROPOUT_RANGE = (0.1, 0.5)
 LR_RANGE = (5e-4, 5e-3)
+HYPERPARAM_SAMPLE_ATTEMPTS = 5000
 HYPERPARAM_CHECK_INTERVAL = 50
 LOSS_CHANGE_THRESHOLD = 1e-4
 
@@ -95,7 +96,7 @@ def hyperparam_key(hyperparams):
 def sample_hyperparams(rng, used_keys):
     log_min = math.log10(LR_RANGE[0])
     log_max = math.log10(LR_RANGE[1])
-    for _ in range(5000):
+    for _ in range(HYPERPARAM_SAMPLE_ATTEMPTS):
         candidate = {
             "hidden_size": rng.choice(HIDDEN_SIZE_OPTIONS),
             "num_layers": rng.choice(NUM_LAYERS_OPTIONS),
