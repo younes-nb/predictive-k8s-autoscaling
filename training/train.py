@@ -155,7 +155,7 @@ def train(args):
 
     apply_hyperparams(args, current_hyperparams)
 
-    start_epoch = int(resume_state.get("epoch", 0)) + 1 if resume_state else 1
+    start_epoch = resume_state.get("epoch", 0) + 1 if resume_state else 1
     best_score = float(resume_state.get("best_score", float("inf"))) if resume_state else float("inf")
     window_start_epoch = resume_state.get("window_start_epoch") if resume_state else None
     window_start_loss = resume_state.get("window_start_loss") if resume_state else None
@@ -317,13 +317,17 @@ def train(args):
             {"epoch": epoch, "train_loss": avg_train_loss, "val_loss": avg_val_loss}
         )
 
-        if window_start_loss is None and epoch % HYPERPARAM_CHECK_INTERVAL == 1:
+        if window_start_loss is None:
             window_start_epoch = epoch
             window_start_loss = avg_train_loss
 
+        window_span = None
+        if window_start_epoch is not None:
+            window_span = epoch - window_start_epoch + 1
+
         if (
-            epoch % HYPERPARAM_CHECK_INTERVAL == 0
-            and window_start_loss is not None
+            window_span is not None
+            and window_span >= HYPERPARAM_CHECK_INTERVAL
             and epoch < args.epochs
         ):
             delta = abs(avg_train_loss - window_start_loss)
@@ -349,12 +353,12 @@ def train(args):
                         model.parameters(), lr=args.lr, weight_decay=args.weight_decay
                     )
                     current_hyperparams = new_hyperparams
-                    window_start_epoch = epoch + 1
-                    window_start_loss = None
                 else:
                     logging.info(
                         "No unused hyperparameter combinations remain; keeping current settings."
                     )
+            window_start_epoch = epoch + 1
+            window_start_loss = None
 
         resume_payload = {
             "epoch": epoch,
