@@ -141,7 +141,7 @@ def train(args):
         "train", log_path=resume_state.get("log_path") if resume_state else None
     )
 
-    used_keys = set(tuple(k) for k in resume_state.get("used_hyperparams", [])) if resume_state else set()
+    used_keys = set(resume_state.get("used_hyperparams", [])) if resume_state else set()
     current_hyperparams = resume_state.get("hyperparams") if resume_state else None
     if current_hyperparams is not None:
         used_keys.add(hyperparam_key(current_hyperparams))
@@ -316,7 +316,7 @@ def train(args):
             {"epoch": epoch, "train_loss": avg_train_loss, "val_loss": avg_val_loss}
         )
 
-        if window_start_loss is None and (epoch - 1) % HYPERPARAM_CHECK_INTERVAL == 0:
+        if window_start_loss is None and epoch % HYPERPARAM_CHECK_INTERVAL == 1:
             window_start_epoch = epoch
             window_start_loss = avg_train_loss
 
