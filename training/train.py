@@ -40,6 +40,8 @@ def setup_logging(mode="train", log_path=None):
         timestamp = now.strftime("%Y%m%d_%H%M%S")
         log_filename = f"{mode}_{timestamp}.log"
         log_path = os.path.join(PATHS.LOGS_DIR, log_filename)
+    else:
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
 
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.INFO)
@@ -159,7 +161,7 @@ def train(args):
     apply_hyperparams(args, current_hyperparams)
 
     start_epoch = resume_state.get("epoch", 0) + 1 if resume_state else 1
-    best_score = float(resume_state.get("best_score", float("inf"))) if resume_state else float("inf")
+    best_score = resume_state.get("best_score", float("inf")) if resume_state else float("inf")
     window_start_epoch = resume_state.get("window_start_epoch") if resume_state else None
     window_start_loss = resume_state.get("window_start_loss") if resume_state else None
 
