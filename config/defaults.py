@@ -17,18 +17,14 @@ class Paths:
     PARQUET_THRESHOLD_MSRTMCRE: str = "/dataset/threshold/msrtmcre"
     WINDOWS_DIR: str = "/dataset/windows"
     MODELS_DIR: str = "/proj/k8sautoscaledl-PG0/models"
+    CHECKPOINT_PATH: str = os.path.join(MODELS_DIR, "model_global.pt")
     LOGS_DIR: str = "/proj/k8sautoscaledl-PG0/logs"
     RESUME_STATE_FILE: str = "/proj/k8sautoscaledl-PG0/train_resume_state.pt"
 
 
 PATHS = Paths()
 
-
-def get_checkpoint_path() -> str:
-    return os.path.join(PATHS.MODELS_DIR, "model_global.pt")
-
-
-DEFAULT_CHECKPOINT_PATH = get_checkpoint_path()
+DEFAULT_CHECKPOINT_PATH = PATHS.CHECKPOINT_PATH
 
 DATASET_TABLES: Dict[str, Dict[str, Any]] = {
     "msresource": {
@@ -223,6 +219,13 @@ class TrainingDefaults:
     BATCH_SIZE: int = 512
     EPOCHS: int = 1000
     LR: float = 0.00127
+    HIDDEN_SIZE_OPTIONS: Tuple[int, ...] = (32, 64, 128, 256)
+    NUM_LAYERS_OPTIONS: Tuple[int, ...] = (1, 2, 3, 4)
+    DROPOUT_RANGE: Tuple[float, float] = (0.1, 0.5)
+    LR_RANGE: Tuple[float, float] = (5e-4, 5e-3)
+    HYPERPARAM_SAMPLE_ATTEMPTS: int = 5000
+    HYPERPARAM_CHECK_INTERVAL: int = 50
+    LOSS_CHANGE_THRESHOLD: float = 1e-4
     GRAD_CLIP: float = 1.0
     WEIGHT_DECAY: float = 1e-4
     UNDER_PENALTY: float = 5.0
