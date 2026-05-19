@@ -317,7 +317,12 @@ def main():
         sort_cols = list(
             set(effective_id_cols).intersection(joined_lazy.collect_schema().names())
         ) + ["_t"]
-        joined = joined_lazy.drop_nulls(feature_names).sort(sort_cols).collect()
+
+        joined = (
+            joined_lazy.drop_nulls(feature_names)
+            .collect(engine="streaming")
+            .sort(sort_cols)
+        )
         del joined_lazy
         gc.collect()
 
