@@ -157,8 +157,12 @@ def train(args):
 
     start_epoch = resume_state.get("epoch", 0) + 1 if resume_state else 1
     best_score = resume_state.get("best_score", float("inf")) if resume_state else float("inf")
-    window_start_epoch = resume_state.get("window_start_epoch") if resume_state else None
-    window_start_loss = resume_state.get("window_start_loss") if resume_state else None
+    last_train_loss = resume_state.get("last_train_loss") if resume_state else None
+    no_change_streak = (
+        resume_state.get("no_change_streak", 0)
+        if resume_state and last_train_loss is not None
+        else 0
+    )
 
     if resume_state:
         logging.info("=== RESUMED TRAINING SESSION ===")
@@ -318,48 +322,46 @@ def train(args):
             {"epoch": epoch, "train_loss": avg_train_loss, "val_loss": avg_val_loss}
         )
 
-        if window_start_loss is None:
-            window_start_epoch = epoch
-            window_start_loss = avg_train_loss
-
-        window_span = None
-        if window_start_epoch is not None:
-            window_span = epoch - window_start_epoch + 1
-
-        if (
-            window_span is not None
-            and window_span >= TRAINING.HYPERPARAM_CHECK_INTERVAL
-            and epoch < args.epochs
-        ):
-            delta = abs(avg_train_loss - window_start_loss)
+        delta = None
+        if last_train_loss is not None:
+            delta = abs(avg_train_loss - last_train_loss)
             if delta < TRAINING.LOSS_CHANGE_THRESHOLD:
-                new_hyperparams = sample_hyperparams(rng, used_keys)
-                if new_hyperparams is not None:
-                    logging.info(
-                        "No train loss change between epochs "
-                        f"{window_start_epoch} and {epoch} (Δ={delta:.4f}). "
-                        "Switching hyperparameters."
-                    )
-                    apply_hyperparams(args, new_hyperparams)
-                    model = RNNForecaster(
-                        input_size=input_size,
-                        hidden_size=args.hidden_size,
-                        num_layers=args.num_layers,
-                        dropout=args.dropout,
-                        horizon=args.pred_horizon,
-                        rnn_type=args.rnn_type,
-                        bidirectional=args.bidirectional,
-                    ).to(device)
-                    optimizer = torch.optim.Adam(
-                        model.parameters(), lr=args.lr, weight_decay=args.weight_decay
-                    )
-                    current_hyperparams = new_hyperparams
-                else:
-                    logging.info(
-                        "No unused hyperparameter combinations remain; keeping current settings."
-                    )
-            window_start_epoch = epoch + 1
-            window_start_loss = None
+                no_change_streak += 1
+            else:
+                no_change_streak = 0
+
+        if no_change_streak >= TRAINING.HYPERPARAM_CHECK_INTERVAL and epoch < args.epochs:
+            new_hyperparams = sample_hyperparams(rng, used_keys)
+            if new_hyperparams is not None:
+                delta_display = f"{delta:.4f}" if delta is not None else "N/A"
+                logging.info(
+                    "Train loss change below threshold for "
+                    f"{no_change_streak} consecutive epochs (Δ={delta_display}). "
+                    "Switching hyperparameters."
+                )
+                apply_hyperparams(args, new_hyperparams)
+                model = RNNForecaster(
+                    input_size=input_size,
+                    hidden_size=args.hidden_size,
+                    num_layers=args.num_layers,
+                    dropout=args.dropout,
+                    horizon=args.pred_horizon,
+                    rnn_type=args.rnn_type,
+                    bidirectional=args.bidirectional,
+                ).to(device)
+                optimizer = torch.optim.Adam(
+                    model.parameters(), lr=args.lr, weight_decay=args.weight_decay
+                )
+                current_hyperparams = new_hyperparams
+                last_train_loss = None
+            else:
+                logging.info(
+                    "No unused hyperparameter combinations remain; keeping current settings."
+                )
+                last_train_loss = avg_train_loss
+            no_change_streak = 0
+        else:
+            last_train_loss = avg_train_loss
 
         resume_payload = {
             "epoch": epoch,
@@ -367,8 +369,8 @@ def train(args):
             "hyperparams": current_hyperparams,
             "used_hyperparams": list(used_keys),
             "best_score": best_score,
-            "window_start_epoch": window_start_epoch,
-            "window_start_loss": window_start_loss,
+            "last_train_loss": last_train_loss,
+            "no_change_streak": no_change_streak,
             "log_path": log_path,
             "model_state_dict": model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
