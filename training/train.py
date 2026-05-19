@@ -331,9 +331,10 @@ def train(args):
         if no_change_streak >= TRAINING.HYPERPARAM_CHECK_INTERVAL and epoch < args.epochs:
             new_hyperparams = sample_hyperparams(rng, used_keys)
             if new_hyperparams is not None:
+                delta_display = delta if delta is not None else 0.0
                 logging.info(
                     "Train loss change below threshold for "
-                    f"{no_change_streak} consecutive epochs (Δ={delta:.4f}). "
+                    f"{no_change_streak} consecutive epochs (Δ={delta_display:.4f}). "
                     "Switching hyperparameters."
                 )
                 apply_hyperparams(args, new_hyperparams)
