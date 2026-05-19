@@ -8,6 +8,7 @@ import gc
 import shutil
 import tempfile
 import time
+from typing import Optional, List
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, os.pardir))
@@ -31,16 +32,23 @@ def list_parquet_parts(parquet_dir: str):
 
 
 def build_table_agg(
-    df_or_lazy, time_col: str, id_cols: list, freq: str, feature_exprs: list
+    df_or_lazy,
+    time_col: str,
+    id_cols: list,
+    freq: str,
+    feature_exprs: list,
+    agg_exprs: Optional[List[pl.Expr]] = None,
 ):
     if isinstance(df_or_lazy, pl.DataFrame):
         df_or_lazy = df_or_lazy.lazy()
 
     df_or_lazy = df_or_lazy.with_columns(pl.col(time_col).cast(pl.Datetime))
 
-    agg_exprs = [
-        pl.col(raw_col).last().alias(feat_name) for feat_name, raw_col in feature_exprs
-    ]
+    if agg_exprs is None:
+        agg_exprs = [
+            pl.col(raw_col).last().alias(feat_name)
+            for feat_name, raw_col in feature_exprs
+        ]
 
     out = (
         df_or_lazy.with_columns(pl.col(time_col).dt.truncate(freq).alias("_t"))
@@ -127,10 +135,25 @@ def main():
     feature_names = list(spec["features"])
     target_feature = str(spec["target"])
     target_idx = feature_names.index(target_feature)
+    mcr_feats = [f for f in feature_names if "mcr" in f.lower()]
 
     needed_tables = sorted(list(tables_for_feature_set(args.feature_set)))
     table_exprs = table_to_feature_exprs(args.feature_set)
     base_table = FEATURES[target_feature]["table"]
+
+    use_service_level = args.feature_set == "cpu_mem_mcr"
+    effective_id_cols = [args.service_col] if use_service_level else list(args.id_cols)
+
+    def agg_exprs_for_table(table_name: str):
+        exprs = []
+        for feat_name, raw_col in table_exprs[table_name]:
+            if use_service_level and table_name == "msresource":
+                exprs.append(pl.col(raw_col).mean().alias(feat_name))
+            elif use_service_level and table_name == "msrtmcre":
+                exprs.append(pl.col(raw_col).sum().alias(feat_name))
+            else:
+                exprs.append(pl.col(raw_col).last().alias(feat_name))
+        return exprs
 
     table_parts: dict[str, list[str]] = {}
     for t in needed_tables:
@@ -159,6 +182,32 @@ def main():
     else:
         print(f"Processing all {len(all_services_list)} services globally")
 
+    mcr_minmax = {}
+    if use_service_level and mcr_feats and "msrtmcre" in needed_tables:
+        mcr_raw_cols = [
+            raw for feat, raw in table_exprs["msrtmcre"] if feat in mcr_feats
+        ]
+        lf_mcr = pl.scan_parquet(table_parts["msrtmcre"]).select(
+            [args.time_col, *effective_id_cols, *mcr_raw_cols]
+        )
+        mcr_agg = build_table_agg(
+            lf_mcr,
+            args.time_col,
+            effective_id_cols,
+            args.freq,
+            table_exprs["msrtmcre"],
+            agg_exprs=agg_exprs_for_table("msrtmcre"),
+        )
+        mcr_stats = mcr_agg.select(
+            *[pl.col(f).min().alias(f"{f}_min") for f in mcr_feats],
+            *[pl.col(f).max().alias(f"{f}_max") for f in mcr_feats],
+        ).collect(engine="streaming")
+        if mcr_stats.height > 0:
+            mcr_minmax = {
+                f: (float(mcr_stats[f"{f}_min"][0]), float(mcr_stats[f"{f}_max"][0]))
+                for f in mcr_feats
+            }
+
     os.makedirs(args.out_dir, exist_ok=True)
     total_batches = (len(all_services_list) + args.batch_size - 1) // args.batch_size
 
@@ -182,7 +231,7 @@ def main():
 
         batch_start_time = time.time()
 
-        base_id_cols = DATASET_TABLES[base_table]["key_cols"]
+        base_id_cols = effective_id_cols
         base_need_cols = list(
             set(
                 [
@@ -200,7 +249,12 @@ def main():
         )
 
         joined_lazy = build_table_agg(
-            lf_base, args.time_col, base_id_cols, args.freq, table_exprs[base_table]
+            lf_base,
+            args.time_col,
+            base_id_cols,
+            args.freq,
+            table_exprs[base_table],
+            agg_exprs=agg_exprs_for_table(base_table),
         )
 
         bounds = lf_base.select(
@@ -219,7 +273,7 @@ def main():
         for t in needed_tables:
             if t == base_table:
                 continue
-            t_id_cols = DATASET_TABLES[t]["key_cols"]
+            t_id_cols = effective_id_cols
             t_need_cols = list(
                 set([args.time_col, *t_id_cols, *[raw for _, raw in table_exprs[t]]])
             )
@@ -239,6 +293,7 @@ def main():
                 t_id_cols,
                 args.freq,
                 table_exprs[t],
+                agg_exprs=agg_exprs_for_table(t),
             )
 
             join_on = ["_t"] + FEATURE_SETS[args.feature_set].get("join_keys", {}).get(
@@ -246,13 +301,21 @@ def main():
             )
             joined_lazy = joined_lazy.join(lf_t_agg, on=join_on, how="left")
 
+        if mcr_minmax:
+            for f in mcr_feats:
+                fmin, fmax = mcr_minmax[f]
+                denom = (fmax - fmin) if (fmax - fmin) != 0 else 1.0
+                joined_lazy = joined_lazy.with_columns(
+                    ((pl.col(f) - fmin) / denom).clip(0.0, 1.0).alias(f)
+                )
+
         for feat in feature_names:
             is_resource = "cpu" in feat.lower() or "mem" in feat.lower()
             if is_resource:
                 joined_lazy = joined_lazy.with_columns(pl.col(feat).clip(0.0, 1.0))
 
         sort_cols = list(
-            set(args.id_cols).intersection(joined_lazy.collect_schema().names())
+            set(effective_id_cols).intersection(joined_lazy.collect_schema().names())
         ) + ["_t"]
         joined = joined_lazy.drop_nulls(feature_names).sort(sort_cols).collect()
         del joined_lazy
@@ -263,7 +326,7 @@ def main():
             continue
 
         shard_data = {"train": ([], [], []), "val": ([], [], []), "test": ([], [], [])}
-        group_cols = [c for c in args.id_cols if c in joined.columns]
+        group_cols = [c for c in effective_id_cols if c in joined.columns]
 
         for _, g in joined.group_by(group_cols, maintain_order=True):
             if g.height < args.input_len + args.pred_horizon:
