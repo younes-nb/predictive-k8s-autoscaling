@@ -158,9 +158,11 @@ def train(args):
     start_epoch = resume_state.get("epoch", 0) + 1 if resume_state else 1
     best_score = resume_state.get("best_score", float("inf")) if resume_state else float("inf")
     last_train_loss = resume_state.get("last_train_loss") if resume_state else None
-    no_change_streak = resume_state.get("no_change_streak", 0) if resume_state else 0
-    if last_train_loss is None:
-        no_change_streak = 0
+    no_change_streak = (
+        resume_state.get("no_change_streak", 0)
+        if resume_state and last_train_loss is not None
+        else 0
+    )
 
     if resume_state:
         logging.info("=== RESUMED TRAINING SESSION ===")
@@ -331,10 +333,10 @@ def train(args):
         if no_change_streak >= TRAINING.HYPERPARAM_CHECK_INTERVAL and epoch < args.epochs:
             new_hyperparams = sample_hyperparams(rng, used_keys)
             if new_hyperparams is not None:
-                delta_display = delta if delta is not None else 0.0
+                delta_display = f"{delta:.4f}" if delta is not None else "N/A"
                 logging.info(
                     "Train loss change below threshold for "
-                    f"{no_change_streak} consecutive epochs (Δ={delta_display:.4f}). "
+                    f"{no_change_streak} consecutive epochs (Δ={delta_display}). "
                     "Switching hyperparameters."
                 )
                 apply_hyperparams(args, new_hyperparams)
