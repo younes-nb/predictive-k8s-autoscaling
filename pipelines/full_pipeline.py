@@ -15,7 +15,6 @@ from config.defaults import (
     PREPROCESSING,
     FEATURE_SETS,
     TRAINING,
-    get_checkpoint_path,
 )
 
 
@@ -106,7 +105,7 @@ def main():
         run(base_cmd_w + ["--split", "train"], "Weights Generation (Train)")
         run(base_cmd_w + ["--split", "val"], "Weights Generation (Val)")
 
-    current_checkpoint = get_checkpoint_path(None)
+    current_checkpoint = PATHS.CHECKPOINT_PATH
 
     if not args.skip_training:
         cmd_train = [

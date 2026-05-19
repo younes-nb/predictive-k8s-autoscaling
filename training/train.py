@@ -77,15 +77,6 @@ def weighted_mse(preds, target, w=None, under_penalty=5.0):
     return (w * value_loss).sum() / w.sum().clamp_min(1e-6)
 
 
-HIDDEN_SIZE_OPTIONS = [32, 64, 128, 256]
-NUM_LAYERS_OPTIONS = [1, 2, 3, 4]
-DROPOUT_RANGE = (0.1, 0.5)
-LR_RANGE = (5e-4, 5e-3)
-HYPERPARAM_SAMPLE_ATTEMPTS = 5000
-HYPERPARAM_CHECK_INTERVAL = 50
-LOSS_CHANGE_THRESHOLD = 1e-4
-
-
 def hyperparam_key(hyperparams):
     return (
         int(hyperparams["hidden_size"]),
@@ -96,13 +87,13 @@ def hyperparam_key(hyperparams):
 
 
 def sample_hyperparams(rng, used_keys):
-    log_min = math.log10(LR_RANGE[0])
-    log_max = math.log10(LR_RANGE[1])
-    for _ in range(HYPERPARAM_SAMPLE_ATTEMPTS):
+    log_min = math.log10(TRAINING.LR_RANGE[0])
+    log_max = math.log10(TRAINING.LR_RANGE[1])
+    for _ in range(TRAINING.HYPERPARAM_SAMPLE_ATTEMPTS):
         candidate = {
-            "hidden_size": rng.choice(HIDDEN_SIZE_OPTIONS),
-            "num_layers": rng.choice(NUM_LAYERS_OPTIONS),
-            "dropout": round(rng.uniform(*DROPOUT_RANGE), 4),
+            "hidden_size": rng.choice(TRAINING.HIDDEN_SIZE_OPTIONS),
+            "num_layers": rng.choice(TRAINING.NUM_LAYERS_OPTIONS),
+            "dropout": round(rng.uniform(*TRAINING.DROPOUT_RANGE), 4),
             "lr": round(10 ** rng.uniform(log_min, log_max), 8),
         }
         key = hyperparam_key(candidate)
@@ -159,7 +150,7 @@ def train(args):
     if current_hyperparams is None:
         raise RuntimeError(
             "Unable to select a unique hyperparameter set after "
-            f"{HYPERPARAM_SAMPLE_ATTEMPTS} attempts. All combinations may be exhausted."
+            f"{TRAINING.HYPERPARAM_SAMPLE_ATTEMPTS} attempts. All combinations may be exhausted."
         )
 
     apply_hyperparams(args, current_hyperparams)
@@ -337,11 +328,11 @@ def train(args):
 
         if (
             window_span is not None
-            and window_span >= HYPERPARAM_CHECK_INTERVAL
+            and window_span >= TRAINING.HYPERPARAM_CHECK_INTERVAL
             and epoch < args.epochs
         ):
             delta = abs(avg_train_loss - window_start_loss)
-            if delta < LOSS_CHANGE_THRESHOLD:
+            if delta < TRAINING.LOSS_CHANGE_THRESHOLD:
                 new_hyperparams = sample_hyperparams(rng, used_keys)
                 if new_hyperparams is not None:
                     logging.info(
