@@ -110,8 +110,8 @@ FEATURE_SETS: Dict[str, Dict[str, Any]] = {
         "target": "cpu_utilization",
         "base_table": "msresource",
         "join_keys": {
-            "msresource": ["msname", "msinstanceid"],
-            "msrtmcre": ["msname", "msinstanceid"],
+            "msresource": ["msname"],
+            "msrtmcre": ["msname"],
         },
     },
     "threshold_analysis": {
