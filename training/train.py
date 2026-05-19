@@ -339,6 +339,7 @@ def train(args):
                     f"{no_change_streak} consecutive epochs (Δ={delta_display}). "
                     "Switching hyperparameters."
                 )
+                logging.info(f"New hyperparameters: {new_hyperparams}")
                 apply_hyperparams(args, new_hyperparams)
                 model = RNNForecaster(
                     input_size=input_size,
