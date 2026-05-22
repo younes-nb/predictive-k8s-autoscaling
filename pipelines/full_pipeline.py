@@ -3,6 +3,7 @@ import sys
 import time
 import argparse
 import subprocess
+import torch
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, os.pardir))
@@ -107,9 +108,24 @@ def main():
 
     current_checkpoint = PATHS.CHECKPOINT_PATH
 
+    gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 0
+
+    if args.cpu or gpu_count <= 1:
+        launcher_cmd = [sys.executable]
+        if gpu_count == 1 and not args.cpu:
+            print(
+                f"\n[INFO] Detected 1 GPU. Running with standard python script invocation."
+            )
+        elif gpu_count == 0 or args.cpu:
+            print(f"\n[INFO] Running strictly on CPU.")
+    else:
+        launcher_cmd = ["accelerate", "launch"]
+        print(
+            f"\n[INFO] Detected {gpu_count} GPUs! Accelerating via DistributedDataParallel (DDP)..."
+        )
+
     if not args.skip_training:
-        cmd_train = [
-            sys.executable,
+        cmd_train = launcher_cmd + [
             train_script,
             "--windows_dir",
             args.windows_dir,
@@ -126,16 +142,15 @@ def main():
         ]
         if TRAINING.USE_WEIGHTS:
             cmd_train.append("--use_weights")
+        if args.bidirectional:
+            cmd_train.append("--bidirectional")
         if args.cpu:
             cmd_train.append("--cpu")
 
-        total_times["training"] = run(
-            cmd_train, "Step 2: Training"
-        )
+        total_times["training"] = run(cmd_train, "Step 2: Training")
 
     if not args.skip_testing:
-        cmd_test = [
-            sys.executable,
+        cmd_test = launcher_cmd + [
             test_script,
             "--windows_dir",
             args.windows_dir,
