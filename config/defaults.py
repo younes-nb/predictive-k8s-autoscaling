@@ -229,17 +229,13 @@ class TrainingDefaults:
     GRAD_CLIP: float = 1.0
     WEIGHT_DECAY: float = 1e-4
     UNDER_PENALTY: float = 5.0
-    NUM_WORKERS: int = 8
     SEED: int = 42
-    LOG_INTERVAL: int = 2000
     USE_WEIGHTS: bool = True
     GAMMA: float = 20.0
     DELTA: float = 0.08
     THETA_MODE: str = "adaptive"
     THETA_BASE: float = 0.75
     THETA_MIN: float = 0.60
-    INFERENCE_REPEATS: int = 100
-    GLOBAL_THRESHOLD: bool = False
     BIDIRECTIONAL: bool = False
 
 

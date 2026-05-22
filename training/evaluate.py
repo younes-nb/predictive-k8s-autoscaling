@@ -3,6 +3,7 @@ import sys
 import argparse
 import logging
 import time
+import math
 import numpy as np
 from datetime import datetime
 from scipy.stats import pearsonr
@@ -14,6 +15,8 @@ except ImportError:
 
 import torch
 from torch.utils.data import DataLoader
+
+from accelerate import Accelerator
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, os.pardir))
@@ -56,34 +59,61 @@ def setup_logging(mode="test"):
 
     logging.info(f"=== {mode.upper()} SESSION STARTED ===")
     logging.info(f"Log file: {log_path}")
-    logging.info(f"Timestamp (Tehran): {now}")
+    logging.info(f"Timestamp: {now}")
     return log_path
 
 
-@torch.no_grad()
-def forward_predict(model: torch.nn.Module, x: torch.Tensor) -> torch.Tensor:
+def find_max_inference_batch_size(
+    model, input_size, args, device, starting_batch=16384
+):
+    batch_size = starting_batch
     model.eval()
-    return model(x)
+
+    while batch_size > 0:
+        try:
+            dummy_x = torch.randn(batch_size, args.input_len, input_size, device=device)
+            with torch.no_grad():
+                _ = model(dummy_x)
+
+            del dummy_x
+            torch.cuda.empty_cache()
+            return batch_size
+
+        except RuntimeError as e:
+            if "out of memory" in str(e).lower():
+                torch.cuda.empty_cache()
+                batch_size //= 2
+            else:
+                raise e
+
+    raise RuntimeError("Could not find a batch size that fits in memory.")
 
 
 def evaluate(args):
-    log_path = setup_logging("test")
+    accelerator = Accelerator(cpu=args.cpu)
+    device = accelerator.device
 
-    logging.info("\n--- Configuration Inputs ---")
-    for key, value in vars(args).items():
-        logging.info(f"{key:<20}: {value}")
-    logging.info("-" * 30)
-
-    device = torch.device(
-        "cuda" if torch.cuda.is_available() and not args.cpu else "cpu"
+    log_info = lambda msg: (
+        logging.info(msg) if accelerator.is_local_main_process else None
     )
-    logging.info(f"Device: {device}")
+
+    log_path = None
+    if accelerator.is_local_main_process:
+        log_path = setup_logging("test")
+
+    log_info("\n--- Configuration Inputs ---")
+    for key, value in vars(args).items():
+        log_info(f"{key:<20}: {value}")
+    log_info("-" * 30)
+    log_info(f"Device: {device} | Distributed Processes: {accelerator.num_processes}")
 
     if not os.path.exists(args.checkpoint_path):
-        logging.error(f"Checkpoint not found at {args.checkpoint_path}")
+        if accelerator.is_local_main_process:
+            logging.error(f"Checkpoint not found at {args.checkpoint_path}")
         return
 
-    logging.info(f"Loading checkpoint: {args.checkpoint_path}")
+    log_info(f"Loading checkpoint: {args.checkpoint_path}")
+
     checkpoint = torch.load(args.checkpoint_path, map_location=device)
     ckpt_args = checkpoint.get("args", {})
 
@@ -93,33 +123,24 @@ def evaluate(args):
     horizon = ckpt_args.get("pred_horizon", PREPROCESSING.PRED_HORIZON)
     rnn_type = ckpt_args.get("rnn_type", "lstm")
     input_len = ckpt_args.get("input_len", PREPROCESSING.INPUT_LEN)
-    feature_set = ckpt_args.get("feature_set", PREPROCESSING.FEATURE_SET)
     bidirectional = ckpt_args.get("bidirectional", TRAINING.BIDIRECTIONAL)
 
-    logging.info(
+    log_info(
         f"RNN Architecture:   {rnn_type} (Layers: {num_layers}, Hidden: {hidden_size})"
     )
 
-    logging.info("\n--- Loading Test Dataset ---")
+    log_info("\n--- Loading Test Dataset ---")
 
     test_ds = ShardedWindowsDataset(
         args.windows_dir, "test", input_len, horizon, use_weights=False
     )
-    logging.info(f"Test samples: {len(test_ds)}")
+    log_info(f"Test samples (Total): {len(test_ds)}")
 
     if len(test_ds) > 0:
         first_x, *_ = test_ds[0]
         input_size = first_x.shape[-1]
     else:
         input_size = checkpoint.get("input_size", 1)
-
-    test_loader = DataLoader(
-        test_ds,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=args.num_workers,
-        pin_memory=(device.type == "cuda"),
-    )
 
     model = RNNForecaster(
         input_size=input_size,
@@ -133,27 +154,60 @@ def evaluate(args):
 
     model.load_state_dict(checkpoint["model_state_dict"])
 
-    logging.info("\n--- Starting Inference ---")
+    if device.type != "cpu":
+        log_info("Tuning inference batch size to hardware limits...")
+        max_batch = find_max_inference_batch_size(model, input_size, args, device)
+
+        safe_batch_size = int(max_batch * 0.9)
+        safe_batch_size = 2 ** int(math.log2(max(1, safe_batch_size)))
+
+        log_info(f"Auto-selected per-GPU Inference Batch Size: {safe_batch_size}")
+        args.batch_size = safe_batch_size
+
+    system_cores = os.cpu_count() or 1
+    gpu_count = torch.cuda.device_count() or 1
+    optimal_workers = min(system_cores, 4 * gpu_count)
+    log_info(f"Dynamically set num_workers to {optimal_workers}")
+
+    test_loader = DataLoader(
+        test_ds,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=optimal_workers,
+        pin_memory=(device.type != "cpu"),
+    )
+
+    model, test_loader = accelerator.prepare(model, test_loader)
+
+    log_info("\n--- Starting Inference ---")
 
     all_preds = []
     all_trues = []
     all_lasts = []
 
+    model.eval()
     start_time = time.time()
     total_batches = len(test_loader)
 
     for i, batch in enumerate(test_loader):
-        x, y = batch[0].to(device), batch[1].to(device)
+        x, y = batch[0], batch[1]
 
-        mu = forward_predict(model, x)
+        with torch.no_grad():
+            mu = model(x)
 
-        y_last = x[:, -1, 0].cpu().numpy()
+        gathered_mu, gathered_y, gathered_x = accelerator.gather_for_metrics((mu, y, x))
 
-        all_preds.append(mu.cpu().numpy())
-        all_trues.append(y.cpu().numpy())
-        all_lasts.append(y_last)
+        if accelerator.is_local_main_process:
+            y_last = gathered_x[:, -1, 0].cpu().numpy()
 
-        print(f"Batch {i+1}/{total_batches} processed...", end="\r", flush=True)
+            all_preds.append(gathered_mu.cpu().numpy())
+            all_trues.append(gathered_y.cpu().numpy())
+            all_lasts.append(y_last)
+
+            print(f"Batch {i+1}/{total_batches} processed...", end="\r", flush=True)
+
+    if not accelerator.is_local_main_process:
+        return
 
     print(" " * 50, end="\r")
     inference_time = time.time() - start_time
@@ -218,7 +272,7 @@ if __name__ == "__main__":
     p.add_argument("--windows_dir", required=True)
     p.add_argument("--checkpoint_path", required=True)
     p.add_argument("--batch_size", type=int, default=TRAINING.BATCH_SIZE)
-    p.add_argument("--num_workers", type=int, default=TRAINING.NUM_WORKERS)
+    p.add_argument("--input_len", type=int, default=PREPROCESSING.INPUT_LEN)
     p.add_argument("--cpu", action="store_true", default=False)
 
     try:
