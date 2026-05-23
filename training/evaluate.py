@@ -221,21 +221,24 @@ def evaluate(args):
         logging.warning("No samples found in test set.")
         return
 
-    mse = np.mean((y_pred - y_true) ** 2)
-    mae = np.mean(np.abs(y_pred - y_true))
+    target_idx = horizon - 1 
+    
+    y_true_target = y_true[:, target_idx]
+    y_pred_target = y_pred[:, target_idx]
 
-    y_true_s1 = y_true[:, 0]
-    y_pred_s1 = y_pred[:, 0]
+    mse = np.mean((y_pred_target - y_true_target) ** 2)
+    mae = np.mean(np.abs(y_pred_target - y_true_target))
 
-    mse_naive = np.mean((y_true_s1 - y_last) ** 2)
+    mse_naive = np.mean((y_true_target - y_last) ** 2)
+    
     skill_score = 1.0 - (mse / mse_naive)
 
-    actual_dir = np.sign(y_true_s1 - y_last)
-    pred_dir = np.sign(y_pred_s1 - y_last)
+    actual_dir = np.sign(y_true_target - y_last)
+    pred_dir = np.sign(y_pred_target - y_last)
     mda = np.mean(actual_dir == pred_dir)
 
-    corr_0, _ = pearsonr(y_true_s1, y_pred_s1)
-    corr_1, _ = pearsonr(y_last, y_pred_s1)
+    corr_0, _ = pearsonr(y_true_target, y_pred_target)
+    corr_1, _ = pearsonr(y_last, y_pred_target)
 
     is_shadowing = (skill_score < 0.05) or (corr_1 > corr_0) or (mda < 0.55)
 
