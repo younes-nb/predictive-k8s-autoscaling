@@ -23,11 +23,9 @@ def compute_max_per_column(dataset, columns, batch_size):
     for batch in scanner.to_batches():
         for col in columns:
             value = pc.max(batch.column(col))
-            if value is None:
+            if not value.is_valid:
                 continue
             value_py = value.as_py()
-            if value_py is None:
-                continue
             current = max_values[col]
             max_values[col] = value_py if current is None else max(current, value_py)
     return max_values
@@ -55,7 +53,7 @@ def main():
         raise SystemExit(f"Parquet directory does not exist: {args.parquet_dir}")
 
     dataset = ds.dataset(args.parquet_dir, format="parquet")
-    if not dataset.files:
+    if len(dataset.files) == 0:
         raise SystemExit(f"No parquet files found under {args.parquet_dir}")
 
     mcr_columns = find_mcr_columns(dataset.schema)
