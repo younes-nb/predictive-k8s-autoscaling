@@ -1,5 +1,3 @@
-import subprocess
-import datetime
 import os
 import argparse
 import sys
@@ -8,8 +6,8 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from scipy.signal import medfilt
 import duckdb
-import pwlf
-import warnings
+import datetime
+import subprocess
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, os.pardir))
@@ -72,67 +70,55 @@ def run_ingestion():
 
 
 def analyze_microservice_arrays(x, y):
-    if len(x) < 8:
+    if len(x) < 10:
         return None, None, None, None, None, None
+
+    MIN_HPA_TARGET = 0.6
+    MAX_HPA_CEILING = 0.9
 
     sort_idx = np.argsort(x)
     x = x[sort_idx]
     y = y[sort_idx]
 
-    y_smoothed = medfilt(y, kernel_size=3)
-    y_rcmin = np.minimum.accumulate(y_smoothed[::-1])[::-1]
+    y_smoothed = medfilt(y, kernel_size=5)
 
-    baseline_idx = max(2, len(x) // 3)
-    baseline_rt = np.median(y_rcmin[:baseline_idx])
+    baseline_idx = max(3, len(x) // 3)
+    baseline_rt = np.median(y_smoothed[:baseline_idx])
 
-    if baseline_rt == 0 or np.isnan(baseline_rt):
+    if baseline_rt <= 0 or np.isnan(baseline_rt):
         return None, None, None, None, None, None
 
-    degradation_threshold = max(baseline_rt * 1.5, baseline_rt + 2.0)
-    max_rt = np.max(y_rcmin)
+    degradation_threshold = max(baseline_rt * 2.0, baseline_rt + 5.0)
 
-    if max_rt < degradation_threshold:
+    tail_idx = int(len(x) * 0.85)
+    tail_median = np.median(y_smoothed[tail_idx:])
+
+    if tail_median < degradation_threshold:
         max_cpu_observed = np.max(x)
-        if max_cpu_observed >= 0.50:
-            val = min(0.95, round(max_cpu_observed, 2))
+        if max_cpu_observed >= MIN_HPA_TARGET:
+            val = min(MAX_HPA_CEILING, round(max_cpu_observed, 2))
             return val, {"status": "Safe"}, x, y, baseline_rt, degradation_threshold
         return None, None, None, None, None, None
 
-    breach_idx = np.where(y_rcmin >= degradation_threshold)[0]
-    if len(breach_idx) == 0:
+    safe_indices = np.where(y_smoothed < degradation_threshold)[0]
+
+    if len(safe_indices) == 0:
         return None, None, None, None, None, None
-    first_breach_cpu = x[breach_idx[0]]
 
-    try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            my_pwlf = pwlf.PiecewiseLinFit(x, y_rcmin)
-            breakpoints = my_pwlf.fit(2)
-            knee = breakpoints[1]
-            slopes = my_pwlf.calc_slopes()
+    last_safe_idx = safe_indices[-1]
+    point_of_no_return_cpu = x[min(last_safe_idx + 1, len(x) - 1)]
 
-            slope1, slope2 = slopes[0], slopes[1]
+    raw_knee = point_of_no_return_cpu - 0.05
+    final_knee = max(MIN_HPA_TARGET, min(MAX_HPA_CEILING, raw_knee))
 
-            if slope2 > 0 and slope2 > slope1:
-                if knee < 0.30 and first_breach_cpu > 0.40:
-                    final_knee = max(0.30, first_breach_cpu - 0.10)
-                else:
-                    final_knee = max(0.30, knee)
-
-                if final_knee <= 0.95:
-                    return (
-                        round(final_knee, 2),
-                        {"status": "Saturated"},
-                        x,
-                        y,
-                        baseline_rt,
-                        degradation_threshold,
-                    )
-
-    except Exception:
-        pass
-
-    return None, None, None, None, None, None
+    return (
+        round(final_knee, 2),
+        {"status": "Saturated"},
+        x,
+        y,
+        baseline_rt,
+        degradation_threshold,
+    )
 
 
 def main():
@@ -153,14 +139,16 @@ def main():
     os.makedirs(Paths.LOGS_DIR, exist_ok=True)
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    log_file_path = os.path.join(Paths.LOGS_DIR, f"max_threshold_analysis_{timestamp}.log")
+    log_file_path = os.path.join(
+        Paths.LOGS_DIR, f"max_threshold_analysis_{timestamp}.log"
+    )
     dist_img_path = os.path.join(
         Paths.LOGS_DIR, f"threshold_distribution_{timestamp}.png"
     )
     exam_img_path = os.path.join(Paths.LOGS_DIR, f"saturation_examples_{timestamp}.png")
 
     sys.stdout = LoggerWriter(log_file_path)
-    
+
     print(f"🕒 Starting Analysis Run at {timestamp}")
     print(f"📂 Logs and Output will be saved to: {Paths.LOGS_DIR}\n")
 
@@ -195,16 +183,14 @@ def main():
     total_services = len(unique_msnames)
     print(f"🎯 Found {total_services} unique microservices to process.")
 
-    con.execute(
-        """
+    con.execute("""
         CREATE TABLE ms_aggregated (
             msname VARCHAR,
             cpu_bin DOUBLE,
             p95_rt DOUBLE,
             n_samples BIGINT
         )
-    """
-    )
+    """)
 
     total_batches = (total_services + args.batch_size - 1) // args.batch_size
     print(f"🔍 Phase 1b: Processing in {total_batches} batches to bypass OOM limits...")
@@ -261,7 +247,7 @@ def main():
     if os.path.exists(db_path):
         os.remove(db_path)
 
-    print("🔍 Phase 2: Piecewise Regression Analysis...")
+    print("🔍 Phase 2: Operational Bound Analysis...")
     results_data = []
     grouped = df.groupby("msname")
 
@@ -288,19 +274,21 @@ def main():
         mean_thresh = np.mean(thresholds)
 
         print("\n" + "=" * 40)
-        print("📊 HYBRID PWLF SATURATION RESULTS")
+        print("📊 CLAMPED OPERATIONAL SATURATION RESULTS")
         print("=" * 40)
         print(f"Services with Valid Knees:  {len(results_data)}")
         print(f"Calculated Mean MAX_CPU:    {mean_thresh:.2f}")
         print("=" * 40)
 
         plt.figure(figsize=(10, 6))
-        plt.hist(thresholds, bins=20, color="skyblue", edgecolor="black")
-        plt.axvline(
-            mean_thresh, color="red", linestyle="--", label=f"Mean: {mean_thresh:.2f}"
+        plt.hist(
+            thresholds, bins=15, range=(0.50, 0.85), color="coral", edgecolor="black"
         )
-        plt.title("Distribution of CPU Saturation (Operational Hybrid)")
-        plt.xlabel("CPU Utilization Breakpoint")
+        plt.axvline(
+            mean_thresh, color="blue", linestyle="--", label=f"Mean: {mean_thresh:.2f}"
+        )
+        plt.title("Distribution of CPU Saturation")
+        plt.xlabel("CPU Utilization")
         plt.ylabel("Microservice Count")
         plt.legend()
         plt.savefig(dist_img_path)
@@ -317,9 +305,9 @@ def main():
 
             fig, axes = plt.subplots(1, 3, figsize=(18, 5))
             examples = [
-                ("Low Threshold", min_ex),
+                ("Floor Threshold", min_ex),
                 ("Avg Threshold", avg_ex),
-                ("High Threshold", max_ex),
+                ("Ceiling Threshold", max_ex),
             ]
 
             for ax, (title_prefix, ex) in zip(axes, examples):
@@ -348,7 +336,7 @@ def main():
                 label_text = (
                     f"Max Safe CPU: {ex['threshold']}"
                     if ex["status"] == "Safe"
-                    else f"Saturation CPU: {ex['threshold']}"
+                    else f"Target CPU: {ex['threshold']}"
                 )
                 ax.axvline(
                     ex["threshold"],
@@ -369,7 +357,7 @@ def main():
             print(f"📈 Saved examples to {exam_img_path}")
 
     else:
-        print("❌ No saturation knees detected.")
+        print("❌ No saturation knees detected within operational boundaries.")
 
 
 if __name__ == "__main__":
