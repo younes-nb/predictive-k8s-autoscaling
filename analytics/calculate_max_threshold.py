@@ -77,6 +77,140 @@ def run_ingestion():
     print("✅ Ingestion complete.\n")
 
 
+def find_optimal_batch_size(
+    unique_msnames,
+    cpu_parquet_path,
+    rt_parquet_path,
+    temp_dir,
+    start_batch_size=16384,
+    min_batch_size=1,
+):
+    print("\n🔍 Discovering optimal batch size automatically...")
+
+    batch_size = min(start_batch_size, len(unique_msnames))
+
+    test_services = unique_msnames[:batch_size]
+
+    while batch_size >= min_batch_size:
+
+        db_path = os.path.join(
+            temp_dir,
+            f"batch_probe_{batch_size}.db",
+        )
+
+        con = None
+
+        try:
+            if os.path.exists(db_path):
+                os.remove(db_path)
+
+            print(f"🧪 Testing batch size: {batch_size}")
+
+            con = duckdb.connect(db_path)
+
+            con.execute("PRAGMA threads=8")
+            con.execute("PRAGMA memory_limit='20GB'")
+
+            batch = test_services[:batch_size]
+
+            msnames_sql_list = ", ".join([f"'{m}'" for m in batch])
+
+            probe_query = f"""
+            WITH cpu_data AS (
+                SELECT
+                    timestamp,
+                    msinstanceid,
+                    msname,
+
+                    ROUND(
+                        CASE
+                            WHEN cpu_utilization > 1.0
+                            THEN cpu_utilization / 100.0
+                            ELSE cpu_utilization
+                        END,
+                        2
+                    ) AS cpu_bin
+
+                FROM read_parquet('{cpu_parquet_path}')
+
+                WHERE msname IN ({msnames_sql_list})
+            ),
+
+            rt_data AS (
+                SELECT
+                    timestamp,
+                    msinstanceid,
+                    msname,
+
+                    (
+                        providerrpc_mcr +
+                        http_mcr +
+                        providermq_mcr
+                    ) AS total_mcr,
+
+                    (
+                        (providerrpc_rt * providerrpc_mcr) +
+                        (http_rt * http_mcr) +
+                        (providermq_rt * providermq_mcr)
+                    ) AS total_rt_sum
+
+                FROM read_parquet('{rt_parquet_path}')
+
+                WHERE msname IN ({msnames_sql_list})
+                  AND (
+                        providerrpc_mcr +
+                        http_mcr +
+                        providermq_mcr
+                      ) > 0
+            )
+
+            SELECT COUNT(*)
+
+            FROM cpu_data c
+
+            JOIN rt_data r
+                ON c.timestamp = r.timestamp
+                AND c.msinstanceid = r.msinstanceid
+                AND c.msname = r.msname
+            """
+
+            con.execute(probe_query).fetchone()
+
+            print(f"✅ Batch size {batch_size} succeeded")
+
+            con.close()
+
+            if os.path.exists(db_path):
+                os.remove(db_path)
+
+            print(f"\n✅ Selected optimal batch size: " f"{batch_size}\n")
+
+            return batch_size
+
+        except Exception as e:
+
+            print(f"❌ Batch size {batch_size} failed")
+            print(f"   Reason: {str(e)[:300]}")
+
+            try:
+                if con:
+                    con.close()
+            except:
+                pass
+
+            try:
+                if os.path.exists(db_path):
+                    os.remove(db_path)
+            except:
+                pass
+
+            batch_size = batch_size // 2
+
+    raise RuntimeError(
+        "Unable to find stable batch size. " "Even minimum batch size failed."
+    )
+
+
 def find_last_stable_cpu(
     x,
     y,
@@ -189,23 +323,20 @@ def main():
         default=None,
         help="Limit applied to total services",
     )
-
     parser.add_argument(
         "--skip_ingest",
         action="store_true",
     )
-
     parser.add_argument(
         "--temp_dir",
         type=str,
         default="/dataset/duckdb_temp",
     )
-
     parser.add_argument(
         "--batch_size",
         type=int,
-        default=50,
-        help="Number of microservices to join at once",
+        default=None,
+        help="Manual batch size override",
     )
 
     args = parser.parse_args()
@@ -293,9 +424,22 @@ def main():
         )
     """)
 
+    if args.batch_size is None:
+
+        args.batch_size = find_optimal_batch_size(
+            unique_msnames=unique_msnames,
+            cpu_parquet_path=cpu_parquet_path,
+            rt_parquet_path=rt_parquet_path,
+            temp_dir=args.temp_dir,
+        )
+
     total_batches = (total_services + args.batch_size - 1) // args.batch_size
 
-    print(f"🔍 Phase 1b: processing in " f"{total_batches} batches...")
+    print(
+        f"🔍 Phase 1b: Processing in "
+        f"{total_batches} batches "
+        f"(batch_size={args.batch_size})..."
+    )
 
     for i in range(0, total_services, args.batch_size):
 
