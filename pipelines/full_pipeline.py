@@ -51,6 +51,11 @@ def main():
         "--bidirectional", action="store_true", default=TRAINING.BIDIRECTIONAL
     )
     ap.add_argument(
+        "--probabilistic",
+        action="store_true",
+        default=TRAINING.PROBABILISTIC_TRAINING,
+    )
+    ap.add_argument(
         "--max_services",
         type=int,
         default=PREPROCESSING.MAX_SERVICES,
@@ -144,6 +149,8 @@ def main():
             cmd_train.append("--use_weights")
         if args.bidirectional:
             cmd_train.append("--bidirectional")
+        if args.probabilistic:
+            cmd_train.append("--probabilistic")
         if args.cpu:
             cmd_train.append("--cpu")
 
