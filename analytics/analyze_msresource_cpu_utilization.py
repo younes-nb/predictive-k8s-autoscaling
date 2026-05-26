@@ -2,7 +2,7 @@ import os
 import sys
 import glob
 import argparse
-import datetime
+from datetime import datetime
 
 import duckdb
 import numpy as np
@@ -114,7 +114,7 @@ def main():
     os.makedirs(args.out_dir, exist_ok=True)
     os.makedirs(args.temp_dir, exist_ok=True)
 
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     cpu_hist_path = os.path.join(
         args.out_dir, f"cpu_utilization_hist_{timestamp}.png"
     )
@@ -233,12 +233,12 @@ def main():
 
     print("📈 Correlation Summary")
     if len(lag1_vals):
-        avg_lag1 = float(np.mean(lag1_vals))
+        avg_lag1 = np.mean(lag1_vals)
         print(f"Avg corr(t, t+1):           {avg_lag1:.6f} (n={len(lag1_vals)})")
     else:
         print("Avg corr(t, t+1):           n/a (insufficient data)")
     if len(lagh_vals):
-        avg_lagh = float(np.mean(lagh_vals))
+        avg_lagh = np.mean(lagh_vals)
         print(
             f"Avg corr(t, t+{args.pred_horizon}): {avg_lagh:.6f} (n={len(lagh_vals)})"
         )
