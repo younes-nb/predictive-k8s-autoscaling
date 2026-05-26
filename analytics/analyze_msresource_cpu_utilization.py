@@ -234,9 +234,20 @@ def main():
     avg_lag1 = float(np.mean(lag1_vals)) if len(lag1_vals) else float("nan")
     avg_lagh = float(np.mean(lagh_vals)) if len(lagh_vals) else float("nan")
 
-    print("📈 Correlation summary")
-    print(f"Avg corr(t, t+1):           {avg_lag1:.6f}")
-    print(f"Avg corr(t, t+{args.pred_horizon}): {avg_lagh:.6f}")
+    print("📈 Correlation Summary")
+    if len(lag1_vals):
+        print(f"Avg corr(t, t+1):           {avg_lag1:.6f} (n={len(lag1_vals)})")
+    else:
+        print("Avg corr(t, t+1):           n/a (insufficient data)")
+    if len(lagh_vals):
+        print(
+            f"Avg corr(t, t+{args.pred_horizon}): {avg_lagh:.6f} "
+            f"(n={len(lagh_vals)})"
+        )
+    else:
+        print(
+            f"Avg corr(t, t+{args.pred_horizon}): n/a (insufficient data)"
+        )
 
     plot_corr_histogram(
         lag1_vals,
