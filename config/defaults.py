@@ -237,6 +237,8 @@ class TrainingDefaults:
     THETA_BASE: float = 0.75
     THETA_MIN: float = 0.60
     BIDIRECTIONAL: bool = False
+    PROBABILISTIC_TRAINING: bool = False
+    QUANTILES: Tuple[float, ...] = (0.5, 0.9, 0.95)
 
 
 PREPROCESSING = PreprocessingDefaults()

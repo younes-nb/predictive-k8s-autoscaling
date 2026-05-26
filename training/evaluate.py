@@ -124,6 +124,10 @@ def evaluate(args):
     rnn_type = ckpt_args.get("rnn_type", "lstm")
     input_len = ckpt_args.get("input_len", PREPROCESSING.INPUT_LEN)
     bidirectional = ckpt_args.get("bidirectional", TRAINING.BIDIRECTIONAL)
+    probabilistic = ckpt_args.get(
+        "probabilistic", TRAINING.PROBABILISTIC_TRAINING
+    )
+    quantiles = TRAINING.QUANTILES if probabilistic else None
 
     log_info(
         f"RNN Architecture:   {rnn_type} (Layers: {num_layers}, Hidden: {hidden_size})"
@@ -150,6 +154,7 @@ def evaluate(args):
         horizon=horizon,
         rnn_type=rnn_type,
         bidirectional=bidirectional,
+        quantiles=quantiles,
     ).to(device)
 
     model.load_state_dict(checkpoint["model_state_dict"])
@@ -189,11 +194,20 @@ def evaluate(args):
     start_time = time.time()
     total_batches = len(test_loader)
 
+    if probabilistic and quantiles:
+        median_idx = min(
+            range(len(quantiles)), key=lambda i: abs(quantiles[i] - 0.5)
+        )
+    else:
+        median_idx = None
+
     for i, batch in enumerate(test_loader):
         x, y = batch[0], batch[1]
 
         with torch.no_grad():
             mu = model(x)
+            if median_idx is not None:
+                mu = mu[..., median_idx]
 
         gathered_mu, gathered_y, gathered_x = accelerator.gather_for_metrics((mu, y, x))
 

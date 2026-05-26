@@ -5,6 +5,7 @@ import logging
 import math
 import random
 from datetime import datetime
+from typing import Optional, Sequence
 
 try:
     from zoneinfo import ZoneInfo
@@ -78,7 +79,30 @@ def weighted_mse(preds, target, w=None, under_penalty=5.0):
     return (w * value_loss).sum() / w.sum().clamp_min(1e-6)
 
 
-def find_max_batch_size(model, input_size, args, device, starting_batch=8192):
+class PinballLoss(nn.Module):
+    def __init__(self, quantiles: Sequence[float]):
+        super().__init__()
+        q = torch.tensor([float(q) for q in quantiles], dtype=torch.float32)
+        self.register_buffer("quantiles", q)
+
+    def forward(self, preds: torch.Tensor, target: torch.Tensor, w=None) -> torch.Tensor:
+        if preds.dim() != 3:
+            raise ValueError("PinballLoss expects preds with shape (batch, horizon, q).")
+        q = self.quantiles.view(1, 1, -1)
+        diff = target.unsqueeze(-1) - preds
+        loss = torch.maximum(q * diff, (1.0 - q) * (-diff))
+        per_sample = loss.mean(dim=(1, 2))
+
+        if w is None:
+            return per_sample.mean()
+
+        w = w.clamp(min=0.1, max=15.0)
+        return (w * per_sample).sum() / w.sum().clamp_min(1e-6)
+
+
+def find_max_batch_size(
+    model, input_size, args, device, loss_fn: Optional[nn.Module] = None, starting_batch=8192
+):
     batch_size = starting_batch
     model.train()
 
@@ -91,7 +115,10 @@ def find_max_batch_size(model, input_size, args, device, starting_batch=8192):
             optimizer_dummy.zero_grad()
 
             preds = model(dummy_x)
-            loss = ((preds - dummy_y) ** 2).mean()
+            if loss_fn is None:
+                loss = ((preds - dummy_y) ** 2).mean()
+            else:
+                loss = loss_fn(preds, dummy_y)
             loss.backward()
 
             optimizer_dummy.zero_grad()
@@ -169,6 +196,8 @@ def train(args):
     resume_state = load_resume_state(PATHS.RESUME_STATE_FILE)
     if resume_state and "args" in resume_state:
         args = argparse.Namespace(**resume_state["args"])
+    if not hasattr(args, "probabilistic"):
+        args.probabilistic = TRAINING.PROBABILISTIC_TRAINING
 
     rng = random.Random(args.seed)
 
@@ -247,6 +276,9 @@ def train(args):
     else:
         raise RuntimeError("Train dataset is empty.")
 
+    quantiles = TRAINING.QUANTILES
+    pinball_loss = PinballLoss(quantiles).to(device) if args.probabilistic else None
+
     model = RNNForecaster(
         input_size=input_size,
         hidden_size=args.hidden_size,
@@ -255,12 +287,13 @@ def train(args):
         horizon=args.pred_horizon,
         rnn_type=args.rnn_type,
         bidirectional=args.bidirectional,
+        quantiles=quantiles if args.probabilistic else None,
     ).to(device)
 
 
     if device.type != "cpu":
         log_info("Tuning per-GPU batch size to hardware limits...")
-        max_batch = find_max_batch_size(model, input_size, args, device)
+        max_batch = find_max_batch_size(model, input_size, args, device, pinball_loss)
 
         safe_batch_size = int(max_batch * 0.8)
         safe_batch_size = 2 ** int(math.log2(max(1, safe_batch_size)))
@@ -326,7 +359,10 @@ def train(args):
 
             optimizer.zero_grad()
             preds = model(x)
-            loss = weighted_mse(preds, y, w, under_penalty=args.under_penalty)
+            if args.probabilistic:
+                loss = pinball_loss(preds, y, w)
+            else:
+                loss = weighted_mse(preds, y, w, under_penalty=args.under_penalty)
 
             accelerator.backward(loss)
 
@@ -354,7 +390,10 @@ def train(args):
                     w = None
 
                 preds = model(x)
-                loss = weighted_mse(preds, y, w, under_penalty=args.under_penalty)
+                if args.probabilistic:
+                    loss = pinball_loss(preds, y, w)
+                else:
+                    loss = weighted_mse(preds, y, w, under_penalty=args.under_penalty)
 
                 val_loss_accum += loss.item() * x.size(0)
                 val_samples_seen += x.size(0)
@@ -423,6 +462,7 @@ def train(args):
                     horizon=args.pred_horizon,
                     rnn_type=args.rnn_type,
                     bidirectional=args.bidirectional,
+                    quantiles=quantiles if args.probabilistic else None,
                 ).to(device)
 
                 new_optimizer = torch.optim.Adam(
@@ -482,6 +522,11 @@ if __name__ == "__main__":
     p.add_argument("--feature_set", default=PREPROCESSING.FEATURE_SET)
     p.add_argument(
         "--bidirectional", action="store_true", default=TRAINING.BIDIRECTIONAL
+    )
+    p.add_argument(
+        "--probabilistic",
+        action="store_true",
+        default=TRAINING.PROBABILISTIC_TRAINING,
     )
 
     try:
