@@ -89,8 +89,6 @@ def find_optimal_batch_size(
 
     batch_size = min(start_batch_size, len(unique_msnames))
 
-    test_services = unique_msnames[:batch_size]
-
     while batch_size >= min_batch_size:
 
         db_path = os.path.join(
@@ -111,7 +109,7 @@ def find_optimal_batch_size(
             con.execute("PRAGMA threads=8")
             con.execute("PRAGMA memory_limit='20GB'")
 
-            batch = test_services[:batch_size]
+            batch = unique_msnames[:batch_size]
 
             msnames_sql_list = ", ".join([f"'{m}'" for m in batch])
 
@@ -120,48 +118,20 @@ def find_optimal_batch_size(
                 SELECT
                     timestamp,
                     msinstanceid,
-                    msname,
-
-                    ROUND(
-                        CASE
-                            WHEN cpu_utilization > 1.0
-                            THEN cpu_utilization / 100.0
-                            ELSE cpu_utilization
-                        END,
-                        2
-                    ) AS cpu_bin
-
+                    msname
                 FROM read_parquet('{cpu_parquet_path}')
-
                 WHERE msname IN ({msnames_sql_list})
+                LIMIT 100000
             ),
 
             rt_data AS (
                 SELECT
                     timestamp,
                     msinstanceid,
-                    msname,
-
-                    (
-                        providerrpc_mcr +
-                        http_mcr +
-                        providermq_mcr
-                    ) AS total_mcr,
-
-                    (
-                        (providerrpc_rt * providerrpc_mcr) +
-                        (http_rt * http_mcr) +
-                        (providermq_rt * providermq_mcr)
-                    ) AS total_rt_sum
-
+                    msname
                 FROM read_parquet('{rt_parquet_path}')
-
                 WHERE msname IN ({msnames_sql_list})
-                  AND (
-                        providerrpc_mcr +
-                        http_mcr +
-                        providermq_mcr
-                      ) > 0
+                LIMIT 100000
             )
 
             SELECT COUNT(*)
@@ -172,6 +142,8 @@ def find_optimal_batch_size(
                 ON c.timestamp = r.timestamp
                 AND c.msinstanceid = r.msinstanceid
                 AND c.msname = r.msname
+
+            LIMIT 1
             """
 
             con.execute(probe_query).fetchone()
@@ -206,9 +178,7 @@ def find_optimal_batch_size(
 
             batch_size = batch_size // 2
 
-    raise RuntimeError(
-        "Unable to find stable batch size. " "Even minimum batch size failed."
-    )
+    raise RuntimeError("Unable to find stable batch size.")
 
 
 def find_last_stable_cpu(
