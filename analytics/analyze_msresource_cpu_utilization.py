@@ -231,18 +231,16 @@ def main():
     lag1_vals = corr_df["corr_lag1"].dropna().to_numpy()
     lagh_vals = corr_df["corr_lag_h"].dropna().to_numpy()
 
-    avg_lag1 = float(np.mean(lag1_vals)) if len(lag1_vals) else float("nan")
-    avg_lagh = float(np.mean(lagh_vals)) if len(lagh_vals) else float("nan")
-
     print("📈 Correlation Summary")
     if len(lag1_vals):
+        avg_lag1 = float(np.mean(lag1_vals))
         print(f"Avg corr(t, t+1):           {avg_lag1:.6f} (n={len(lag1_vals)})")
     else:
         print("Avg corr(t, t+1):           n/a (insufficient data)")
     if len(lagh_vals):
+        avg_lagh = float(np.mean(lagh_vals))
         print(
-            f"Avg corr(t, t+{args.pred_horizon}): {avg_lagh:.6f} "
-            f"(n={len(lagh_vals)})"
+            f"Avg corr(t, t+{args.pred_horizon}): {avg_lagh:.6f} (n={len(lagh_vals)})"
         )
     else:
         print(
