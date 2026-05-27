@@ -185,9 +185,11 @@ def main():
     log(f"Computing histogram with {args.bins} bins ...")
     hist_df = con.execute(f"""
         SELECT
-            LEAST(
-                width_bucket(LEAST(GREATEST(cpu_util, 0.0), 1.0), 0.0, 1.0, {args.bins}),
-                {args.bins}
+            CAST(
+                1 + LEAST(
+                    {args.bins} - 1,
+                    FLOOR(LEAST(GREATEST(cpu_util, 0.0), 1.0) * {args.bins})
+                ) AS INTEGER
             ) AS bucket,
             COUNT(*) AS count
         FROM ms_agg
