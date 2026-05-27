@@ -16,6 +16,15 @@ if REPO_ROOT not in sys.path:
 from config.defaults import Paths, PREPROCESSING
 
 
+def log(msg: str) -> None:
+    """Log progress to stdout with timestamps.
+
+    Always enabled (per request).
+    """
+
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}", flush=True)
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Analyze msresource CPU utilization with OOM-safe DuckDB queries."
@@ -84,12 +93,12 @@ def plot_cpu_histogram(bin_edges, counts, out_path):
     plt.grid(axis="y", alpha=0.3)
     plt.tight_layout()
     plt.savefig(out_path)
-    print(f"📈 CPU utilization histogram saved to {out_path}")
+    log(f"CPU utilization histogram saved to {out_path}")
 
 
 def plot_corr_histogram(values, title, out_path):
     if len(values) == 0:
-        print(f"⚠️  No correlation values available for {title}.")
+        log(f"No correlation values available for {title}.")
         return
 
     plt.figure(figsize=(10, 6))
@@ -100,7 +109,7 @@ def plot_corr_histogram(values, title, out_path):
     plt.grid(axis="y", alpha=0.3)
     plt.tight_layout()
     plt.savefig(out_path)
-    print(f"📈 Correlation histogram saved to {out_path}")
+    log(f"Correlation histogram saved to {out_path}")
 
 
 def main():
@@ -129,6 +138,7 @@ def main():
     if os.path.exists(db_path):
         os.remove(db_path)
 
+    log("Connecting to DuckDB ...")
     con = duckdb.connect(db_path)
     con.execute(f"PRAGMA threads={args.threads}")
     con.execute(f"PRAGMA memory_limit='{args.memory_limit}'")
@@ -141,6 +151,8 @@ def main():
     END
     """
 
+    log(f"Reading parquet files from: {parquet_glob}")
+    log("Creating aggregated view ms_agg ...")
     con.execute(
         f"""
         CREATE TEMP VIEW ms_agg AS
@@ -154,6 +166,7 @@ def main():
         """
     )
 
+    log("Computing average CPU across microservices ...")
     avg_df = con.execute(
         """
         SELECT
@@ -177,32 +190,39 @@ def main():
     print(f"Avg CPU across MSs:    {avg_across_ms:.6f}")
     print("=" * 50 + "\n")
 
+    # DuckDB doesn't support Postgres' width_bucket(). Use histogram() instead.
+    log(f"Computing histogram with {args.bins} bins ...")
     hist_df = con.execute(
         f"""
         SELECT
-            width_bucket(
+            UNNEST(histogram(
                 LEAST(GREATEST(cpu_util, 0.0), 1.0),
-                0.0,
-                1.0,
                 {args.bins}
-            ) AS bin,
-            COUNT(*) AS count
+            )) AS count
         FROM ms_agg
         WHERE cpu_util IS NOT NULL
-        GROUP BY bin
-        ORDER BY bin
         """
     ).fetchdf()
 
     bin_edges = np.linspace(0.0, 1.0, args.bins + 1)
-    counts = np.zeros(args.bins, dtype=int)
-    for _, row in hist_df.iterrows():
-        bin_idx = int(row["bin"])
-        if 1 <= bin_idx <= args.bins:
-            counts[bin_idx - 1] = int(row["count"])
+    counts = hist_df["count"].to_numpy(dtype=int)
+
+    # Defensive: ensure counts matches the number of bins
+    if len(counts) != args.bins:
+        log(
+            f"Warning: histogram returned {len(counts)} counts, expected {args.bins}. Padding/truncating."
+        )
+        counts = np.pad(
+            counts,
+            (0, max(0, args.bins - len(counts))),
+            constant_values=0,
+        )[: args.bins]
 
     plot_cpu_histogram(bin_edges, counts, cpu_hist_path)
 
+    log(
+        f"Computing lag correlations (lag1 and lag{args.pred_horizon}) per microservice ..."
+    )
     corr_df = con.execute(
         f"""
         WITH lagged AS (
@@ -258,9 +278,11 @@ def main():
         corr_lag_h_path,
     )
 
+    log("Closing DuckDB connection ...")
     con.close()
     if os.path.exists(db_path):
         os.remove(db_path)
+    log("Done.")
 
 
 if __name__ == "__main__":
