@@ -56,13 +56,13 @@ def parse_args():
     parser.add_argument(
         "--memory_limit",
         type=str,
-        default="8GB",
+        default="32GB",
         help="DuckDB memory limit (e.g. 4GB, 16GB).",
     )
     parser.add_argument(
         "--threads",
         type=int,
-        default=8,
+        default=16,
         help="DuckDB execution threads.",
     )
     parser.add_argument(
@@ -124,12 +124,8 @@ def main():
     os.makedirs(args.temp_dir, exist_ok=True)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    cpu_hist_path = os.path.join(
-        args.out_dir, f"cpu_utilization_hist_{timestamp}.png"
-    )
-    corr_lag1_path = os.path.join(
-        args.out_dir, f"cpu_corr_lag1_{timestamp}.png"
-    )
+    cpu_hist_path = os.path.join(args.out_dir, f"cpu_utilization_hist_{timestamp}.png")
+    corr_lag1_path = os.path.join(args.out_dir, f"cpu_corr_lag1_{timestamp}.png")
     corr_lag_h_path = os.path.join(
         args.out_dir, f"cpu_corr_lag{args.pred_horizon}_{timestamp}.png"
     )
@@ -153,8 +149,7 @@ def main():
 
     log(f"Reading parquet files from: {parquet_glob}")
     log("Creating aggregated view ms_agg ...")
-    con.execute(
-        f"""
+    con.execute(f"""
         CREATE TEMP VIEW ms_agg AS
         SELECT
             COALESCE(timestamp_dt, to_timestamp(timestamp / 1000.0)) AS ts,
@@ -163,12 +158,10 @@ def main():
         FROM read_parquet('{parquet_glob}')
         WHERE msname IS NOT NULL
         GROUP BY ts, msname
-        """
-    )
+        """)
 
     log("Computing average CPU across microservices ...")
-    avg_df = con.execute(
-        """
+    avg_df = con.execute("""
         SELECT
             AVG(ms_mean) AS avg_across_ms,
             COUNT(*) AS ms_count
@@ -177,8 +170,7 @@ def main():
             FROM ms_agg
             GROUP BY msname
         )
-        """
-    ).fetchdf()
+        """).fetchdf()
 
     avg_across_ms = avg_df["avg_across_ms"].iloc[0]
     ms_count = int(avg_df["ms_count"].iloc[0])
@@ -190,41 +182,34 @@ def main():
     print(f"Avg CPU across MSs:    {avg_across_ms:.6f}")
     print("=" * 50 + "\n")
 
-    # DuckDB doesn't support Postgres' width_bucket(). Use histogram() instead.
     log(f"Computing histogram with {args.bins} bins ...")
-    hist_df = con.execute(
-        f"""
+    hist_df = con.execute(f"""
         SELECT
-            UNNEST(histogram(
-                LEAST(GREATEST(cpu_util, 0.0), 1.0),
+            LEAST(
+                width_bucket(LEAST(GREATEST(cpu_util, 0.0), 1.0), 0.0, 1.0, {args.bins}),
                 {args.bins}
-            )) AS count
+            ) AS bucket,
+            COUNT(*) AS count
         FROM ms_agg
         WHERE cpu_util IS NOT NULL
-        """
-    ).fetchdf()
+        GROUP BY bucket
+        ORDER BY bucket
+        """).fetchdf()
 
     bin_edges = np.linspace(0.0, 1.0, args.bins + 1)
-    counts = hist_df["count"].to_numpy(dtype=int)
 
-    # Defensive: ensure counts matches the number of bins
-    if len(counts) != args.bins:
-        log(
-            f"Warning: histogram returned {len(counts)} counts, expected {args.bins}. Padding/truncating."
-        )
-        counts = np.pad(
-            counts,
-            (0, max(0, args.bins - len(counts))),
-            constant_values=0,
-        )[: args.bins]
+    counts = np.zeros(args.bins, dtype=int)
+    for _, row in hist_df.iterrows():
+        idx = int(row["bucket"]) - 1  # convert 1-based → 0-based
+        if 0 <= idx < args.bins:
+            counts[idx] = int(row["count"])
 
     plot_cpu_histogram(bin_edges, counts, cpu_hist_path)
 
     log(
         f"Computing lag correlations (lag1 and lag{args.pred_horizon}) per microservice ..."
     )
-    corr_df = con.execute(
-        f"""
+    corr_df = con.execute(f"""
         WITH lagged AS (
             SELECT
                 msname,
@@ -245,8 +230,7 @@ def main():
             corr(cpu_util, cpu_lag_h) AS corr_lag_h
         FROM lagged
         GROUP BY msname
-        """
-    ).fetchdf()
+        """).fetchdf()
 
     lag1_vals = corr_df["corr_lag1"].dropna().to_numpy()
     lagh_vals = corr_df["corr_lag_h"].dropna().to_numpy()
@@ -263,9 +247,7 @@ def main():
             f"Avg corr(t, t+{args.pred_horizon}): {avg_lagh:.6f} (n={len(lagh_vals)})"
         )
     else:
-        print(
-            f"Avg corr(t, t+{args.pred_horizon}): n/a (insufficient data)"
-        )
+        print(f"Avg corr(t, t+{args.pred_horizon}): n/a (insufficient data)")
 
     plot_corr_histogram(
         lag1_vals,
