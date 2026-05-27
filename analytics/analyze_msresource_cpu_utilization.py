@@ -193,6 +193,7 @@ def main():
         SELECT
             CAST(
                 CASE
+                    WHEN cpu_clamped <= 0.0 THEN 1
                     WHEN cpu_clamped >= 1.0 THEN {args.bins}
                     ELSE 1 + FLOOR(cpu_clamped * {args.bins})
                 END AS INTEGER
