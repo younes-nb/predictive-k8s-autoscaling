@@ -184,14 +184,22 @@ def main():
 
     log(f"Computing histogram with {args.bins} bins ...")
     hist_df = con.execute(f"""
+        WITH clamped AS (
+            SELECT
+                LEAST(GREATEST(cpu_util, 0.0), 1.0) AS cpu_clamped
+            FROM ms_agg
+            WHERE cpu_util IS NOT NULL
+        )
         SELECT
-            LEAST(
-                width_bucket(LEAST(GREATEST(cpu_util, 0.0), 1.0), 0.0, 1.0, {args.bins}),
-                {args.bins}
+            CAST(
+                CASE
+                    WHEN cpu_clamped <= 0.0 THEN 1
+                    WHEN cpu_clamped >= 1.0 THEN {args.bins}
+                    ELSE LEAST({args.bins}, 1 + FLOOR(cpu_clamped * {args.bins}))
+                END AS INTEGER
             ) AS bucket,
             COUNT(*) AS count
-        FROM ms_agg
-        WHERE cpu_util IS NOT NULL
+        FROM clamped
         GROUP BY bucket
         ORDER BY bucket
         """).fetchdf()
