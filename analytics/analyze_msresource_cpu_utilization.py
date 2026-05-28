@@ -358,7 +358,10 @@ def main():
         bin_range=corr_range,
     )
 
-    log("Computing average correlations for horizons t+1..t+30 ...")
+    log(
+        "Computing average correlations for horizons "
+        f"t+1..t+{DEFAULT_CORR_HORIZON_MAX} ..."
+    )
     horizons = list(range(1, DEFAULT_CORR_HORIZON_MAX + 1))
     avg_corrs = []
     for horizon in horizons:
@@ -383,7 +386,7 @@ def main():
             """,
             [horizon],
         ).fetchdf()
-        avg_corr = avg_corr_df["avg_corr"].iloc[0]
+        avg_corr = avg_corr_df["avg_corr"].iloc[0] if not avg_corr_df.empty else np.nan
         avg_corrs.append(avg_corr if avg_corr is not None else np.nan)
 
     plot_avg_corr_by_horizon(horizons, avg_corrs, corr_avg_path)
