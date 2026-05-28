@@ -132,6 +132,7 @@ def plot_avg_corr_by_horizon(horizons, avg_corrs, out_path):
         log("No horizon correlation data available.")
         return
 
+    horizons = np.asarray(horizons, dtype=int)
     avg_corrs = np.asarray(avg_corrs, dtype=float)
     valid_mask = np.isfinite(avg_corrs)
     if not np.any(valid_mask):
@@ -139,7 +140,7 @@ def plot_avg_corr_by_horizon(horizons, avg_corrs, out_path):
         return
 
     plt.figure(figsize=(10, 6))
-    plt.plot(horizons, avg_corrs, marker="o", color="teal")
+    plt.plot(horizons[valid_mask], avg_corrs[valid_mask], marker="o", color="teal")
     plt.title("Average Correlation by Horizon")
     plt.xlabel("Horizon (t+k)")
     plt.ylabel("Average Correlation")
