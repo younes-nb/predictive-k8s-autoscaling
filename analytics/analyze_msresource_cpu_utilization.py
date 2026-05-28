@@ -15,6 +15,10 @@ if REPO_ROOT not in sys.path:
 
 from config.defaults import Paths, PREPROCESSING
 
+DEFAULT_CORR_BINS = 30
+DEFAULT_CORR_RANGE = (-1.0, 1.0)
+DEFAULT_CORR_HORIZON_MAX = 30
+
 
 def log(msg: str) -> None:
     """Log progress to stdout with timestamps.
@@ -102,7 +106,14 @@ def plot_cpu_histogram(bin_edges, counts, out_path):
     log(f"CPU utilization histogram saved to {out_path}")
 
 
-def plot_corr_histogram(values, title, out_path, y_max=None, bins=30, bin_range=None):
+def plot_corr_histogram(
+    values,
+    title,
+    out_path,
+    y_max=None,
+    bins=DEFAULT_CORR_BINS,
+    bin_range=DEFAULT_CORR_RANGE,
+):
     if len(values) == 0:
         log(f"No correlation values available for {title}.")
         return
@@ -309,8 +320,8 @@ def main():
     else:
         print(f"Avg corr(t, t+{args.pred_horizon}): n/a (insufficient data)")
 
-    corr_bins = 30
-    corr_range = (-1.0, 1.0)
+    corr_bins = DEFAULT_CORR_BINS
+    corr_range = DEFAULT_CORR_RANGE
     lag1_counts = (
         np.histogram(lag1_vals, bins=corr_bins, range=corr_range)[0]
         if len(lag1_vals)
@@ -322,7 +333,7 @@ def main():
         else np.array([])
     )
     y_max = None
-    if len(lag1_counts) or len(lagh_counts):
+    if len(lag1_counts) > 0 or len(lagh_counts) > 0:
         y_max = max(
             lag1_counts.max() if len(lag1_counts) else 0,
             lagh_counts.max() if len(lagh_counts) else 0,
@@ -348,7 +359,7 @@ def main():
     )
 
     log("Computing average correlations for horizons t+1..t+30 ...")
-    horizons = list(range(1, 31))
+    horizons = list(range(1, DEFAULT_CORR_HORIZON_MAX + 1))
     avg_corrs = []
     for horizon in horizons:
         avg_corr_df = con.execute(
