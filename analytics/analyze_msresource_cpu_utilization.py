@@ -351,12 +351,13 @@ def main():
     horizons = list(range(1, 31))
     avg_corrs = []
     for horizon in horizons:
-        avg_corr_df = con.execute(f"""
+        avg_corr_df = con.execute(
+            """
             WITH lagged AS (
                 SELECT
                     msname,
                     cpu_util,
-                    lag(cpu_util, {horizon}) OVER (
+                    lag(cpu_util, ?) OVER (
                         PARTITION BY msname
                         ORDER BY ts
                     ) AS cpu_lag
@@ -368,7 +369,9 @@ def main():
                 FROM lagged
                 GROUP BY msname
             )
-            """).fetchdf()
+            """,
+            [horizon],
+        ).fetchdf()
         avg_corr = avg_corr_df["avg_corr"].iloc[0]
         avg_corrs.append(avg_corr if avg_corr is not None else np.nan)
 
