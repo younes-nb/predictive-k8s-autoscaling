@@ -15,6 +15,10 @@ if REPO_ROOT not in sys.path:
 
 from config.defaults import Paths, PREPROCESSING
 
+DEFAULT_CORR_BINS = 30
+DEFAULT_CORR_RANGE = (-1.0, 1.0)
+DEFAULT_CORR_HORIZON_MAX = 30
+
 
 def log(msg: str) -> None:
     """Log progress to stdout with timestamps.
@@ -46,6 +50,12 @@ def parse_args():
         type=int,
         default=50,
         help="Number of bins for CPU utilization histogram.",
+    )
+    parser.add_argument(
+        "--cpu_lower_bound",
+        type=float,
+        default=None,
+        help="Optional CPU utilization lower bound; values below are excluded.",
     )
     parser.add_argument(
         "--temp_dir",
@@ -96,13 +106,29 @@ def plot_cpu_histogram(bin_edges, counts, out_path):
     log(f"CPU utilization histogram saved to {out_path}")
 
 
-def plot_corr_histogram(values, title, out_path):
+def plot_corr_histogram(
+    values,
+    title,
+    out_path,
+    y_max=None,
+    bins=DEFAULT_CORR_BINS,
+    bin_range=DEFAULT_CORR_RANGE,
+):
     if len(values) == 0:
         log(f"No correlation values available for {title}.")
         return
 
     plt.figure(figsize=(10, 6))
-    plt.hist(values, bins=30, color="orchid", edgecolor="black", alpha=0.7)
+    plt.hist(
+        values,
+        bins=bins,
+        range=bin_range,
+        color="orchid",
+        edgecolor="black",
+        alpha=0.7,
+    )
+    if y_max is not None:
+        plt.ylim(0, y_max)
     plt.title(title)
     plt.xlabel("Correlation")
     plt.ylabel("Microservice Count")
@@ -110,6 +136,29 @@ def plot_corr_histogram(values, title, out_path):
     plt.tight_layout()
     plt.savefig(out_path)
     log(f"Correlation histogram saved to {out_path}")
+
+
+def plot_avg_corr_by_horizon(horizons, avg_corrs, out_path):
+    if len(horizons) == 0:
+        log("No horizon correlation data available.")
+        return
+
+    horizons = np.asarray(horizons, dtype=int)
+    avg_corrs = np.asarray(avg_corrs, dtype=float)
+    valid_mask = np.isfinite(avg_corrs)
+    if not np.any(valid_mask):
+        log("No valid average correlations available to plot.")
+        return
+
+    plt.figure(figsize=(10, 6))
+    plt.plot(horizons[valid_mask], avg_corrs[valid_mask], marker="o", color="teal")
+    plt.title("Average Correlation by Horizon")
+    plt.xlabel("Horizon (t+k)")
+    plt.ylabel("Average Correlation")
+    plt.grid(axis="y", alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(out_path)
+    log(f"Average correlation-by-horizon plot saved to {out_path}")
 
 
 def main():
@@ -129,6 +178,7 @@ def main():
     corr_lag_h_path = os.path.join(
         args.out_dir, f"cpu_corr_lag{args.pred_horizon}_{timestamp}.png"
     )
+    corr_avg_path = os.path.join(args.out_dir, f"cpu_corr_horizons_{timestamp}.png")
 
     db_path = os.path.join(args.temp_dir, f"msresource_cpu_{timestamp}.duckdb")
     if os.path.exists(db_path):
@@ -160,6 +210,16 @@ def main():
         GROUP BY ts, msname
         """)
 
+    log("Creating filtered view ms_filtered ...")
+    if args.cpu_lower_bound is None:
+        con.execute("CREATE TEMP VIEW ms_filtered AS SELECT * FROM ms_agg")
+    else:
+        log(f"Applying CPU lower bound: {args.cpu_lower_bound}")
+        con.execute(
+            "CREATE TEMP VIEW ms_filtered AS SELECT * FROM ms_agg WHERE cpu_util >= ?",
+            [args.cpu_lower_bound],
+        )
+
     log("Computing average CPU across microservices ...")
     avg_df = con.execute("""
         SELECT
@@ -167,7 +227,7 @@ def main():
             COUNT(*) AS ms_count
         FROM (
             SELECT msname, AVG(cpu_util) AS ms_mean
-            FROM ms_agg
+            FROM ms_filtered
             GROUP BY msname
         )
         """).fetchdf()
@@ -179,7 +239,10 @@ def main():
     print("📊 MSRESOURCE CPU UTILIZATION SUMMARY")
     print("=" * 50)
     print(f"Microservices counted: {ms_count}")
-    print(f"Avg CPU across MSs:    {avg_across_ms:.6f}")
+    if avg_across_ms is None or np.isnan(avg_across_ms):
+        print("Avg CPU across MSs:    n/a (insufficient data)")
+    else:
+        print(f"Avg CPU across MSs:    {avg_across_ms:.6f}")
     print("=" * 50 + "\n")
 
     log(f"Computing histogram with {args.bins} bins ...")
@@ -187,7 +250,7 @@ def main():
         WITH clamped AS (
             SELECT
                 LEAST(GREATEST(cpu_util, 0.0), 1.0) AS cpu_clamped
-            FROM ms_agg
+            FROM ms_filtered
             WHERE cpu_util IS NOT NULL
         )
         SELECT
@@ -230,7 +293,7 @@ def main():
                     PARTITION BY msname
                     ORDER BY ts
                 ) AS cpu_lag_h
-            FROM ms_agg
+            FROM ms_filtered
         )
         SELECT
             msname,
@@ -257,16 +320,79 @@ def main():
     else:
         print(f"Avg corr(t, t+{args.pred_horizon}): n/a (insufficient data)")
 
+    corr_bins = DEFAULT_CORR_BINS
+    corr_range = DEFAULT_CORR_RANGE
+    lag1_counts = (
+        np.histogram(lag1_vals, bins=corr_bins, range=corr_range)[0]
+        if len(lag1_vals)
+        else np.array([])
+    )
+    lagh_counts = (
+        np.histogram(lagh_vals, bins=corr_bins, range=corr_range)[0]
+        if len(lagh_vals)
+        else np.array([])
+    )
+    y_max = None
+    if len(lag1_counts) > 0 or len(lagh_counts) > 0:
+        y_max = max(
+            lag1_counts.max() if len(lag1_counts) else 0,
+            lagh_counts.max() if len(lagh_counts) else 0,
+        )
+        if y_max == 0:
+            y_max = None
+
     plot_corr_histogram(
         lag1_vals,
         "Correlation Distribution: t vs t+1",
         corr_lag1_path,
+        y_max=y_max,
+        bins=corr_bins,
+        bin_range=corr_range,
     )
     plot_corr_histogram(
         lagh_vals,
         f"Correlation Distribution: t vs t+{args.pred_horizon}",
         corr_lag_h_path,
+        y_max=y_max,
+        bins=corr_bins,
+        bin_range=corr_range,
     )
+
+    log(
+        "Computing average correlations for horizons "
+        f"t+1..t+{DEFAULT_CORR_HORIZON_MAX} ..."
+    )
+    horizons = list(range(1, DEFAULT_CORR_HORIZON_MAX + 1))
+    avg_corrs = []
+    for horizon in horizons:
+        avg_corr_df = con.execute(
+            """
+            WITH lagged AS (
+                SELECT
+                    msname,
+                    cpu_util,
+                    lag(cpu_util, ?) OVER (
+                        PARTITION BY msname
+                        ORDER BY ts
+                    ) AS cpu_lag
+                FROM ms_filtered
+            )
+            SELECT AVG(corr_val) AS avg_corr
+            FROM (
+                SELECT msname, corr(cpu_util, cpu_lag) AS corr_val
+                FROM lagged
+                GROUP BY msname
+            )
+            """,
+            [horizon],
+        ).fetchdf()
+        if avg_corr_df.empty:
+            avg_corrs.append(np.nan)
+        else:
+            avg_corr = avg_corr_df["avg_corr"].iloc[0]
+            avg_corrs.append(avg_corr if avg_corr is not None else np.nan)
+
+    plot_avg_corr_by_horizon(horizons, avg_corrs, corr_avg_path)
 
     log("Closing DuckDB connection ...")
     con.close()
