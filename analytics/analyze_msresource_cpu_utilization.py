@@ -386,8 +386,11 @@ def main():
             """,
             [horizon],
         ).fetchdf()
-        avg_corr = avg_corr_df["avg_corr"].iloc[0] if not avg_corr_df.empty else np.nan
-        avg_corrs.append(avg_corr if avg_corr is not None else np.nan)
+        if avg_corr_df.empty:
+            avg_corrs.append(np.nan)
+        else:
+            avg_corr = avg_corr_df["avg_corr"].iloc[0]
+            avg_corrs.append(avg_corr if avg_corr is not None else np.nan)
 
     plot_avg_corr_by_horizon(horizons, avg_corrs, corr_avg_path)
 
