@@ -228,7 +228,7 @@ class TrainingDefaults:
     LOSS_CHANGE_THRESHOLD: float = 1e-4
     GRAD_CLIP: float = 1.0
     WEIGHT_DECAY: float = 1e-4
-    UNDER_PENALTY: float = 5.0
+    UNDER_PENALTY: float = 8.0
     SEED: int = 42
     USE_WEIGHTS: bool = True
     GAMMA: float = 20.0
