@@ -21,11 +21,6 @@ DEFAULT_CORR_HORIZON_MAX = 30
 
 
 def log(msg: str) -> None:
-    """Log progress to stdout with timestamps.
-
-    Always enabled (per request).
-    """
-
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}", flush=True)
 
 
@@ -150,14 +145,35 @@ def plot_avg_corr_by_horizon(horizons, avg_corrs, out_path):
         log("No valid average correlations available to plot.")
         return
 
-    plt.figure(figsize=(10, 6))
-    plt.plot(horizons[valid_mask], avg_corrs[valid_mask], marker="o", color="teal")
-    plt.title("Average Correlation by Horizon")
-    plt.xlabel("Horizon (t+k)")
-    plt.ylabel("Average Correlation")
-    plt.grid(axis="y", alpha=0.3)
+    plt.figure(figsize=(12, 7))
+    plt.plot(
+        horizons[valid_mask],
+        avg_corrs[valid_mask],
+        marker="o",
+        markersize=8,
+        color="teal",
+        linewidth=2.5,
+        label="Average Correlation",
+    )
+
+    plt.title("Average Correlation by Horizon", fontsize=14, fontweight="bold")
+    plt.xlabel("Horizon (t+k)", fontsize=12)
+    plt.ylabel("Average Correlation", fontsize=12)
+
+    plt.yticks(np.arange(0, 1.2, 0.2), fontsize=11)
+    plt.ylim(0, 1.0)
+
+    x_ticks = horizons[valid_mask]
+    if len(x_ticks) > 20:
+        plt.xticks(x_ticks[::2], fontsize=10)
+    else:
+        plt.xticks(x_ticks, fontsize=10)
+
+    plt.grid(True, alpha=0.3, linestyle="--")
+
+    plt.legend(loc="upper right", fontsize=11)
     plt.tight_layout()
-    plt.savefig(out_path)
+    plt.savefig(out_path, dpi=300)
     log(f"Average correlation-by-horizon plot saved to {out_path}")
 
 
@@ -271,7 +287,7 @@ def main():
 
     counts = np.zeros(args.bins, dtype=int)
     for _, row in hist_df.iterrows():
-        idx = int(row["bucket"]) - 1  # convert 1-based → 0-based
+        idx = int(row["bucket"]) - 1
         if 0 <= idx < args.bins:
             counts[idx] = int(row["count"])
 
