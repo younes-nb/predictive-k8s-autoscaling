@@ -82,7 +82,7 @@ def find_optimal_batch_size(
     cpu_parquet_path,
     rt_parquet_path,
     temp_dir,
-    start_batch_size=16384,
+    start_batch_size=512,
     min_batch_size=1,
 ):
     print("\n🔍 Discovering optimal batch size automatically...")
@@ -121,7 +121,6 @@ def find_optimal_batch_size(
                     msname
                 FROM read_parquet('{cpu_parquet_path}')
                 WHERE msname IN ({msnames_sql_list})
-                LIMIT 100000
             ),
 
             rt_data AS (
@@ -131,7 +130,6 @@ def find_optimal_batch_size(
                     msname
                 FROM read_parquet('{rt_parquet_path}')
                 WHERE msname IN ({msnames_sql_list})
-                LIMIT 100000
             )
 
             SELECT COUNT(*)
