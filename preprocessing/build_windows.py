@@ -119,8 +119,7 @@ def _apply_smote_tomek(split_name, split_data, threshold, rng, k_neighbors=5):
         return split_data
 
     y_last = Y[:, -1]
-    positive_threshold = threshold
-    labels = (y_last >= positive_threshold).astype(np.int8)
+    labels = (y_last >= threshold).astype(np.int8)
     counts = np.bincount(labels, minlength=2)
     if counts.min() == 0:
         return ([X], [Y], [S])
@@ -165,7 +164,7 @@ def _apply_smote_tomek(split_name, split_data, threshold, rng, k_neighbors=5):
         neighbors = nn_all.kneighbors(return_distance=False)
         nn_idx = neighbors[:, 1]
         # Tomek links: mutual nearest neighbors from opposing classes.
-        mutual = np.arange(XY.shape[0]) == nn_idx[nn_idx]
+        mutual = nn_idx[nn_idx] == np.arange(XY.shape[0])
         tomek = mutual & (labels != labels[nn_idx])
         remove = tomek & (labels == majority_label)
 
