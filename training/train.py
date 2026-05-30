@@ -100,41 +100,6 @@ class PinballLoss(nn.Module):
         return (w * per_sample).sum() / w.sum().clamp_min(1e-6)
 
 
-def directional_term(
-    preds, target, x, dir_weight=1.0, threshold=0.01, quantiles: Optional[Sequence[float]] = None
-):
-    """
-    Penalize wrong direction predictions on significant changes only.
-    """
-    import torch.nn.functional as F
-
-    if dir_weight <= 0:
-        return torch.tensor(0.0, device=preds.device)
-
-    preds_used = preds
-    if preds.dim() == 3:
-        if quantiles:
-            q_tensor = torch.tensor([float(q) for q in quantiles], device=preds.device)
-            idx = torch.argmin((q_tensor - 0.5).abs()).item()
-        else:
-            idx = 0
-        preds_used = preds[:, :, idx]
-
-    x_last = x[:, -1, 0]
-    true_delta = target[:, -1] - x_last
-    pred_delta = preds_used[:, -1] - x_last
-
-    significant = true_delta.abs() > threshold
-    if not significant.any():
-        return torch.tensor(0.0, device=preds.device)
-
-    pred_logits = pred_delta[significant] * 15.0
-    true_direction = (true_delta[significant] > 0).float()
-
-    dir_loss = F.binary_cross_entropy_with_logits(pred_logits, true_direction)
-    return dir_weight * dir_loss
-
-
 def find_max_batch_size(
     model, input_size, args, device, loss_fn: Optional[nn.Module] = None, starting_batch=8192
 ):
@@ -233,10 +198,6 @@ def train(args):
         args = argparse.Namespace(**resume_state["args"])
     if not hasattr(args, "probabilistic"):
         args.probabilistic = TRAINING.PROBABILISTIC_TRAINING
-    if not hasattr(args, "vol_gamma"):
-        args.vol_gamma = 30.0
-    if not hasattr(args, "dir_weight"):
-        args.dir_weight = 0.5
 
     rng = random.Random(args.seed)
 
@@ -398,26 +359,13 @@ def train(args):
 
             optimizer.zero_grad()
             preds = model(x)
-            x_last = x[:, -1, 0]
-            delta_abs = (y[:, -1] - x_last).abs().clamp(min=1e-3)
-            vol_w = 1.0 + args.vol_gamma * delta_abs
-
-            if args.use_weights:
-                effective_w = w * vol_w
-            else:
-                effective_w = vol_w
 
             if args.probabilistic:
-                loss = pinball_loss(preds, y, effective_w)
+                loss = pinball_loss(preds, y, w)
             else:
                 loss = weighted_mse(
-                    preds, y, effective_w, under_penalty=args.under_penalty
+                    preds, y, w, under_penalty=args.under_penalty
                 )
-
-            dir_loss = directional_term(
-                preds, y, x, dir_weight=args.dir_weight, threshold=0.01, quantiles=quantiles
-            )
-            loss = loss + dir_loss
 
             accelerator.backward(loss)
 
@@ -445,26 +393,13 @@ def train(args):
                     w = None
 
                 preds = model(x)
-                x_last = x[:, -1, 0]
-                delta_abs = (y[:, -1] - x_last).abs().clamp(min=1e-3)
-                vol_w = 1.0 + args.vol_gamma * delta_abs
-
-                if args.use_weights:
-                    effective_w = w * vol_w
-                else:
-                    effective_w = vol_w
 
                 if args.probabilistic:
-                    loss = pinball_loss(preds, y, effective_w)
+                    loss = pinball_loss(preds, y, w)
                 else:
                     loss = weighted_mse(
-                        preds, y, effective_w, under_penalty=args.under_penalty
+                        preds, y, w, under_penalty=args.under_penalty
                     )
-
-                dir_loss = directional_term(
-                    preds, y, x, dir_weight=args.dir_weight, threshold=0.01, quantiles=quantiles
-                )
-                loss = loss + dir_loss
 
                 val_loss_accum += loss.item() * x.size(0)
                 val_samples_seen += x.size(0)
