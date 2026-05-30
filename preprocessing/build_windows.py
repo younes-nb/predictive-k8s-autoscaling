@@ -102,6 +102,12 @@ def _combine_split_arrays(split_data):
 
 
 def _apply_smote_tomek(split_name, split_data, threshold, rng, k_neighbors=5):
+    """Apply SMOTE-Tomek resampling to a split's window lists.
+
+    The positive class is defined by the last-horizon target value exceeding
+    the provided threshold (expected in the [0, 1] utilization range). S values
+    are retained from the base samples used to synthesize new points.
+    """
     from sklearn.neighbors import NearestNeighbors
 
     combined = _combine_split_arrays(split_data)
@@ -113,7 +119,8 @@ def _apply_smote_tomek(split_name, split_data, threshold, rng, k_neighbors=5):
         return split_data
 
     y_last = Y[:, -1]
-    labels = (y_last >= threshold).astype(np.int8)
+    positive_threshold = threshold
+    labels = (y_last >= positive_threshold).astype(np.int8)
     counts = np.bincount(labels, minlength=2)
     if counts.min() == 0:
         return ([X], [Y], [S])
@@ -157,6 +164,7 @@ def _apply_smote_tomek(split_name, split_data, threshold, rng, k_neighbors=5):
         nn_all.fit(XY)
         neighbors = nn_all.kneighbors(return_distance=False)
         nn_idx = neighbors[:, 1]
+        # Tomek links: mutual nearest neighbors from opposing classes.
         mutual = np.arange(XY.shape[0]) == nn_idx[nn_idx]
         tomek = mutual & (labels != labels[nn_idx])
         remove = tomek & (labels == majority_label)
@@ -490,7 +498,8 @@ def main():
                 )
             except MemoryError:
                 print(
-                    "[WARN] SMOTE-Tomek skipped due to OOM; training will use imbalanced windows."
+                    "[WARN] SMOTE-Tomek skipped due to OOM; training will use imbalanced windows. "
+                    "Consider reducing --batch_size or disabling --smote_tomek."
                 )
             gc.collect()
 
