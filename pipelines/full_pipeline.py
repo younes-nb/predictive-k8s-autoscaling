@@ -61,6 +61,12 @@ def main():
         default=PREPROCESSING.MAX_SERVICES,
         help="Limit number of services for faster testing.",
     )
+    ap.add_argument(
+        "--smote_tomek",
+        action="store_true",
+        default=PREPROCESSING.SMOTE_TOMEK,
+        help="Apply SMOTE-Tomek to training windows.",
+    )
 
     args = ap.parse_args()
 
@@ -96,6 +102,8 @@ def main():
             cmd_pre.append("--skip_ingest")
         if args.skip_windows:
             cmd_pre.append("--skip_windows")
+        if args.smote_tomek:
+            cmd_pre.append("--smote_tomek")
 
         total_times["preprocessing"] = run(cmd_pre, "Step 1: Preprocessing")
 

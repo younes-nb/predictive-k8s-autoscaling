@@ -209,6 +209,7 @@ class PreprocessingDefaults:
     MAX_SERVICES: Optional[int] = None
     SUBSET_SEED: int = 42
     FEATURE_SET: str = "cpu_mem_mcr"
+    SMOTE_TOMEK: bool = False
 
 
 @dataclass(frozen=True)
