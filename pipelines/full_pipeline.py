@@ -48,6 +48,11 @@ def main():
     ap.add_argument("--skip_testing", action="store_true")
     ap.add_argument("--cpu", action="store_true")
     ap.add_argument(
+        "--resume_training",
+        action="store_true",
+        help="Resume training from the last saved state if available.",
+    )
+    ap.add_argument(
         "--bidirectional", action="store_true", default=TRAINING.BIDIRECTIONAL
     )
     ap.add_argument(
@@ -159,6 +164,8 @@ def main():
             cmd_train.append("--bidirectional")
         if args.probabilistic:
             cmd_train.append("--probabilistic")
+        if args.resume_training:
+            cmd_train.append("--resume_training")
         if args.cpu:
             cmd_train.append("--cpu")
 

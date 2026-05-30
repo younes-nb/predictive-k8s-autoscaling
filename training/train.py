@@ -193,9 +193,15 @@ def train(args):
         logging.info(msg) if accelerator.is_local_main_process else None
     )
 
-    resume_state = load_resume_state(PATHS.RESUME_STATE_FILE)
+    if not hasattr(args, "resume_training"):
+        args.resume_training = False
+
+    resume_state = (
+        load_resume_state(PATHS.RESUME_STATE_FILE) if args.resume_training else None
+    )
     if resume_state and "args" in resume_state:
         args = argparse.Namespace(**resume_state["args"])
+        args.resume_training = True
     if not hasattr(args, "probabilistic"):
         args.probabilistic = TRAINING.PROBABILISTIC_TRAINING
 
@@ -538,6 +544,11 @@ if __name__ == "__main__":
     p.add_argument("--cpu", action="store_true")
     p.add_argument("--rnn_type", default="lstm")
     p.add_argument("--feature_set", default=PREPROCESSING.FEATURE_SET)
+    p.add_argument(
+        "--resume_training",
+        action="store_true",
+        help="Resume from the last saved training state if available.",
+    )
     p.add_argument(
         "--bidirectional", action="store_true", default=TRAINING.BIDIRECTIONAL
     )
