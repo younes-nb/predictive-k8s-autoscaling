@@ -9,7 +9,6 @@ import shutil
 import tempfile
 import time
 from typing import Optional, List
-from sklearn.neighbors import NearestNeighbors
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, os.pardir))
@@ -103,6 +102,8 @@ def _combine_split_arrays(split_data):
 
 
 def _apply_smote_tomek(split_name, split_data, threshold, rng, k_neighbors=5):
+    from sklearn.neighbors import NearestNeighbors
+
     combined = _combine_split_arrays(split_data)
     if combined is None:
         return split_data
@@ -111,7 +112,8 @@ def _apply_smote_tomek(split_name, split_data, threshold, rng, k_neighbors=5):
     if X.shape[0] == 0:
         return split_data
 
-    labels = (Y[:, -1] >= threshold).astype(np.int8)
+    y_last = Y[:, -1]
+    labels = (y_last >= threshold).astype(np.int8)
     counts = np.bincount(labels, minlength=2)
     if counts.min() == 0:
         return ([X], [Y], [S])
@@ -487,7 +489,9 @@ def main():
                     rng,
                 )
             except MemoryError:
-                print("[WARN] SMOTE-Tomek skipped due to OOM.")
+                print(
+                    "[WARN] SMOTE-Tomek skipped due to OOM; training will use imbalanced windows."
+                )
             gc.collect()
 
         save_chunk(args.out_dir, batch_idx, 0, shard_data)
