@@ -138,6 +138,7 @@ def _apply_smote_tomek(split_name, split_data, threshold, rng, k_neighbors=5):
         minority_idx = np.where(labels == minority_label)[0]
         nn = NearestNeighbors(n_neighbors=k + 1, algorithm="auto")
         nn.fit(XY[minority_idx])
+        # neighbors include the point itself at index 0.
         neighbors = nn.kneighbors(return_distance=False)
 
         synthetic = np.empty((num_to_sample, XY.shape[1]), dtype=XY.dtype)
@@ -164,7 +165,7 @@ def _apply_smote_tomek(split_name, split_data, threshold, rng, k_neighbors=5):
         nn_all.fit(XY)
         neighbors = nn_all.kneighbors(return_distance=False)
         nn_idx = neighbors[:, 1]
-        # Tomek links: mutual nearest neighbors from opposing classes.
+        # Tomek links: mutual nearest neighbors from opposing classes (nn_idx[nn_idx[i]] == i).
         mutual = nn_idx[nn_idx] == np.arange(XY.shape[0])
         tomek = mutual & (labels != labels[nn_idx])
         remove = tomek & (labels == majority_label)
@@ -184,7 +185,8 @@ def _apply_smote_tomek(split_name, split_data, threshold, rng, k_neighbors=5):
     print(
         f"[SMOTE-Tomek] {split_name}: {X.shape[0]} -> {X_new.shape[0]} samples"
     )
-    return ([X_new], [Y_new], [S])
+    S_new = S
+    return ([X_new], [Y_new], [S_new])
 
 
 def main():
@@ -226,7 +228,7 @@ def main():
     )
 
     args = p.parse_args()
-    rng = np.random.default_rng(args.subset_seed)
+    rng = np.random.default_rng(args.subset_seed)  # Shared seed for subset + SMOTE reproducibility.
 
     if (
         args.train_frac <= 0
