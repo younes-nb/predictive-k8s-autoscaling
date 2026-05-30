@@ -106,7 +106,8 @@ def _apply_smote_tomek(split_name, split_data, threshold, rng, k_neighbors=5):
 
     The positive class is defined by the last-horizon target value exceeding
     the provided threshold (expected in the [0, 1] utilization range). S values
-    are retained from the base samples used to synthesize new points.
+    are retained from the base samples used to synthesize new points. The return
+    value always wraps combined arrays in single-element lists for saving.
     """
     from sklearn.neighbors import NearestNeighbors
 
@@ -163,6 +164,8 @@ def _apply_smote_tomek(split_name, split_data, threshold, rng, k_neighbors=5):
         nn_all.fit(XY)
         neighbors = nn_all.kneighbors(return_distance=False)
         nn_idx = neighbors[:, 1]
+        if nn_idx.max() >= XY.shape[0]:
+            raise ValueError("Nearest-neighbor indices out of bounds.")
         # Tomek links: mutual nearest neighbors from opposing classes.
         mutual = nn_idx[nn_idx] == np.arange(XY.shape[0])
         tomek = mutual & (labels != labels[nn_idx])
