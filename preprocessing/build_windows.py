@@ -9,6 +9,7 @@ import shutil
 import tempfile
 import time
 from typing import Optional, List
+from sklearn.neighbors import NearestNeighbors
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, os.pardir))
@@ -109,8 +110,6 @@ def _apply_smote_tomek(split_name, split_data, threshold, rng, k_neighbors=5):
     are retained from the base samples used to synthesize new points. The return
     value always wraps combined arrays in single-element lists for saving.
     """
-    from sklearn.neighbors import NearestNeighbors
-
     combined = _combine_split_arrays(split_data)
     if combined is None:
         return split_data
@@ -128,6 +127,7 @@ def _apply_smote_tomek(split_name, split_data, threshold, rng, k_neighbors=5):
     majority_label = int(np.argmax(counts))
     minority_label = 1 - majority_label
 
+    x_len, x_feat = X.shape[1], X.shape[2]
     X_flat = X.reshape(X.shape[0], -1)
     Y_flat = Y.reshape(Y.shape[0], -1)
     XY = np.concatenate([X_flat, Y_flat], axis=1).astype(np.float32, copy=False)
@@ -164,8 +164,6 @@ def _apply_smote_tomek(split_name, split_data, threshold, rng, k_neighbors=5):
         nn_all.fit(XY)
         neighbors = nn_all.kneighbors(return_distance=False)
         nn_idx = neighbors[:, 1]
-        if nn_idx.max() >= XY.shape[0]:
-            raise ValueError("Nearest-neighbor indices out of bounds.")
         # Tomek links: mutual nearest neighbors from opposing classes.
         mutual = nn_idx[nn_idx] == np.arange(XY.shape[0])
         tomek = mutual & (labels != labels[nn_idx])
@@ -177,8 +175,8 @@ def _apply_smote_tomek(split_name, split_data, threshold, rng, k_neighbors=5):
             labels = labels[keep]
             S = S[keep]
 
-    x_dim = X.shape[1] * X.shape[2]
-    X_new = XY[:, :x_dim].reshape(-1, X.shape[1], X.shape[2]).astype(
+    x_dim = x_len * x_feat
+    X_new = XY[:, :x_dim].reshape(-1, x_len, x_feat).astype(
         np.float32, copy=False
     )
     Y_new = XY[:, x_dim:].reshape(-1, Y.shape[1]).astype(np.float32, copy=False)
@@ -501,7 +499,7 @@ def main():
             except MemoryError:
                 print(
                     "[WARN] SMOTE-Tomek skipped due to OOM; training will use imbalanced windows. "
-                    "Consider reducing --batch_size or disabling --smote_tomek."
+                    "Consider reducing window sizes, limiting services, or disabling --smote_tomek."
                 )
             gc.collect()
 
