@@ -53,6 +53,12 @@ def main():
         type=int,
         default=PREPROCESSING.MAX_SERVICES,
     )
+    ap.add_argument(
+        "--smote_tomek",
+        action="store_true",
+        default=PREPROCESSING.SMOTE_TOMEK,
+        help="Apply SMOTE-Tomek to training windows.",
+    )
 
     args = ap.parse_args()
 
@@ -110,6 +116,8 @@ def main():
         ]
         if args.max_services is not None:
             cmd.extend(["--max_services", str(args.max_services)])
+        if args.smote_tomek:
+            cmd.append("--smote_tomek")
         run(cmd, "Step 3: Build windows (join tables)")
     else:
         print("\n=== Skipping windows ===")

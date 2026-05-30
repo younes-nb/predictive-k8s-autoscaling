@@ -9,6 +9,7 @@ import shutil
 import tempfile
 import time
 from typing import Optional, List
+from sklearn.neighbors import NearestNeighbors
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, os.pardir))
@@ -17,6 +18,7 @@ if REPO_ROOT not in sys.path:
 
 from config.defaults import (
     PREPROCESSING,
+    TRAINING,
     FEATURE_SETS,
     DATASET_TABLES,
     FEATURES,
@@ -90,6 +92,91 @@ def save_chunk(out_dir, shard_idx, chunk_idx, shard_data):
     return saved_any
 
 
+def _combine_split_arrays(split_data):
+    Xs, Ys, Ss = split_data
+    if not Xs:
+        return None
+    X = np.concatenate(Xs).astype(np.float32, copy=False)
+    Y = np.concatenate(Ys).astype(np.float32, copy=False)
+    S = np.concatenate(Ss).astype(np.int32, copy=False)
+    return X, Y, S
+
+
+def _apply_smote_tomek(split_name, split_data, threshold, rng, k_neighbors=5):
+    combined = _combine_split_arrays(split_data)
+    if combined is None:
+        return split_data
+
+    X, Y, S = combined
+    if X.shape[0] == 0:
+        return split_data
+
+    labels = (Y[:, -1] >= threshold).astype(np.int8)
+    counts = np.bincount(labels, minlength=2)
+    if counts.min() == 0:
+        return ([X], [Y], [S])
+
+    majority_label = int(np.argmax(counts))
+    minority_label = 1 - majority_label
+
+    X_flat = X.reshape(X.shape[0], -1)
+    Y_flat = Y.reshape(Y.shape[0], -1)
+    XY = np.concatenate([X_flat, Y_flat], axis=1).astype(np.float32, copy=False)
+
+    num_to_sample = int(counts[majority_label] - counts[minority_label])
+    if num_to_sample > 0 and counts[minority_label] > 1:
+        k = min(k_neighbors, counts[minority_label] - 1)
+        minority_idx = np.where(labels == minority_label)[0]
+        nn = NearestNeighbors(n_neighbors=k + 1, algorithm="auto")
+        nn.fit(XY[minority_idx])
+        neighbors = nn.kneighbors(return_distance=False)
+
+        synthetic = np.empty((num_to_sample, XY.shape[1]), dtype=XY.dtype)
+        synthetic_s = np.empty((num_to_sample,), dtype=S.dtype)
+
+        for i in range(num_to_sample):
+            base_pos = rng.integers(0, len(minority_idx))
+            neighbor_choices = neighbors[base_pos]
+            neighbor_pos = neighbor_choices[rng.integers(1, len(neighbor_choices))]
+            idx_i = minority_idx[base_pos]
+            idx_j = minority_idx[neighbor_pos]
+            gap = rng.random()
+            synthetic[i] = XY[idx_i] + gap * (XY[idx_j] - XY[idx_i])
+            synthetic_s[i] = S[idx_i]
+
+        XY = np.vstack([XY, synthetic])
+        labels = np.concatenate(
+            [labels, np.full(num_to_sample, minority_label, dtype=labels.dtype)]
+        )
+        S = np.concatenate([S, synthetic_s])
+
+    if XY.shape[0] > 1:
+        nn_all = NearestNeighbors(n_neighbors=2, algorithm="auto")
+        nn_all.fit(XY)
+        neighbors = nn_all.kneighbors(return_distance=False)
+        nn_idx = neighbors[:, 1]
+        mutual = np.arange(XY.shape[0]) == nn_idx[nn_idx]
+        tomek = mutual & (labels != labels[nn_idx])
+        remove = tomek & (labels == majority_label)
+
+        if remove.any():
+            keep = ~remove
+            XY = XY[keep]
+            labels = labels[keep]
+            S = S[keep]
+
+    x_dim = X.shape[1] * X.shape[2]
+    X_new = XY[:, :x_dim].reshape(-1, X.shape[1], X.shape[2]).astype(
+        np.float32, copy=False
+    )
+    Y_new = XY[:, x_dim:].reshape(-1, Y.shape[1]).astype(np.float32, copy=False)
+
+    print(
+        f"[SMOTE-Tomek] {split_name}: {X.shape[0]} -> {X_new.shape[0]} samples"
+    )
+    return ([X_new], [Y_new], [S])
+
+
 def main():
     p = argparse.ArgumentParser(
         description="Build windows using global service batching to ensure correct splitting and bypass OOM."
@@ -121,8 +208,15 @@ def main():
         type=int,
         default=256,
     )
+    p.add_argument(
+        "--smote_tomek",
+        action="store_true",
+        default=PREPROCESSING.SMOTE_TOMEK,
+        help="Apply SMOTE-Tomek to training windows.",
+    )
 
     args = p.parse_args()
+    rng = np.random.default_rng(args.subset_seed)
 
     if (
         args.train_frac <= 0
@@ -383,6 +477,18 @@ def main():
                     shard_data[split_name][0].append(Xs)
                     shard_data[split_name][1].append(Ys)
                     shard_data[split_name][2].append(Ss)
+
+        if args.smote_tomek:
+            try:
+                shard_data["train"] = _apply_smote_tomek(
+                    "train",
+                    shard_data["train"],
+                    TRAINING.THETA_BASE,
+                    rng,
+                )
+            except MemoryError:
+                print("[WARN] SMOTE-Tomek skipped due to OOM.")
+            gc.collect()
 
         save_chunk(args.out_dir, batch_idx, 0, shard_data)
 
