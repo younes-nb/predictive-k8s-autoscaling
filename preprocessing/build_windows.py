@@ -103,90 +103,92 @@ def _combine_split_arrays(split_data):
 
 
 def _apply_smote_tomek(split_name, split_data, threshold, rng, k_neighbors=5):
-    """Apply SMOTE-Tomek resampling to a split's window lists.
-
-    The positive class is defined by the last-horizon target value exceeding
-    the provided threshold (expected in the [0, 1] utilization range). S values
-    are retained from the base samples used to synthesize new points. The return
-    value always wraps combined arrays in single-element lists for saving.
-    """
     combined = _combine_split_arrays(split_data)
     if combined is None:
         return split_data
 
     X, Y, S = combined
-    if X.shape[0] == 0:
+    n = X.shape[0]
+    if n == 0:
         return split_data
 
     y_last = Y[:, -1]
     labels = (y_last >= threshold).astype(np.int8)
     counts = np.bincount(labels, minlength=2)
+
     if counts.min() == 0:
+        print(
+            f"[SMOTE-Tomek] {split_name}: skipped — one class absent "
+            f"(label-0={counts[0]}, label-1={counts[1]})"
+        )
         return ([X], [Y], [S])
 
     majority_label = int(np.argmax(counts))
     minority_label = 1 - majority_label
 
-    x_len, x_feat = X.shape[1], X.shape[2]
-    X_flat = X.reshape(X.shape[0], -1)
-    Y_flat = Y.reshape(Y.shape[0], -1)
-    XY = np.concatenate([X_flat, Y_flat], axis=1).astype(np.float32, copy=False)
+    x_shape = X.shape
+    X_flat  = X.reshape(n, -1)
 
-    num_to_sample = int(counts[majority_label] - counts[minority_label])
-    if num_to_sample > 0 and counts[minority_label] > 1:
-        k = min(k_neighbors, counts[minority_label] - 1)
+    num_to_add = int(counts[majority_label] - counts[minority_label])
+
+    if num_to_add > 0 and counts[minority_label] > 1:
+        k            = min(k_neighbors, counts[minority_label] - 1)
         minority_idx = np.where(labels == minority_label)[0]
-        nn = NearestNeighbors(n_neighbors=k + 1, algorithm="auto")
-        nn.fit(XY[minority_idx])
-        # neighbors include the point itself at index 0.
-        neighbors = nn.kneighbors(return_distance=False)
 
-        synthetic = np.empty((num_to_sample, XY.shape[1]), dtype=XY.dtype)
-        synthetic_s = np.empty((num_to_sample,), dtype=S.dtype)
+        nn = NearestNeighbors(n_neighbors=k, algorithm="auto")
+        nn.fit(X_flat[minority_idx])
+        nbrs = nn.kneighbors(return_distance=False)
 
-        for i in range(num_to_sample):
-            base_pos = rng.integers(0, len(minority_idx))
-            neighbor_choices = neighbors[base_pos]
-            neighbor_pos = neighbor_choices[rng.integers(1, len(neighbor_choices))]
-            idx_i = minority_idx[base_pos]
-            idx_j = minority_idx[neighbor_pos]
-            gap = rng.random()
-            synthetic[i] = XY[idx_i] + gap * (XY[idx_j] - XY[idx_i])
-            synthetic_s[i] = S[idx_i]
+        base_pos = rng.integers(0, len(minority_idx), size=num_to_add)
+        nbr_col  = rng.integers(0, k, size=num_to_add)
+        nbr_pos  = nbrs[base_pos, nbr_col]
 
-        XY = np.vstack([XY, synthetic])
-        labels = np.concatenate(
-            [labels, np.full(num_to_sample, minority_label, dtype=labels.dtype)]
-        )
-        S = np.concatenate([S, synthetic_s])
+        idx_i = minority_idx[base_pos]
+        idx_j = minority_idx[nbr_pos]
+        gap   = rng.random(size=(num_to_add, 1)).astype(np.float32)
 
-    if XY.shape[0] > 1:
-        nn_all = NearestNeighbors(n_neighbors=2, algorithm="auto")
-        nn_all.fit(XY)
-        neighbors = nn_all.kneighbors(return_distance=False)
-        nn_idx = neighbors[:, 1]
-        # Tomek links: mutual nearest neighbors from opposing classes (nn_idx[nn_idx[i]] == i).
-        mutual = nn_idx[nn_idx] == np.arange(XY.shape[0])
-        tomek = mutual & (labels != labels[nn_idx])
-        remove = tomek & (labels == majority_label)
+        synth_Xf = X_flat[idx_i] + gap * (X_flat[idx_j] - X_flat[idx_i])
+        synth_Y  = Y[idx_i]      + gap * (Y[idx_j]      - Y[idx_i])
+        synth_S  = S[idx_i]
+
+        X_flat = np.vstack([X_flat, synth_Xf])
+        Y      = np.vstack([Y,      synth_Y])
+        S      = np.concatenate([S,     synth_S])
+        labels = np.concatenate([
+            labels,
+            np.full(num_to_add, minority_label, dtype=labels.dtype),
+        ])
+    else:
+        num_to_add = 0
+
+    removed = 0
+    n_aug   = X_flat.shape[0]
+
+    if n_aug > 1:
+        nn_all = NearestNeighbors(n_neighbors=1, algorithm="auto")
+        nn_all.fit(X_flat)
+        nn_idx = nn_all.kneighbors(return_distance=False)[:, 0]
+
+        mutual   = nn_idx[nn_idx] == np.arange(n_aug)
+        is_tomek = mutual & (labels != labels[nn_idx])
+        remove   = is_tomek & (labels == majority_label)
 
         if remove.any():
-            keep = ~remove
-            XY = XY[keep]
+            keep   = ~remove
+            X_flat = X_flat[keep]
+            Y      = Y[keep]
+            S      = S[keep]
             labels = labels[keep]
-            S = S[keep]
+            removed = int(remove.sum())
 
-    x_dim = x_len * x_feat
-    X_new = XY[:, :x_dim].reshape(-1, x_len, x_feat).astype(
-        np.float32, copy=False
-    )
-    Y_new = XY[:, x_dim:].reshape(-1, Y.shape[1]).astype(np.float32, copy=False)
-
+    X_new     = X_flat.reshape(-1, *x_shape[1:])
+    n_min_new = int((labels == minority_label).sum())
     print(
-        f"[SMOTE-Tomek] {split_name}: {X.shape[0]} -> {X_new.shape[0]} samples"
+        f"[SMOTE-Tomek] {split_name}: {n} → {X_new.shape[0]} samples | "
+        f"minority {counts[minority_label]} → {n_min_new} "
+        f"(+{num_to_add} synthetic, -{removed} Tomek majority)"
     )
-    S_new = S
-    return ([X_new], [Y_new], [S_new])
+    return ([X_new], [Y], [S])
 
 
 def main():
@@ -228,7 +230,7 @@ def main():
     )
 
     args = p.parse_args()
-    rng = np.random.default_rng(args.subset_seed)  # Shared seed for subset + SMOTE reproducibility.
+    rng = np.random.default_rng(args.subset_seed)
 
     if (
         args.train_frac <= 0
@@ -498,10 +500,9 @@ def main():
                     TRAINING.THETA_BASE,
                     rng,
                 )
-            except MemoryError:
+            except (MemoryError, RuntimeError) as e:
                 print(
-                    "[WARN] SMOTE-Tomek skipped due to OOM; training will use imbalanced windows. "
-                    "Consider reducing window sizes, limiting services, or disabling --smote_tomek."
+                    f"[WARN] SMOTE-Tomek skipped for batch {batch_idx}: {e}. "
                 )
             gc.collect()
 
