@@ -121,12 +121,6 @@ def main():
         type=int,
         default=256,
     )
-    p.add_argument(
-        "--min_service_volatility",
-        type=float,
-        default=0.02,
-        help="Filter out services with CPU std < this threshold (always-idle services)",
-    )
 
     args = p.parse_args()
 
@@ -216,7 +210,6 @@ def main():
 
     os.makedirs(args.out_dir, exist_ok=True)
     total_batches = (len(all_services_list) + args.batch_size - 1) // args.batch_size
-    filtered_services_total = 0
 
     for batch_idx in range(total_batches):
         gc.collect()
@@ -344,14 +337,6 @@ def main():
             if g.height < args.input_len + args.pred_horizon:
                 continue
 
-            if args.min_service_volatility > 0:
-                cpu_vals = (
-                    g[feature_names[target_idx]].to_numpy().astype("float32")
-                )
-                if cpu_vals.std() < args.min_service_volatility:
-                    filtered_services_total += 1
-                    continue
-
             feat_raw = np.stack(
                 [g[feat].to_numpy().astype("float32") for feat in feature_names], axis=1
             )
@@ -408,12 +393,6 @@ def main():
 
         batch_duration = time.time() - batch_start_time
         print(f"--> Batch {batch_idx+1} completed in {batch_duration:.2f} seconds")
-
-    if args.min_service_volatility > 0:
-        print(
-            "Filtered "
-            f"{filtered_services_total} services with CPU std < {args.min_service_volatility}"
-        )
 
     print("\nAll global batches processed.")
 
