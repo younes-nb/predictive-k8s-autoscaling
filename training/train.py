@@ -3,9 +3,13 @@ import sys
 import argparse
 import logging
 import math
+import math as _math
 import random
+import copy
 from datetime import datetime
 from typing import Optional, Sequence
+
+import numpy as np
 
 try:
     from zoneinfo import ZoneInfo
@@ -185,6 +189,376 @@ def apply_hyperparams(args, hyperparams):
     args.lr = hyperparams["lr"]
 
 
+class SFOAOptimizer:
+    """
+    Starfish Optimization Algorithm for hyperparameter search.
+
+    Positions are stored as a numpy array X of shape (N, D=4).
+    D=4 always triggers the D<=5 unidimensional exploration path.
+
+    Args:
+        eval_fn: callable(hyperparams: dict) -> float  (returns val_loss; lower is better)
+        N: population size
+        Tmax: max iterations
+        Gp: exploration probability threshold
+        seed: random seed for reproducibility
+    """
+
+    D = 4
+    BOUNDS_LOW = None
+    BOUNDS_HIGH = None
+
+    def __init__(self, eval_fn, N, Tmax, Gp, seed=42):
+        if N < 3:
+            raise ValueError("SFOA requires N >= 3 to sample distinct distances.")
+        self.eval_fn = eval_fn
+        self.N = int(N)
+        self.Tmax = int(Tmax)
+        self.Gp = float(Gp)
+        self.rng = np.random.default_rng(seed)
+        self.BOUNDS_LOW, self.BOUNDS_HIGH = self._build_bounds()
+        if self.N < 6:
+            logging.warning(
+                "[SFOA] Population size N=%s is < 6; preying will sample fewer candidates.",
+                self.N,
+            )
+
+    def _build_bounds(self):
+        """Return (low, high) as numpy arrays of shape (D,)."""
+        low = np.array(
+            [
+                0.0,
+                0.0,
+                TRAINING.DROPOUT_RANGE[0],
+                _math.log10(TRAINING.LR_RANGE[0]),
+            ],
+            dtype=float,
+        )
+        high = np.array(
+            [
+                float(len(TRAINING.HIDDEN_SIZE_OPTIONS) - 1),
+                float(len(TRAINING.NUM_LAYERS_OPTIONS) - 1),
+                TRAINING.DROPOUT_RANGE[1],
+                _math.log10(TRAINING.LR_RANGE[1]),
+            ],
+            dtype=float,
+        )
+        return low, high
+
+    def _decode(self, x: np.ndarray) -> dict:
+        """Convert continuous position vector (D,) to a hyperparams dict."""
+        def clip(val, low, high):
+            return max(low, min(high, float(val)))
+
+        idx_hidden = int(
+            round(clip(x[0], self.BOUNDS_LOW[0], self.BOUNDS_HIGH[0]))
+        )
+        idx_layers = int(
+            round(clip(x[1], self.BOUNDS_LOW[1], self.BOUNDS_HIGH[1]))
+        )
+        dropout = round(
+            float(clip(x[2], self.BOUNDS_LOW[2], self.BOUNDS_HIGH[2])), 4
+        )
+        lr = round(
+            10 ** float(clip(x[3], self.BOUNDS_LOW[3], self.BOUNDS_HIGH[3])), 8
+        )
+        return {
+            "hidden_size": TRAINING.HIDDEN_SIZE_OPTIONS[idx_hidden],
+            "num_layers": TRAINING.NUM_LAYERS_OPTIONS[idx_layers],
+            "dropout": dropout,
+            "lr": lr,
+        }
+
+    def _clip_to_bounds(self, x: np.ndarray) -> np.ndarray:
+        """Element-wise clamp to [BOUNDS_LOW, BOUNDS_HIGH]."""
+        return np.clip(x, self.BOUNDS_LOW, self.BOUNDS_HIGH)
+
+    def _evaluate_all(self, X: np.ndarray) -> np.ndarray:
+        """
+        Evaluate fitness for all N positions.
+        Returns fitness array of shape (N,).
+        Calls self.eval_fn for each row, catches exceptions (returns inf on failure).
+        """
+        fitness = []
+        for row in X:
+            hyperparams = self._decode(row)
+            try:
+                fitness.append(float(self.eval_fn(copy.deepcopy(hyperparams))))
+            except Exception as exc:
+                logging.warning(
+                    "[SFOA] Evaluation failed for %s: %s", hyperparams, exc
+                )
+                fitness.append(float("inf"))
+        return np.asarray(fitness, dtype=float)
+
+    def _explore(self, X: np.ndarray, T: int) -> np.ndarray:
+        """
+        Exploration phase (D<=5, unidimensional, Eq. 8).
+        Returns updated X of shape (N, D).
+        """
+        # D=4 always satisfies D<=5; five-dimensional path (Eq.4) is intentionally omitted.
+        theta = (_math.pi / 2) * (T / self.Tmax)
+        Et = ((self.Tmax - T) / self.Tmax) * _math.cos(theta)
+        X_new = X.copy()
+        for i in range(self.N):
+            p = self.rng.integers(0, self.D)
+            candidates = [j for j in range(self.N) if j != i]
+            k1, k2 = self.rng.choice(candidates, size=2, replace=False)
+            A1 = self.rng.uniform(-1, 1)
+            A2 = self.rng.uniform(-1, 1)
+            y_p = (
+                Et * X[i, p]
+                + A1 * (X[k1, p] - X[i, p])
+                + A2 * (X[k2, p] - X[i, p])
+            )
+            if self.BOUNDS_LOW[p] <= y_p <= self.BOUNDS_HIGH[p]:
+                X_new[i, p] = y_p
+        return X_new
+
+    def _exploit(self, X: np.ndarray, best_pos: np.ndarray, T: int) -> np.ndarray:
+        """
+        Exploitation phase: preying (Eq. 11) for i != N-1, regeneration (Eq. 12) for i = N-1.
+        Returns updated X of shape (N, D).
+        """
+        X_new = X.copy()
+        for i in range(self.N):
+            if i != self.N - 1:
+                candidates = [j for j in range(self.N) if j != i]
+                m_count = min(5, len(candidates))
+                mp_indices = self.rng.choice(candidates, size=m_count, replace=False)
+                distances = [best_pos - X[mp] for mp in mp_indices]
+                sel_count = min(2, len(distances))
+                sel = self.rng.choice(len(distances), size=sel_count, replace=False)
+                dm1 = distances[sel[0]]
+                dm2 = distances[sel[1]] if sel_count > 1 else distances[sel[0]]
+                r1, r2 = self.rng.uniform(0, 1), self.rng.uniform(0, 1)
+                y = X[i] + r1 * dm1 + r2 * dm2
+                X_new[i] = self._clip_to_bounds(y)
+            else:
+                y = _math.exp(-T * self.N / self.Tmax) * X[i]
+                X_new[i] = self._clip_to_bounds(y)
+        return X_new
+
+    def optimize(self, initial_state: dict = None) -> tuple[dict, float, dict]:
+        """
+        Run SFOA.
+
+        Args:
+            initial_state: optional dict with keys 'X', 'fitness', 'best_pos',
+                           'best_fitness', 'T' to resume a previous run.
+
+        Returns:
+            (best_hyperparams: dict, best_fitness: float, final_state: dict)
+            final_state contains all keys needed to resume.
+        """
+        if initial_state is not None and "X" in initial_state:
+            X = np.asarray(initial_state["X"], dtype=float)
+            if X.shape != (self.N, self.D):
+                logging.warning(
+                    "[SFOA] Resume state shape %s does not match (%d, %d); reinitializing.",
+                    X.shape,
+                    self.N,
+                    self.D,
+                )
+                X = self.rng.random((self.N, self.D)) * (
+                    self.BOUNDS_HIGH - self.BOUNDS_LOW
+                ) + self.BOUNDS_LOW
+        else:
+            X = self.rng.random((self.N, self.D)) * (
+                self.BOUNDS_HIGH - self.BOUNDS_LOW
+            ) + self.BOUNDS_LOW
+
+        fitness = self._evaluate_all(X)
+        best_idx = int(np.argmin(fitness))
+        best_pos = X[best_idx].copy()
+        best_fitness = float(fitness[best_idx])
+
+        start_T = 1
+        if initial_state is not None:
+            start_T = int(initial_state.get("T", 0)) + 1
+
+        last_T = start_T - 1
+        if start_T <= self.Tmax:
+            for T in range(start_T, self.Tmax + 1):
+                rand_val = self.rng.uniform(0, 1)
+                if rand_val > self.Gp:
+                    X = self._explore(X, T)
+                else:
+                    X = self._exploit(X, best_pos, T)
+
+                fitness = self._evaluate_all(X)
+                best_idx = int(np.argmin(fitness))
+                if fitness[best_idx] < best_fitness:
+                    best_fitness = float(fitness[best_idx])
+                    best_pos = X[best_idx].copy()
+
+                best_params = self._decode(best_pos)
+                logging.info(
+                    "[SFOA] Iteration %d/%d | Best val loss: %.6f | hidden=%s, layers=%s, dropout=%.4f, lr=%.8f",
+                    T,
+                    self.Tmax,
+                    best_fitness,
+                    best_params["hidden_size"],
+                    best_params["num_layers"],
+                    best_params["dropout"],
+                    best_params["lr"],
+                )
+                last_T = T
+
+        final_state = {
+            "X": X,
+            "fitness": fitness,
+            "best_pos": best_pos,
+            "best_fitness": best_fitness,
+            "T": last_T,
+            "N": self.N,
+            "Tmax": self.Tmax,
+        }
+        return self._decode(best_pos), best_fitness, final_state
+
+
+def run_sfoa_search(args, train_ds, val_ds, device) -> dict:
+    """
+    Run SFOA to find the best hyperparameter configuration.
+    Evaluates each candidate by training a fresh model for TRAINING.SFOA_EVAL_EPOCHS
+    epochs and returning the weighted-average validation loss.
+
+    Returns a hyperparams dict with keys: hidden_size, num_layers, dropout, lr.
+    """
+    pin_memory = device.type != "cpu"
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=0,
+        pin_memory=pin_memory,
+    )
+    val_loader = DataLoader(
+        val_ds,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=0,
+        pin_memory=pin_memory,
+    )
+
+    first_x, *_ = train_ds[0]
+    input_size = first_x.shape[-1]
+    eval_counter = {"count": 0}
+
+    def eval_fn(hyperparams: dict) -> float:
+        model = None
+        optimizer = None
+        eval_counter["count"] += 1
+        torch.manual_seed(args.seed + eval_counter["count"])
+        try:
+            model = RNNForecaster(
+                input_size=input_size,
+                hidden_size=hyperparams["hidden_size"],
+                num_layers=hyperparams["num_layers"],
+                dropout=hyperparams["dropout"],
+                horizon=args.pred_horizon,
+                rnn_type=args.rnn_type,
+                bidirectional=args.bidirectional,
+                quantiles=None,
+            ).to(device)
+
+            optimizer = torch.optim.Adam(
+                model.parameters(),
+                lr=hyperparams["lr"],
+                weight_decay=args.weight_decay,
+            )
+
+            for _ in range(TRAINING.SFOA_EVAL_EPOCHS):
+                model.train()
+                for batch in train_loader:
+                    if args.use_weights:
+                        x, y, w, _ = batch
+                    else:
+                        x, y, _ = batch
+                        w = None
+                    x = x.to(device)
+                    y = y.to(device)
+                    if w is not None:
+                        w = w.to(device)
+
+                    optimizer.zero_grad()
+                    preds = model(x)
+                    loss = weighted_mse(
+                        preds, y, w, under_penalty=args.under_penalty
+                    )
+                    loss.backward()
+                    optimizer.step()
+
+            model.eval()
+            val_loss_accum = 0.0
+            val_samples_seen = 0
+            with torch.no_grad():
+                for batch in val_loader:
+                    if args.use_weights:
+                        x, y, w, _ = batch
+                    else:
+                        x, y, _ = batch
+                        w = None
+                    x = x.to(device)
+                    y = y.to(device)
+                    if w is not None:
+                        w = w.to(device)
+
+                    preds = model(x)
+                    loss = weighted_mse(
+                        preds, y, w, under_penalty=args.under_penalty
+                    )
+                    val_loss_accum += loss.item() * x.size(0)
+                    val_samples_seen += x.size(0)
+            return val_loss_accum / max(1, val_samples_seen)
+        except Exception as exc:
+            logging.warning("[SFOA] Evaluation failed: %s", exc, exc_info=True)
+            return float("inf")
+        finally:
+            if model is not None:
+                del model
+            if optimizer is not None:
+                del optimizer
+            torch.cuda.empty_cache()
+
+    logging.info(
+        "[SFOA] Starting hyperparameter search: N=%d, Tmax=%d, eval_epochs=%d",
+        TRAINING.SFOA_POPULATION,
+        TRAINING.SFOA_ITERATIONS,
+        TRAINING.SFOA_EVAL_EPOCHS,
+    )
+
+    sfoa = SFOAOptimizer(
+        eval_fn=eval_fn,
+        N=TRAINING.SFOA_POPULATION,
+        Tmax=TRAINING.SFOA_ITERATIONS,
+        Gp=TRAINING.SFOA_GP,
+        seed=args.seed,
+    )
+
+    resume_state = load_resume_state(PATHS.RESUME_STATE_FILE)
+    initial_state = (
+        resume_state.get("sfoa_state")
+        if resume_state and "sfoa_state" in resume_state
+        else None
+    )
+    best_hp, best_fitness, sfoa_state = sfoa.optimize(initial_state=initial_state)
+
+    try:
+        existing = load_resume_state(PATHS.RESUME_STATE_FILE) or {}
+        existing["sfoa_state"] = sfoa_state
+        save_resume_state(PATHS.RESUME_STATE_FILE, existing)
+    except Exception as exc:
+        logging.warning("Could not save SFOA state: %s", exc)
+
+    logging.info(
+        "[SFOA] Search complete. Best val loss: %.6f | Params: %s",
+        best_fitness,
+        best_hp,
+    )
+    return best_hp
+
+
 def train(args):
     accelerator = Accelerator(cpu=args.cpu)
     device = accelerator.device
@@ -204,6 +578,10 @@ def train(args):
         args.resume_training = True
     if not hasattr(args, "probabilistic"):
         args.probabilistic = TRAINING.PROBABILISTIC_TRAINING
+    # Resolve hyperparam optimizer setting (CLI arg takes precedence over default)
+    hyperparam_optimizer = getattr(
+        args, "hyperparam_optimizer", TRAINING.HYPERPARAM_OPTIMIZER
+    )
 
     rng = random.Random(args.seed)
 
@@ -218,21 +596,6 @@ def train(args):
         if resume_state
         else set()
     )
-    current_hyperparams = resume_state.get("hyperparams") if resume_state else None
-    if current_hyperparams is not None:
-        used_keys.add(hyperparam_key(current_hyperparams))
-
-    if current_hyperparams is None:
-        current_hyperparams = sample_hyperparams(rng, used_keys)
-
-    if current_hyperparams is None:
-        raise RuntimeError(
-            "Unable to select a unique hyperparameter set after "
-            f"{TRAINING.HYPERPARAM_SAMPLE_ATTEMPTS} attempts."
-        )
-
-    apply_hyperparams(args, current_hyperparams)
-
     start_epoch = resume_state.get("epoch", 0) + 1 if resume_state else 1
     best_score = (
         resume_state.get("best_score", float("inf")) if resume_state else float("inf")
@@ -250,17 +613,13 @@ def train(args):
             f"Resuming training from epoch {start_epoch} using {PATHS.RESUME_STATE_FILE}"
         )
 
-    log_info("\n--- Configuration Inputs ---")
-    for key, value in vars(args).items():
-        log_info(f"{key:<20}: {value}")
-    log_info("-" * 30)
-
     if start_epoch > args.epochs:
+        log_info("\n--- Configuration Inputs ---")
+        for key, value in vars(args).items():
+            log_info(f"{key:<20}: {value}")
+        log_info("-" * 30)
         log_info("Resume state indicates training has already completed.")
         return
-
-    log_info(f"Device: {device} | Distributed Processes: {accelerator.num_processes}")
-    torch.manual_seed(args.seed)
 
     log_info("\n--- Loading Datasets ---")
 
@@ -281,6 +640,124 @@ def train(args):
         log_info(f"Inferred Input Size: {input_size}")
     else:
         raise RuntimeError("Train dataset is empty.")
+
+    current_hyperparams = resume_state.get("hyperparams") if resume_state else None
+    if current_hyperparams is not None:
+        used_keys.add(hyperparam_key(current_hyperparams))
+
+    if current_hyperparams is None:
+        if hyperparam_optimizer == "sfoa" and accelerator.is_local_main_process:
+            log_info("Running SFOA hyperparameter search before main training...")
+            current_hyperparams = run_sfoa_search(args, train_ds, val_ds, device)
+            if current_hyperparams is None:
+                logging.warning(
+                    "[SFOA] Search did not return hyperparameters; falling back to random sampling."
+                )
+                current_hyperparams = sample_hyperparams(rng, used_keys)
+        if hyperparam_optimizer == "sfoa" and accelerator.num_processes > 1:
+            accelerator.wait_for_everyone()
+
+            def encode_hyperparams(hyperparams):
+                hidden_idx = TRAINING.HIDDEN_SIZE_OPTIONS.index(
+                    hyperparams["hidden_size"]
+                )
+                layer_idx = TRAINING.NUM_LAYERS_OPTIONS.index(hyperparams["num_layers"])
+                log_lr = _math.log10(hyperparams["lr"])
+                return torch.tensor(
+                    [hidden_idx, layer_idx, hyperparams["dropout"], log_lr],
+                    device=device,
+                    dtype=torch.float32,
+                )
+
+            def decode_hyperparams(tensor):
+                def clip(val, low, high):
+                    return max(low, min(high, float(val)))
+
+                hidden_idx = int(
+                    round(
+                        clip(
+                            tensor[0].item(),
+                            0,
+                            len(TRAINING.HIDDEN_SIZE_OPTIONS) - 1,
+                        )
+                    )
+                )
+                layer_idx = int(
+                    round(
+                        clip(
+                            tensor[1].item(),
+                            0,
+                            len(TRAINING.NUM_LAYERS_OPTIONS) - 1,
+                        )
+                    )
+                )
+                dropout = round(
+                    clip(
+                        tensor[2].item(),
+                        TRAINING.DROPOUT_RANGE[0],
+                        TRAINING.DROPOUT_RANGE[1],
+                    ),
+                    4,
+                )
+                lr = round(
+                    10
+                    ** clip(
+                        tensor[3].item(),
+                        _math.log10(TRAINING.LR_RANGE[0]),
+                        _math.log10(TRAINING.LR_RANGE[1]),
+                    ),
+                    8,
+                )
+                return {
+                    "hidden_size": TRAINING.HIDDEN_SIZE_OPTIONS[hidden_idx],
+                    "num_layers": TRAINING.NUM_LAYERS_OPTIONS[layer_idx],
+                    "dropout": dropout,
+                    "lr": lr,
+                }
+
+            try:
+                import torch.distributed as dist
+
+                if dist.is_available() and dist.is_initialized():
+                    if accelerator.is_local_main_process:
+                        hyper_tensor = encode_hyperparams(current_hyperparams)
+                    else:
+                        hyper_tensor = torch.zeros(SFOAOptimizer.D, device=device)
+                    dist.broadcast(hyper_tensor, src=0)
+                    current_hyperparams = decode_hyperparams(hyper_tensor)
+                else:
+                    logging.warning(
+                        "[SFOA] Distributed broadcast unavailable; falling back to random sampling on non-main processes."
+                    )
+                    if not accelerator.is_local_main_process:
+                        current_hyperparams = sample_hyperparams(rng, used_keys)
+            except Exception as exc:
+                logging.warning(
+                    "[SFOA] Failed to broadcast hyperparameters: %s", exc
+                )
+                if not accelerator.is_local_main_process:
+                    current_hyperparams = sample_hyperparams(rng, used_keys)
+        elif hyperparam_optimizer != "sfoa":
+            current_hyperparams = sample_hyperparams(rng, used_keys)
+
+    if current_hyperparams is not None:
+        used_keys.add(hyperparam_key(current_hyperparams))
+
+    if current_hyperparams is None:
+        raise RuntimeError(
+            "Unable to select a unique hyperparameter set after "
+            f"{TRAINING.HYPERPARAM_SAMPLE_ATTEMPTS} attempts."
+        )
+
+    apply_hyperparams(args, current_hyperparams)
+
+    log_info("\n--- Configuration Inputs ---")
+    for key, value in vars(args).items():
+        log_info(f"{key:<20}: {value}")
+    log_info("-" * 30)
+
+    log_info(f"Device: {device} | Distributed Processes: {accelerator.num_processes}")
+    torch.manual_seed(args.seed)
 
     quantiles = TRAINING.QUANTILES
     pinball_loss = PinballLoss(quantiles).to(device) if args.probabilistic else None
@@ -450,47 +927,50 @@ def train(args):
             else:
                 no_change_streak = 0
 
-        if (
-            no_change_streak >= TRAINING.HYPERPARAM_CHECK_INTERVAL
-            and epoch < args.epochs
-        ):
-            new_hyperparams = sample_hyperparams(rng, used_keys)
-            if new_hyperparams is not None:
-                delta_display = f"{delta:.4f}" if delta is not None else "N/A"
-                log_info(
-                    "Train loss change below threshold for "
-                    f"{no_change_streak} consecutive epochs (Δ={delta_display}). "
-                    "Switching hyperparameters."
-                )
-                log_info(f"New hyperparameters: {new_hyperparams}")
+        if hyperparam_optimizer != "sfoa":
+            if (
+                no_change_streak >= TRAINING.HYPERPARAM_CHECK_INTERVAL
+                and epoch < args.epochs
+            ):
+                new_hyperparams = sample_hyperparams(rng, used_keys)
+                if new_hyperparams is not None:
+                    delta_display = f"{delta:.4f}" if delta is not None else "N/A"
+                    log_info(
+                        "Train loss change below threshold for "
+                        f"{no_change_streak} consecutive epochs (Δ={delta_display}). "
+                        "Switching hyperparameters."
+                    )
+                    log_info(f"New hyperparameters: {new_hyperparams}")
 
-                apply_hyperparams(args, new_hyperparams)
+                    apply_hyperparams(args, new_hyperparams)
 
-                new_model = RNNForecaster(
-                    input_size=input_size,
-                    hidden_size=args.hidden_size,
-                    num_layers=args.num_layers,
-                    dropout=args.dropout,
-                    horizon=args.pred_horizon,
-                    rnn_type=args.rnn_type,
-                    bidirectional=args.bidirectional,
-                    quantiles=quantiles if args.probabilistic else None,
-                ).to(device)
+                    new_model = RNNForecaster(
+                        input_size=input_size,
+                        hidden_size=args.hidden_size,
+                        num_layers=args.num_layers,
+                        dropout=args.dropout,
+                        horizon=args.pred_horizon,
+                        rnn_type=args.rnn_type,
+                        bidirectional=args.bidirectional,
+                        quantiles=quantiles if args.probabilistic else None,
+                    ).to(device)
 
-                new_optimizer = torch.optim.Adam(
-                    new_model.parameters(), lr=args.lr, weight_decay=args.weight_decay
-                )
+                    new_optimizer = torch.optim.Adam(
+                        new_model.parameters(), lr=args.lr, weight_decay=args.weight_decay
+                    )
 
-                model, optimizer = accelerator.prepare(new_model, new_optimizer)
+                    model, optimizer = accelerator.prepare(new_model, new_optimizer)
 
-                current_hyperparams = new_hyperparams
-                last_train_loss = None
+                    current_hyperparams = new_hyperparams
+                    last_train_loss = None
+                else:
+                    log_info(
+                        "No unused hyperparameter combinations remain; keeping current settings."
+                    )
+                    last_train_loss = avg_train_loss
+                no_change_streak = 0
             else:
-                log_info(
-                    "No unused hyperparameter combinations remain; keeping current settings."
-                )
                 last_train_loss = avg_train_loss
-            no_change_streak = 0
         else:
             last_train_loss = avg_train_loss
 
@@ -499,6 +979,9 @@ def train(args):
                 "epoch": epoch,
                 "args": vars(args),
                 "hyperparams": current_hyperparams,
+                "sfoa_hyperparams": (
+                    current_hyperparams if hyperparam_optimizer == "sfoa" else None
+                ),
                 "used_hyperparams": list(used_keys),
                 "best_score": best_score,
                 "last_train_loss": last_train_loss,
@@ -556,6 +1039,12 @@ if __name__ == "__main__":
         "--probabilistic",
         action="store_true",
         default=TRAINING.PROBABILISTIC_TRAINING,
+    )
+    p.add_argument(
+        "--hyperparam_optimizer",
+        default=TRAINING.HYPERPARAM_OPTIMIZER,
+        choices=["random", "sfoa"],
+        help="Hyperparameter optimizer: 'random' (default stagnation-based) or 'sfoa'.",
     )
 
     try:
