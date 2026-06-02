@@ -61,6 +61,12 @@ def main():
         default=TRAINING.PROBABILISTIC_TRAINING,
     )
     ap.add_argument(
+        "--hyperparam_optimizer",
+        default=TRAINING.HYPERPARAM_OPTIMIZER,
+        choices=["random", "sfoa"],
+        help="Hyperparameter optimizer to use during training.",
+    )
+    ap.add_argument(
         "--max_services",
         type=int,
         default=PREPROCESSING.MAX_SERVICES,
@@ -164,6 +170,7 @@ def main():
             cmd_train.append("--bidirectional")
         if args.probabilistic:
             cmd_train.append("--probabilistic")
+        cmd_train.extend(["--hyperparam_optimizer", args.hyperparam_optimizer])
         if args.resume_training:
             cmd_train.append("--resume_training")
         if args.cpu:
