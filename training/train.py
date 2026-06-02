@@ -190,20 +190,6 @@ def apply_hyperparams(args, hyperparams):
 
 
 class SFOAOptimizer:
-    """
-    Starfish Optimization Algorithm for hyperparameter search.
-
-    Positions are stored as a numpy array X of shape (N, D=4).
-    D=4 always triggers the D<=5 unidimensional exploration path.
-
-    Args:
-        eval_fn: callable(hyperparams: dict) -> float  (returns val_loss; lower is better)
-        N: population size
-        Tmax: max iterations
-        Gp: exploration probability threshold
-        seed: random seed for reproducibility
-    """
-
     D = 4
     BOUNDS_LOW = None
     BOUNDS_HIGH = None
@@ -224,7 +210,6 @@ class SFOAOptimizer:
             )
 
     def _build_bounds(self):
-        """Return (low, high) as numpy arrays of shape (D,)."""
         low = np.array(
             [
                 0.0,
@@ -270,15 +255,9 @@ class SFOAOptimizer:
         }
 
     def _clip_to_bounds(self, x: np.ndarray) -> np.ndarray:
-        """Element-wise clamp to [BOUNDS_LOW, BOUNDS_HIGH]."""
         return np.clip(x, self.BOUNDS_LOW, self.BOUNDS_HIGH)
 
     def _evaluate_all(self, X: np.ndarray) -> np.ndarray:
-        """
-        Evaluate fitness for all N positions.
-        Returns fitness array of shape (N,).
-        Calls self.eval_fn for each row, catches exceptions (returns inf on failure).
-        """
         fitness = []
         for row in X:
             hyperparams = self._decode(row)
@@ -292,11 +271,6 @@ class SFOAOptimizer:
         return np.asarray(fitness, dtype=float)
 
     def _explore(self, X: np.ndarray, T: int) -> np.ndarray:
-        """
-        Exploration phase (D<=5, unidimensional, Eq. 8).
-        Returns updated X of shape (N, D).
-        """
-        # D=4 always satisfies D<=5; five-dimensional path (Eq.4) is intentionally omitted.
         theta = (_math.pi / 2) * (T / self.Tmax)
         Et = ((self.Tmax - T) / self.Tmax) * _math.cos(theta)
         X_new = X.copy()
@@ -316,10 +290,6 @@ class SFOAOptimizer:
         return X_new
 
     def _exploit(self, X: np.ndarray, best_pos: np.ndarray, T: int) -> np.ndarray:
-        """
-        Exploitation phase: preying (Eq. 11) for i != N-1, regeneration (Eq. 12) for i = N-1.
-        Returns updated X of shape (N, D).
-        """
         X_new = X.copy()
         for i in range(self.N):
             if i != self.N - 1:
@@ -340,17 +310,6 @@ class SFOAOptimizer:
         return X_new
 
     def optimize(self, initial_state: dict = None) -> tuple[dict, float, dict]:
-        """
-        Run SFOA.
-
-        Args:
-            initial_state: optional dict with keys 'X', 'fitness', 'best_pos',
-                           'best_fitness', 'T' to resume a previous run.
-
-        Returns:
-            (best_hyperparams: dict, best_fitness: float, final_state: dict)
-            final_state contains all keys needed to resume.
-        """
         if initial_state is not None and "X" in initial_state:
             X = np.asarray(initial_state["X"], dtype=float)
             if X.shape != (self.N, self.D):
@@ -418,13 +377,6 @@ class SFOAOptimizer:
 
 
 def run_sfoa_search(args, train_ds, val_ds, device) -> dict:
-    """
-    Run SFOA to find the best hyperparameter configuration.
-    Evaluates each candidate by training a fresh model for TRAINING.SFOA_EVAL_EPOCHS
-    epochs and returning the weighted-average validation loss.
-
-    Returns a hyperparams dict with keys: hidden_size, num_layers, dropout, lr.
-    """
     pin_memory = device.type != "cpu"
     train_loader = DataLoader(
         train_ds,
@@ -1011,18 +963,6 @@ if __name__ == "__main__":
     p.add_argument("--grad_clip", type=float, default=TRAINING.GRAD_CLIP)
     p.add_argument("--weight_decay", type=float, default=TRAINING.WEIGHT_DECAY)
     p.add_argument("--under_penalty", type=float, default=TRAINING.UNDER_PENALTY)
-    p.add_argument(
-        "--vol_gamma",
-        type=float,
-        default=30.0,
-        help="Volatility weighting coefficient (upweights samples with large CPU deltas)",
-    )
-    p.add_argument(
-        "--dir_weight",
-        type=float,
-        default=0.5,
-        help="Weight for directional BCE loss term (0.0 to disable)",
-    )
     p.add_argument("--seed", type=int, default=TRAINING.SEED)
     p.add_argument("--cpu", action="store_true")
     p.add_argument("--rnn_type", default="lstm")
@@ -1030,7 +970,6 @@ if __name__ == "__main__":
     p.add_argument(
         "--resume_training",
         action="store_true",
-        help="Resume from the last saved training state if available.",
     )
     p.add_argument(
         "--bidirectional", action="store_true", default=TRAINING.BIDIRECTIONAL
@@ -1044,7 +983,6 @@ if __name__ == "__main__":
         "--hyperparam_optimizer",
         default=TRAINING.HYPERPARAM_OPTIMIZER,
         choices=["random", "sfoa"],
-        help="Hyperparameter optimizer: 'random' (default stagnation-based) or 'sfoa'.",
     )
 
     try:

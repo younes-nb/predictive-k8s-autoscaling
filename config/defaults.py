@@ -240,13 +240,11 @@ class TrainingDefaults:
     BIDIRECTIONAL: bool = False
     PROBABILISTIC_TRAINING: bool = False
     QUANTILES: Tuple[float, ...] = (0.5, 0.9, 0.95)
-    # --- Hyperparameter Optimizer ---
-    HYPERPARAM_OPTIMIZER: str = "random"   # "random" | "sfoa"
-    # --- SFOA-specific settings ---
-    SFOA_POPULATION: int = 10        # N: number of starfish
-    SFOA_ITERATIONS: int = 20        # Tmax: number of SFOA main-loop iterations
-    SFOA_EVAL_EPOCHS: int = 5        # short training epochs to score each starfish
-    SFOA_GP: float = 0.5             # probability threshold: rand > GP → explore, else exploit
+    HYPERPARAM_OPTIMIZER: str = "sfoa"
+    SFOA_POPULATION: int = 10
+    SFOA_ITERATIONS: int = 20
+    SFOA_EVAL_EPOCHS: int = 5
+    SFOA_GP: float = 0.5
 
 
 PREPROCESSING = PreprocessingDefaults()
