@@ -649,6 +649,11 @@ def train(args):
         if hyperparam_optimizer == "sfoa" and accelerator.is_local_main_process:
             log_info("Running SFOA hyperparameter search before main training...")
             current_hyperparams = run_sfoa_search(args, train_ds, val_ds, device)
+            if current_hyperparams is None:
+                logging.warning(
+                    "[SFOA] Search did not return hyperparameters; falling back to random sampling."
+                )
+                current_hyperparams = sample_hyperparams(rng, used_keys)
         if hyperparam_optimizer == "sfoa" and accelerator.num_processes > 1:
             accelerator.wait_for_everyone()
 
@@ -717,7 +722,7 @@ def train(args):
                     if accelerator.is_local_main_process:
                         hyper_tensor = encode_hyperparams(current_hyperparams)
                     else:
-                        hyper_tensor = torch.zeros(4, device=device)
+                        hyper_tensor = torch.zeros(SFOAOptimizer.D, device=device)
                     dist.broadcast(hyper_tensor, src=0)
                     current_hyperparams = decode_hyperparams(hyper_tensor)
                 else:
