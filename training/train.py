@@ -18,6 +18,7 @@ except ImportError:
 
 import torch
 import torch.nn as nn
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from torch.utils.data import DataLoader
 
 from accelerate import Accelerator
@@ -194,13 +195,14 @@ class SFOAOptimizer:
     BOUNDS_LOW = None
     BOUNDS_HIGH = None
 
-    def __init__(self, eval_fn, N, Tmax, Gp, seed=42):
+    def __init__(self, eval_fn, N, Tmax, Gp, seed=42, parallel_eval=False):
         if N < 3:
             raise ValueError("SFOA requires N >= 3 to sample distinct distances.")
         self.eval_fn = eval_fn
         self.N = int(N)
         self.Tmax = int(Tmax)
         self.Gp = float(Gp)
+        self.parallel_eval = bool(parallel_eval)
         self.rng = np.random.default_rng(seed)
         self.BOUNDS_LOW, self.BOUNDS_HIGH = self._build_bounds()
         if self.N < 6:
@@ -231,7 +233,6 @@ class SFOAOptimizer:
         return low, high
 
     def _decode(self, x: np.ndarray) -> dict:
-        """Convert continuous position vector (D,) to a hyperparams dict."""
         def clip(val, low, high):
             return max(low, min(high, float(val)))
 
@@ -258,17 +259,54 @@ class SFOAOptimizer:
         return np.clip(x, self.BOUNDS_LOW, self.BOUNDS_HIGH)
 
     def _evaluate_all(self, X: np.ndarray) -> np.ndarray:
-        fitness = []
-        for row in X:
+        def _evaluate_one(idx: int, row: np.ndarray) -> float:
             hyperparams = self._decode(row)
             try:
-                fitness.append(float(self.eval_fn(copy.deepcopy(hyperparams))))
+                return float(self.eval_fn(copy.deepcopy(hyperparams), candidate_idx=idx))
             except Exception as exc:
                 logging.warning(
-                    "[SFOA] Evaluation failed for %s: %s", hyperparams, exc
+                    "[SFOA] Evaluation failed for candidate #%d (%s): %s",
+                    idx, hyperparams, exc,
                 )
-                fitness.append(float("inf"))
-        return np.asarray(fitness, dtype=float)
+                return float("inf")
+
+        if not self.parallel_eval or len(X) <= 1:
+            return np.asarray([_evaluate_one(i, row) for i, row in enumerate(X)], dtype=float)
+
+        n_gpu = torch.cuda.device_count() if torch.cuda.is_available() else 0
+        results_map: dict[int, float] = {}
+
+        def _worker(idx: int, row: np.ndarray) -> tuple[int, float]:
+            try:
+                fit = _evaluate_one(idx, row)
+                return idx, fit
+            except Exception as exc:
+                logging.warning("[SFOA] Parallel candidate #%d raised: %s", idx, exc)
+                return idx, float("inf")
+
+        with ThreadPoolExecutor(max_workers=n_gpu) as pool:
+            futures = {pool.submit(_worker, i, row): i for i, row in enumerate(X)}
+            for fut in as_completed(futures):
+                idx = futures[fut]
+                try:
+                    _, fit = fut.result()
+                    results_map[idx] = fit
+                except Exception as exc:
+                    logging.warning("[SFOA] Parallel candidate #%d raised: %s", idx, exc)
+                    results_map[idx] = float("inf")
+
+        n_inf = sum(1 for v in results_map.values() if v == float("inf"))
+        if len(X) > 0 and n_inf / len(X) >= 0.5:
+            logging.warning(
+                "[SFOA] Parallel evaluation returned %d/%d inf (OOM?). "
+                "Falling back to sequential.", n_inf, len(X)
+            )
+            torch.cuda.empty_cache()
+            for i in range(len(X)):
+                if i not in results_map or results_map[i] == float("inf"):
+                    results_map[i] = _evaluate_one(i, X[i])
+
+        return np.asarray([results_map[i] for i in range(len(X))], dtype=float)
 
     def _explore(self, X: np.ndarray, T: int) -> np.ndarray:
         theta = (_math.pi / 2) * (T / self.Tmax)
@@ -376,32 +414,53 @@ class SFOAOptimizer:
         return self._decode(best_pos), best_fitness, final_state
 
 
-def run_sfoa_search(args, train_ds, val_ds, device) -> dict:
-    pin_memory = device.type != "cpu"
+def run_sfoa_search(
+    args, train_ds, val_ds, device, *, rank_seed: int = 42,
+    sync_fn=None,
+) -> dict:
+    n_gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 1
+    _sfoa_workers = max(1, (os.cpu_count() or 4) // n_gpu_count)
+
     train_loader = DataLoader(
         train_ds,
         batch_size=args.batch_size,
         shuffle=True,
-        num_workers=0,
-        pin_memory=pin_memory,
+        num_workers=_sfoa_workers,
+        pin_memory=torch.cuda.is_available(),
     )
     val_loader = DataLoader(
         val_ds,
         batch_size=args.batch_size,
         shuffle=False,
-        num_workers=0,
-        pin_memory=pin_memory,
+        num_workers=_sfoa_workers,
+        pin_memory=torch.cuda.is_available(),
     )
 
     first_x, *_ = train_ds[0]
     input_size = first_x.shape[-1]
     eval_counter = {"count": 0}
 
-    def eval_fn(hyperparams: dict) -> float:
+    def _sync():
+        if sync_fn is not None:
+            sync_fn()
+
+    def _decode_and_log(hyperparams: dict, candidate_idx: int) -> str:
+        return (
+            f"cand#{candidate_idx} "
+            f"hidden={hyperparams['hidden_size']} "
+            f"layers={hyperparams['num_layers']} "
+            f"dropout={hyperparams['dropout']:.4f} "
+            f"lr={hyperparams['lr']:.8f}"
+        )
+
+    def eval_fn(hyperparams: dict, *, candidate_idx: int = 0) -> float:
         model = None
         optimizer = None
         eval_counter["count"] += 1
-        torch.manual_seed(args.seed + eval_counter["count"])
+        torch.manual_seed(rank_seed + eval_counter["count"])
+        label = _decode_and_log(hyperparams, candidate_idx)
+
+        _sync()
         try:
             model = RNNForecaster(
                 input_size=input_size,
@@ -420,9 +479,11 @@ def run_sfoa_search(args, train_ds, val_ds, device) -> dict:
                 weight_decay=args.weight_decay,
             )
 
-            for _ in range(TRAINING.SFOA_EVAL_EPOCHS):
+            for epoch in range(TRAINING.SFOA_EVAL_EPOCHS):
                 model.train()
-                for batch in train_loader:
+                epoch_loss_sum = 0.0
+                epoch_batches = 0
+                for batch_idx, batch in enumerate(train_loader):
                     if args.use_weights:
                         x, y, w, _ = batch
                     else:
@@ -435,11 +496,22 @@ def run_sfoa_search(args, train_ds, val_ds, device) -> dict:
 
                     optimizer.zero_grad()
                     preds = model(x)
+
                     loss = weighted_mse(
                         preds, y, w, under_penalty=args.under_penalty
                     )
+
                     loss.backward()
                     optimizer.step()
+                    epoch_loss_sum += loss.item() * x.size(0)
+                    epoch_batches += 1
+
+                avg_train = epoch_loss_sum / max(1, epoch_batches)
+                logging.info(
+                    "[SFOA] %s | eval#%d | epoch %d/%d | train_loss=%.6f",
+                    label, eval_counter["count"],
+                    epoch + 1, TRAINING.SFOA_EVAL_EPOCHS, avg_train,
+                )
 
             model.eval()
             val_loss_accum = 0.0
@@ -462,9 +534,14 @@ def run_sfoa_search(args, train_ds, val_ds, device) -> dict:
                     )
                     val_loss_accum += loss.item() * x.size(0)
                     val_samples_seen += x.size(0)
-            return val_loss_accum / max(1, val_samples_seen)
+            val_loss = val_loss_accum / max(1, val_samples_seen)
+            logging.info(
+                "[SFOA] %s | eval#%d | DONE val_loss=%.6f",
+                label, eval_counter["count"], val_loss,
+            )
+            return val_loss
         except Exception as exc:
-            logging.warning("[SFOA] Evaluation failed: %s", exc, exc_info=True)
+            logging.warning("[SFOA] Evaluation failed for %s: %s", label, exc, exc_info=True)
             return float("inf")
         finally:
             if model is not None:
@@ -473,11 +550,16 @@ def run_sfoa_search(args, train_ds, val_ds, device) -> dict:
                 del optimizer
             torch.cuda.empty_cache()
 
+    n_gpu = torch.cuda.device_count() if torch.cuda.is_available() else 1
+
     logging.info(
-        "[SFOA] Starting hyperparameter search: N=%d, Tmax=%d, eval_epochs=%d",
+        "[SFOA] Starting hyperparameter search: N=%d, Tmax=%d, eval_epochs=%d | "
+        "evaluation_parallel=%s, workers/candidate=%d",
         TRAINING.SFOA_POPULATION,
         TRAINING.SFOA_ITERATIONS,
         TRAINING.SFOA_EVAL_EPOCHS,
+        str(TRAINING.SFOA_EVALUATION_PARALLEL),
+        _sfoa_workers,
     )
 
     sfoa = SFOAOptimizer(
@@ -485,7 +567,8 @@ def run_sfoa_search(args, train_ds, val_ds, device) -> dict:
         N=TRAINING.SFOA_POPULATION,
         Tmax=TRAINING.SFOA_ITERATIONS,
         Gp=TRAINING.SFOA_GP,
-        seed=args.seed,
+        seed=rank_seed,
+        parallel_eval=TRAINING.SFOA_EVALUATION_PARALLEL,
     )
 
     resume_state = load_resume_state(PATHS.RESUME_STATE_FILE)
@@ -515,6 +598,7 @@ def train(args):
     accelerator = Accelerator(cpu=args.cpu)
     device = accelerator.device
 
+
     log_info = lambda msg: (
         logging.info(msg) if accelerator.is_local_main_process else None
     )
@@ -530,7 +614,6 @@ def train(args):
         args.resume_training = True
     if not hasattr(args, "probabilistic"):
         args.probabilistic = TRAINING.PROBABILISTIC_TRAINING
-    # Resolve hyperparam optimizer setting (CLI arg takes precedence over default)
     hyperparam_optimizer = getattr(
         args, "hyperparam_optimizer", TRAINING.HYPERPARAM_OPTIMIZER
     )
@@ -597,100 +680,26 @@ def train(args):
     if current_hyperparams is not None:
         used_keys.add(hyperparam_key(current_hyperparams))
 
-    if current_hyperparams is None:
-        if hyperparam_optimizer == "sfoa" and accelerator.is_local_main_process:
-            log_info("Running SFOA hyperparameter search before main training...")
-            current_hyperparams = run_sfoa_search(args, train_ds, val_ds, device)
-            if current_hyperparams is None:
-                logging.warning(
-                    "[SFOA] Search did not return hyperparameters; falling back to random sampling."
-                )
-                current_hyperparams = sample_hyperparams(rng, used_keys)
-        if hyperparam_optimizer == "sfoa" and accelerator.num_processes > 1:
-            accelerator.wait_for_everyone()
+    if current_hyperparams is None and hyperparam_optimizer == "sfoa":
+        if accelerator.num_processes > 1:
+            _sync = accelerator.wait_for_everyone
+        else:
+            _sync = None
 
-            def encode_hyperparams(hyperparams):
-                hidden_idx = TRAINING.HIDDEN_SIZE_OPTIONS.index(
-                    hyperparams["hidden_size"]
-                )
-                layer_idx = TRAINING.NUM_LAYERS_OPTIONS.index(hyperparams["num_layers"])
-                log_lr = _math.log10(hyperparams["lr"])
-                return torch.tensor(
-                    [hidden_idx, layer_idx, hyperparams["dropout"], log_lr],
-                    device=device,
-                    dtype=torch.float32,
-                )
-
-            def decode_hyperparams(tensor):
-                def clip(val, low, high):
-                    return max(low, min(high, float(val)))
-
-                hidden_idx = int(
-                    round(
-                        clip(
-                            tensor[0].item(),
-                            0,
-                            len(TRAINING.HIDDEN_SIZE_OPTIONS) - 1,
-                        )
-                    )
-                )
-                layer_idx = int(
-                    round(
-                        clip(
-                            tensor[1].item(),
-                            0,
-                            len(TRAINING.NUM_LAYERS_OPTIONS) - 1,
-                        )
-                    )
-                )
-                dropout = round(
-                    clip(
-                        tensor[2].item(),
-                        TRAINING.DROPOUT_RANGE[0],
-                        TRAINING.DROPOUT_RANGE[1],
-                    ),
-                    4,
-                )
-                lr = round(
-                    10
-                    ** clip(
-                        tensor[3].item(),
-                        _math.log10(TRAINING.LR_RANGE[0]),
-                        _math.log10(TRAINING.LR_RANGE[1]),
-                    ),
-                    8,
-                )
-                return {
-                    "hidden_size": TRAINING.HIDDEN_SIZE_OPTIONS[hidden_idx],
-                    "num_layers": TRAINING.NUM_LAYERS_OPTIONS[layer_idx],
-                    "dropout": dropout,
-                    "lr": lr,
-                }
-
-            try:
-                import torch.distributed as dist
-
-                if dist.is_available() and dist.is_initialized():
-                    if accelerator.is_local_main_process:
-                        hyper_tensor = encode_hyperparams(current_hyperparams)
-                    else:
-                        hyper_tensor = torch.zeros(SFOAOptimizer.D, device=device)
-                    dist.broadcast(hyper_tensor, src=0)
-                    current_hyperparams = decode_hyperparams(hyper_tensor)
-                else:
-                    logging.warning(
-                        "[SFOA] Distributed broadcast unavailable; falling back to random sampling on non-main processes."
-                    )
-                    if not accelerator.is_local_main_process:
-                        current_hyperparams = sample_hyperparams(rng, used_keys)
-            except Exception as exc:
-                logging.warning(
-                    "[SFOA] Failed to broadcast hyperparameters: %s", exc
-                )
-                if not accelerator.is_local_main_process:
-                    current_hyperparams = sample_hyperparams(rng, used_keys)
-        elif hyperparam_optimizer != "sfoa":
+        log_info("Running SFOA hyperparameter search before main training...")
+        if _sync is not None:
+            _sync()
+        current_hyperparams = run_sfoa_search(
+            args, train_ds, val_ds, device, rank_seed=args.seed, sync_fn=_sync
+        )
+        if current_hyperparams is None:
+            logging.warning(
+                "[SFOA] Search did not return hyperparameters; falling back to random sampling."
+            )
             current_hyperparams = sample_hyperparams(rng, used_keys)
+
+    elif current_hyperparams is None:
+        current_hyperparams = sample_hyperparams(rng, used_keys)
 
     if current_hyperparams is not None:
         used_keys.add(hyperparam_key(current_hyperparams))

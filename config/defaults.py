@@ -245,6 +245,7 @@ class TrainingDefaults:
     SFOA_ITERATIONS: int = 20
     SFOA_EVAL_EPOCHS: int = 5
     SFOA_GP: float = 0.5
+    SFOA_EVALUATION_PARALLEL: bool = False
 
 
 PREPROCESSING = PreprocessingDefaults()
