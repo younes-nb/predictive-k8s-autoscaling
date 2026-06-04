@@ -24,7 +24,7 @@ from shared.config_preprocessing_defaults import PREPROCESSING
 from shared.config_training_defaults import TRAINING
 from shared.features import FEATURE_SETS, get_feature_set, tables_for_feature_set, table_to_feature_exprs, FEATURES
 
-from .parquet_utils import list_parquet_parts, build_table_agg
+from preprocessing.parquet_utils import list_parquet_parts, build_table_agg
 from shared.smote_tomek import _apply_smote_tomek
 
 

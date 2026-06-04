@@ -23,7 +23,7 @@ from shared.config_paths import PATHS, DATASET_TABLES
 from shared.config_training_defaults import TRAINING
 
 # Extracted utilities
-from .utils import find_shards, hist_update, hist_quantile
+from tooling.utils import find_shards, hist_update, hist_quantile
 
 
 def main():

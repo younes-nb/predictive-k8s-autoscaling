@@ -26,7 +26,7 @@ from shared.logging_utils import setup_logging
 from core.dataset import ShardedWindowsDataset
 from core.models import RNNForecaster
 
-from .metrics import compute_metrics, find_max_inference_batch_size
+from training.metrics import compute_metrics, find_max_inference_batch_size
 
 
 def evaluate(args):

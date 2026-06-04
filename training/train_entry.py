@@ -28,8 +28,8 @@ from shared.logging_utils import setup_logging
 from core.dataset import ShardedWindowsDataset
 from core.models import RNNForecaster
 
-from .loss import PinballLoss, weighted_mse
-from .train_helpers import (
+from training.loss import PinballLoss, weighted_mse
+from training.train_helpers import (
     find_max_batch_size,
     hyperparam_key,
     sample_hyperparams,
@@ -37,7 +37,7 @@ from .train_helpers import (
     load_resume_state,
     save_resume_state,
 )
-from .sfoa_search import run_sfoa_search
+from training.sfoa_search import run_sfoa_search
 
 
 def train(args):
