@@ -90,9 +90,13 @@ class PinballLoss(nn.Module):
         q = torch.tensor([float(q) for q in quantiles], dtype=torch.float32)
         self.register_buffer("quantiles", q)
 
-    def forward(self, preds: torch.Tensor, target: torch.Tensor, w=None) -> torch.Tensor:
+    def forward(
+        self, preds: torch.Tensor, target: torch.Tensor, w=None
+    ) -> torch.Tensor:
         if preds.dim() != 3:
-            raise ValueError("PinballLoss expects preds with shape (batch, horizon, q).")
+            raise ValueError(
+                "PinballLoss expects preds with shape (batch, horizon, q)."
+            )
         q = self.quantiles.view(1, 1, -1)
         diff = target.unsqueeze(-1) - preds
         loss = torch.maximum(q * diff, (1.0 - q) * (-diff))
@@ -106,7 +110,12 @@ class PinballLoss(nn.Module):
 
 
 def find_max_batch_size(
-    model, input_size, args, device, loss_fn: Optional[nn.Module] = None, starting_batch=8192
+    model,
+    input_size,
+    args,
+    device,
+    loss_fn: Optional[nn.Module] = None,
+    starting_batch=8192,
 ):
     batch_size = starting_batch
     model.train()
@@ -195,7 +204,9 @@ class SFOAOptimizer:
     BOUNDS_LOW = None
     BOUNDS_HIGH = None
 
-    def __init__(self, eval_fn, N, Tmax, Gp, seed=42, parallel_eval=False):
+    def __init__(
+        self, eval_fn, N, Tmax, Gp, seed=42, parallel_eval=False, accelerator=None
+    ):
         if N < 3:
             raise ValueError("SFOA requires N >= 3 to sample distinct distances.")
         self.eval_fn = eval_fn
@@ -203,6 +214,7 @@ class SFOAOptimizer:
         self.Tmax = int(Tmax)
         self.Gp = float(Gp)
         self.parallel_eval = bool(parallel_eval)
+        self.accelerator = accelerator
         self.rng = np.random.default_rng(seed)
         self.BOUNDS_LOW, self.BOUNDS_HIGH = self._build_bounds()
         if self.N < 6:
@@ -236,18 +248,10 @@ class SFOAOptimizer:
         def clip(val, low, high):
             return max(low, min(high, float(val)))
 
-        idx_hidden = int(
-            round(clip(x[0], self.BOUNDS_LOW[0], self.BOUNDS_HIGH[0]))
-        )
-        idx_layers = int(
-            round(clip(x[1], self.BOUNDS_LOW[1], self.BOUNDS_HIGH[1]))
-        )
-        dropout = round(
-            float(clip(x[2], self.BOUNDS_LOW[2], self.BOUNDS_HIGH[2])), 4
-        )
-        lr = round(
-            10 ** float(clip(x[3], self.BOUNDS_LOW[3], self.BOUNDS_HIGH[3])), 8
-        )
+        idx_hidden = int(round(clip(x[0], self.BOUNDS_LOW[0], self.BOUNDS_HIGH[0])))
+        idx_layers = int(round(clip(x[1], self.BOUNDS_LOW[1], self.BOUNDS_HIGH[1])))
+        dropout = round(float(clip(x[2], self.BOUNDS_LOW[2], self.BOUNDS_HIGH[2])), 4)
+        lr = round(10 ** float(clip(x[3], self.BOUNDS_LOW[3], self.BOUNDS_HIGH[3])), 8)
         return {
             "hidden_size": TRAINING.HIDDEN_SIZE_OPTIONS[idx_hidden],
             "num_layers": TRAINING.NUM_LAYERS_OPTIONS[idx_layers],
@@ -262,27 +266,61 @@ class SFOAOptimizer:
         def _evaluate_one(idx: int, row: np.ndarray) -> float:
             hyperparams = self._decode(row)
             try:
-                return float(self.eval_fn(copy.deepcopy(hyperparams), candidate_idx=idx))
+                return float(
+                    self.eval_fn(copy.deepcopy(hyperparams), candidate_idx=idx)
+                )
             except Exception as exc:
                 logging.warning(
                     "[SFOA] Evaluation failed for candidate #%d (%s): %s",
-                    idx, hyperparams, exc,
+                    idx,
+                    hyperparams,
+                    exc,
                 )
                 return float("inf")
 
+        if self.accelerator is not None and self.accelerator.num_processes > 1:
+            num_procs = self.accelerator.num_processes
+            rank = self.accelerator.process_index
+
+            local_fitness = np.full(len(X), float("inf"), dtype=float)
+
+            for i in range(len(X)):
+                if i % num_procs == rank:
+                    local_fitness[i] = _evaluate_one(i, X[i])
+
+            try:
+                import torch
+
+                fitness_tensor = torch.tensor(
+                    local_fitness, device=self.accelerator.device
+                )
+
+                inf_mask = torch.isinf(fitness_tensor)
+                fitness_tensor[inf_mask] = 1e9
+
+                fitness_tensor = self.accelerator.reduce(
+                    fitness_tensor, reduction="min"
+                )
+
+                global_fitness = fitness_tensor.cpu().numpy()
+                global_fitness[global_fitness >= 1e8] = float("inf")
+                return global_fitness
+            except Exception as e:
+                logging.error(
+                    "[SFOA] Error during distributed fitness reduction: %s", e
+                )
+                return local_fitness
+
         if not self.parallel_eval or len(X) <= 1:
-            return np.asarray([_evaluate_one(i, row) for i, row in enumerate(X)], dtype=float)
+            return np.asarray(
+                [_evaluate_one(i, row) for i, row in enumerate(X)], dtype=float
+            )
 
         n_gpu = torch.cuda.device_count() if torch.cuda.is_available() else 0
         results_map: dict[int, float] = {}
 
         def _worker(idx: int, row: np.ndarray) -> tuple[int, float]:
-            try:
-                fit = _evaluate_one(idx, row)
-                return idx, fit
-            except Exception as exc:
-                logging.warning("[SFOA] Parallel candidate #%d raised: %s", idx, exc)
-                return idx, float("inf")
+            return idx, _evaluate_one(idx, row)
 
         with ThreadPoolExecutor(max_workers=n_gpu) as pool:
             futures = {pool.submit(_worker, i, row): i for i, row in enumerate(X)}
@@ -292,19 +330,10 @@ class SFOAOptimizer:
                     _, fit = fut.result()
                     results_map[idx] = fit
                 except Exception as exc:
-                    logging.warning("[SFOA] Parallel candidate #%d raised: %s", idx, exc)
+                    logging.warning(
+                        "[SFOA] Parallel candidate #%d raised: %s", idx, exc
+                    )
                     results_map[idx] = float("inf")
-
-        n_inf = sum(1 for v in results_map.values() if v == float("inf"))
-        if len(X) > 0 and n_inf / len(X) >= 0.5:
-            logging.warning(
-                "[SFOA] Parallel evaluation returned %d/%d inf (OOM?). "
-                "Falling back to sequential.", n_inf, len(X)
-            )
-            torch.cuda.empty_cache()
-            for i in range(len(X)):
-                if i not in results_map or results_map[i] == float("inf"):
-                    results_map[i] = _evaluate_one(i, X[i])
 
         return np.asarray([results_map[i] for i in range(len(X))], dtype=float)
 
@@ -318,11 +347,7 @@ class SFOAOptimizer:
             k1, k2 = self.rng.choice(candidates, size=2, replace=False)
             A1 = self.rng.uniform(-1, 1)
             A2 = self.rng.uniform(-1, 1)
-            y_p = (
-                Et * X[i, p]
-                + A1 * (X[k1, p] - X[i, p])
-                + A2 * (X[k2, p] - X[i, p])
-            )
+            y_p = Et * X[i, p] + A1 * (X[k1, p] - X[i, p]) + A2 * (X[k2, p] - X[i, p])
             if self.BOUNDS_LOW[p] <= y_p <= self.BOUNDS_HIGH[p]:
                 X_new[i, p] = y_p
         return X_new
@@ -357,13 +382,16 @@ class SFOAOptimizer:
                     self.N,
                     self.D,
                 )
-                X = self.rng.random((self.N, self.D)) * (
-                    self.BOUNDS_HIGH - self.BOUNDS_LOW
-                ) + self.BOUNDS_LOW
+                X = (
+                    self.rng.random((self.N, self.D))
+                    * (self.BOUNDS_HIGH - self.BOUNDS_LOW)
+                    + self.BOUNDS_LOW
+                )
         else:
-            X = self.rng.random((self.N, self.D)) * (
-                self.BOUNDS_HIGH - self.BOUNDS_LOW
-            ) + self.BOUNDS_LOW
+            X = (
+                self.rng.random((self.N, self.D)) * (self.BOUNDS_HIGH - self.BOUNDS_LOW)
+                + self.BOUNDS_LOW
+            )
 
         fitness = self._evaluate_all(X)
         best_idx = int(np.argmin(fitness))
@@ -390,16 +418,18 @@ class SFOAOptimizer:
                     best_pos = X[best_idx].copy()
 
                 best_params = self._decode(best_pos)
-                logging.info(
-                    "[SFOA] Iteration %d/%d | Best val loss: %.6f | hidden=%s, layers=%s, dropout=%.4f, lr=%.8f",
-                    T,
-                    self.Tmax,
-                    best_fitness,
-                    best_params["hidden_size"],
-                    best_params["num_layers"],
-                    best_params["dropout"],
-                    best_params["lr"],
-                )
+
+                if self.accelerator is None or self.accelerator.is_local_main_process:
+                    logging.info(
+                        "[SFOA] Iteration %d/%d | Best val loss: %.6f | hidden=%s, layers=%s, dropout=%.4f, lr=%.8f",
+                        T,
+                        self.Tmax,
+                        best_fitness,
+                        best_params["hidden_size"],
+                        best_params["num_layers"],
+                        best_params["dropout"],
+                        best_params["lr"],
+                    )
                 last_T = T
 
         final_state = {
@@ -415,8 +445,13 @@ class SFOAOptimizer:
 
 
 def run_sfoa_search(
-    args, train_ds, val_ds, device, *, rank_seed: int = 42,
-    sync_fn=None,
+    args,
+    train_ds,
+    val_ds,
+    device,
+    *,
+    rank_seed: int = 42,
+    accelerator=None,
 ) -> dict:
     n_gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 1
     _sfoa_workers = max(1, (os.cpu_count() or 4) // n_gpu_count)
@@ -440,10 +475,6 @@ def run_sfoa_search(
     input_size = first_x.shape[-1]
     eval_counter = {"count": 0}
 
-    def _sync():
-        if sync_fn is not None:
-            sync_fn()
-
     def _decode_and_log(hyperparams: dict, candidate_idx: int) -> str:
         return (
             f"cand#{candidate_idx} "
@@ -457,10 +488,10 @@ def run_sfoa_search(
         model = None
         optimizer = None
         eval_counter["count"] += 1
-        torch.manual_seed(rank_seed + eval_counter["count"])
+
+        torch.manual_seed(rank_seed + candidate_idx)
         label = _decode_and_log(hyperparams, candidate_idx)
 
-        _sync()
         try:
             model = RNNForecaster(
                 input_size=input_size,
@@ -497,9 +528,7 @@ def run_sfoa_search(
                     optimizer.zero_grad()
                     preds = model(x)
 
-                    loss = weighted_mse(
-                        preds, y, w, under_penalty=args.under_penalty
-                    )
+                    loss = weighted_mse(preds, y, w, under_penalty=args.under_penalty)
 
                     loss.backward()
                     optimizer.step()
@@ -508,9 +537,12 @@ def run_sfoa_search(
 
                 avg_train = epoch_loss_sum / max(1, epoch_batches)
                 logging.info(
-                    "[SFOA] %s | eval#%d | epoch %d/%d | train_loss=%.6f",
-                    label, eval_counter["count"],
-                    epoch + 1, TRAINING.SFOA_EVAL_EPOCHS, avg_train,
+                    "[SFOA] %s | Rank %d | epoch %d/%d | train_loss=%.6f",
+                    label,
+                    accelerator.process_index if accelerator else 0,
+                    epoch + 1,
+                    TRAINING.SFOA_EVAL_EPOCHS,
+                    avg_train,
                 )
 
             model.eval()
@@ -529,19 +561,20 @@ def run_sfoa_search(
                         w = w.to(device)
 
                     preds = model(x)
-                    loss = weighted_mse(
-                        preds, y, w, under_penalty=args.under_penalty
-                    )
+                    loss = weighted_mse(preds, y, w, under_penalty=args.under_penalty)
                     val_loss_accum += loss.item() * x.size(0)
                     val_samples_seen += x.size(0)
             val_loss = val_loss_accum / max(1, val_samples_seen)
             logging.info(
-                "[SFOA] %s | eval#%d | DONE val_loss=%.6f",
-                label, eval_counter["count"], val_loss,
+                "[SFOA] %s | DONE val_loss=%.6f",
+                label,
+                val_loss,
             )
             return val_loss
         except Exception as exc:
-            logging.warning("[SFOA] Evaluation failed for %s: %s", label, exc, exc_info=True)
+            logging.warning(
+                "[SFOA] Evaluation failed for %s: %s", label, exc, exc_info=True
+            )
             return float("inf")
         finally:
             if model is not None:
@@ -550,16 +583,11 @@ def run_sfoa_search(
                 del optimizer
             torch.cuda.empty_cache()
 
-    n_gpu = torch.cuda.device_count() if torch.cuda.is_available() else 1
-
     logging.info(
-        "[SFOA] Starting hyperparameter search: N=%d, Tmax=%d, eval_epochs=%d | "
-        "evaluation_parallel=%s, workers/candidate=%d",
+        "[SFOA] Starting distributed hyperparameter search: N=%d, Tmax=%d, eval_epochs=%d",
         TRAINING.SFOA_POPULATION,
         TRAINING.SFOA_ITERATIONS,
         TRAINING.SFOA_EVAL_EPOCHS,
-        str(TRAINING.SFOA_EVALUATION_PARALLEL),
-        _sfoa_workers,
     )
 
     sfoa = SFOAOptimizer(
@@ -568,7 +596,8 @@ def run_sfoa_search(
         Tmax=TRAINING.SFOA_ITERATIONS,
         Gp=TRAINING.SFOA_GP,
         seed=rank_seed,
-        parallel_eval=TRAINING.SFOA_EVALUATION_PARALLEL,
+        parallel_eval=False,
+        accelerator=accelerator,
     )
 
     resume_state = load_resume_state(PATHS.RESUME_STATE_FILE)
@@ -580,24 +609,25 @@ def run_sfoa_search(
     best_hp, best_fitness, sfoa_state = sfoa.optimize(initial_state=initial_state)
 
     try:
-        existing = load_resume_state(PATHS.RESUME_STATE_FILE) or {}
-        existing["sfoa_state"] = sfoa_state
-        save_resume_state(PATHS.RESUME_STATE_FILE, existing)
+        if accelerator is None or accelerator.is_local_main_process:
+            existing = load_resume_state(PATHS.RESUME_STATE_FILE) or {}
+            existing["sfoa_state"] = sfoa_state
+            save_resume_state(PATHS.RESUME_STATE_FILE, existing)
     except Exception as exc:
         logging.warning("Could not save SFOA state: %s", exc)
 
-    logging.info(
-        "[SFOA] Search complete. Best val loss: %.6f | Params: %s",
-        best_fitness,
-        best_hp,
-    )
+    if accelerator is None or accelerator.is_local_main_process:
+        logging.info(
+            "[SFOA] Search complete. Best val loss: %.6f | Params: %s",
+            best_fitness,
+            best_hp,
+        )
     return best_hp
 
 
 def train(args):
     accelerator = Accelerator(cpu=args.cpu)
     device = accelerator.device
-
 
     log_info = lambda msg: (
         logging.info(msg) if accelerator.is_local_main_process else None
@@ -690,7 +720,7 @@ def train(args):
         if _sync is not None:
             _sync()
         current_hyperparams = run_sfoa_search(
-            args, train_ds, val_ds, device, rank_seed=args.seed, sync_fn=_sync
+            args, train_ds, val_ds, device, rank_seed=args.seed, accelerator=accelerator
         )
         if current_hyperparams is None:
             logging.warning(
@@ -733,7 +763,6 @@ def train(args):
         bidirectional=args.bidirectional,
         quantiles=quantiles if args.probabilistic else None,
     ).to(device)
-
 
     if device.type != "cpu":
         log_info("Tuning per-GPU batch size to hardware limits...")
@@ -807,9 +836,7 @@ def train(args):
             if args.probabilistic:
                 loss = pinball_loss(preds, y, w)
             else:
-                loss = weighted_mse(
-                    preds, y, w, under_penalty=args.under_penalty
-                )
+                loss = weighted_mse(preds, y, w, under_penalty=args.under_penalty)
 
             accelerator.backward(loss)
 
@@ -841,9 +868,7 @@ def train(args):
                 if args.probabilistic:
                     loss = pinball_loss(preds, y, w)
                 else:
-                    loss = weighted_mse(
-                        preds, y, w, under_penalty=args.under_penalty
-                    )
+                    loss = weighted_mse(preds, y, w, under_penalty=args.under_penalty)
 
                 val_loss_accum += loss.item() * x.size(0)
                 val_samples_seen += x.size(0)
@@ -917,7 +942,9 @@ def train(args):
                     ).to(device)
 
                     new_optimizer = torch.optim.Adam(
-                        new_model.parameters(), lr=args.lr, weight_decay=args.weight_decay
+                        new_model.parameters(),
+                        lr=args.lr,
+                        weight_decay=args.weight_decay,
                     )
 
                     model, optimizer = accelerator.prepare(new_model, new_optimizer)
