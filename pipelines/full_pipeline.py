@@ -1,10 +1,8 @@
 import os
 import sys
-import time
 import argparse
 import torch
 
-# Ensure repo root is on sys.path
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, os.pardir))
 if REPO_ROOT not in sys.path:

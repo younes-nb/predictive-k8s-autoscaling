@@ -1,5 +1,3 @@
-"""Compute Ground-Truth Boundary Weights for training data."""
-
 import os
 import sys
 
@@ -18,11 +16,9 @@ import numpy as np
 import polars as pl
 import torch
 
-# Config imports from shared submodules
 from shared.config_paths import PATHS, DATASET_TABLES
 from shared.config_training_defaults import TRAINING
 
-# Extracted utilities
 from tooling.utils import find_shards, hist_update, hist_quantile
 
 

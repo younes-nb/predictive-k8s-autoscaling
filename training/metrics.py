@@ -1,6 +1,3 @@
-import math
-import time
-
 import torch
 import numpy as np
 from scipy.stats import pearsonr

@@ -1,5 +1,5 @@
-from .train_entry import train
-from .evaluate_entry import evaluate
+from .train import train
+from .evaluate import evaluate
 from .loss import weighted_mse, PinballLoss
 from .metrics import compute_metrics, find_max_inference_batch_size
 from .sfoa_search import SFOAOptimizer, run_sfoa_search
