@@ -1,59 +1,23 @@
+"""Compute Ground-Truth Boundary Weights for training data."""
+
 import os
 import glob
-import argparse
 import sys
 import json
+import argparse
 from pathlib import Path
 from typing import Dict
+
 import numpy as np
 import polars as pl
 import torch
 
-THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, os.pardir))
-if REPO_ROOT not in sys.path:
-    sys.path.insert(0, REPO_ROOT)
+# Core imports (unchanged)
+from shared.config_paths import PATHS, DATASET_TABLES
+from shared.config_training_defaults import TRAINING
 
-from config.defaults import DATASET_TABLES, PATHS, TRAINING
-
-
-def natural_key(p: str):
-    import re
-
-    return [
-        int(s) if s.isdigit() else s.lower() for s in re.split(r"(\d+)", Path(p).name)
-    ]
-
-
-def find_shards(windows_dir: str, split: str):
-    pattern = os.path.join(windows_dir, f"part-*_X_{split}.npy")
-    x_files = sorted(glob.glob(pattern), key=natural_key)
-    shards = []
-    for x_path in x_files:
-        base = x_path.replace(f"_X_{split}.npy", "")
-        y_path = base + f"_y_{split}.npy"
-        sid_path = base + f"_sid_{split}.npy"
-        if os.path.exists(y_path) and os.path.exists(sid_path):
-            shards.append((x_path, y_path, sid_path, base))
-    return shards
-
-
-def hist_update(hist: np.ndarray, values: np.ndarray, bins: int):
-    values = np.asarray(values, dtype=np.float64)
-    values = values[~np.isnan(values)]
-    values = np.clip(values, 0.0, 1.0)
-    indices = (values * (bins - 1)).astype(np.int32)
-    np.add.at(hist, indices, 1)
-
-
-def hist_quantile(hist: np.ndarray, tau: float) -> float:
-    total = hist.sum()
-    if total <= 0:
-        return 0.5
-    cdf = np.cumsum(hist)
-    target = tau * total
-    bin_idx = np.searchsorted(cdf, target, side="left")
-    return float(bin_idx / (len(hist) - 1))
+# Extracted utilities
+from .utils import find_shards, hist_update, hist_quantile
 
 
 def main():

@@ -2,31 +2,17 @@ import os
 import sys
 import time
 import argparse
-import subprocess
 import torch
 
+# Ensure repo root is on sys.path
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, os.pardir))
-
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from config.defaults import (
-    PATHS,
-    PREPROCESSING,
-    FEATURE_SETS,
-    TRAINING,
-)
-
-
-def run(cmd, title: str):
-    print(f"\n=== {title} ===")
-    print("Running:", " ".join(cmd))
-    start = time.time()
-    subprocess.run(cmd, check=True)
-    elapsed = time.time() - start
-    print(f"=== {title} completed in {elapsed:.2f}s ===")
-    return elapsed
+from config.defaults import PATHS, PREPROCESSING, TRAINING
+from shared.features import FEATURE_SETS
+from shared.subprocess_utils import run
 
 
 def main():
