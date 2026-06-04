@@ -241,11 +241,11 @@ class TrainingDefaults:
     PROBABILISTIC_TRAINING: bool = False
     QUANTILES: Tuple[float, ...] = (0.5, 0.9, 0.95)
     HYPERPARAM_OPTIMIZER: str = "sfoa"
-    SFOA_POPULATION: int = 10
-    SFOA_ITERATIONS: int = 20
-    SFOA_EVAL_EPOCHS: int = 5
+    SFOA_POPULATION: int = 20
+    SFOA_ITERATIONS: int = 10
+    SFOA_EVAL_EPOCHS: int = 10
     SFOA_GP: float = 0.5
-    SFOA_EVALUATION_PARALLEL: bool = False
+    SFOA_EVALUATION_PARALLEL: bool = True
 
 
 PREPROCESSING = PreprocessingDefaults()
