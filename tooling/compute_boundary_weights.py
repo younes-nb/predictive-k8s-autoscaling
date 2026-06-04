@@ -1,8 +1,14 @@
 """Compute Ground-Truth Boundary Weights for training data."""
 
 import os
-import glob
 import sys
+
+THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, os.pardir))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+
+import glob
 import json
 import argparse
 from pathlib import Path
@@ -12,7 +18,7 @@ import numpy as np
 import polars as pl
 import torch
 
-# Core imports (unchanged)
+# Config imports from shared submodules
 from shared.config_paths import PATHS, DATASET_TABLES
 from shared.config_training_defaults import TRAINING
 

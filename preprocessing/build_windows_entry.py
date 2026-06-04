@@ -1,3 +1,5 @@
+"""Build windows from parquet data for training."""
+
 import os
 import glob
 import sys
@@ -6,6 +8,11 @@ import shutil
 import tempfile
 import time
 import gc
+
+THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, os.pardir))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
 
 import polars as pl
 import numpy as np
