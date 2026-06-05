@@ -4,7 +4,7 @@ import argparse
 import logging
 import math as _math
 import random
-from datetime import datetime
+from datetime import datetime, timedelta
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, os.pardir))
@@ -16,7 +16,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
-from accelerate import Accelerator
+from accelerate import Accelerator, InitProcessGroupKwargs
 
 from config.defaults import DEFAULT_CHECKPOINT_PATH
 from shared.config_paths import PATHS
@@ -39,7 +39,8 @@ from training.sfoa_search import run_sfoa_search
 
 
 def train(args):
-    accelerator = Accelerator(cpu=args.cpu)
+    timeout_kwargs = InitProcessGroupKwargs(timeout=timedelta(seconds=14400))
+    accelerator = Accelerator(cpu=args.cpu, kwargs_handlers=[timeout_kwargs])
     device = accelerator.device
 
     log_info = lambda msg: (
