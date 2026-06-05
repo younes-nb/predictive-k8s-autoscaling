@@ -1,7 +1,8 @@
 import copy
-import math as _math
 import logging
+import math as _math
 import os
+import time as _time
 
 import numpy as np
 import torch
@@ -334,6 +335,7 @@ def run_sfoa_search(
                 model.train()
                 epoch_loss_sum = 0.0
                 epoch_batches = 0
+                epoch_start = _time.time()
                 for batch_idx, batch in enumerate(train_loader):
                     if args.use_weights:
                         x, y, w, _ = batch
@@ -356,13 +358,15 @@ def run_sfoa_search(
                     epoch_batches += 1
 
                 avg_train = epoch_loss_sum / max(1, epoch_batches)
+                epoch_duration = _time.time() - epoch_start
                 logging.info(
-                    "[SFOA] %s | Rank %d | epoch %d/%d | train_loss=%.6f",
+                    "[SFOA] %s | Rank %d | epoch %d/%d | train_loss=%.6f | duration=%.2fs",
                     label,
                     accelerator.process_index if accelerator else 0,
                     epoch + 1,
                     TRAINING.SFOA_EVAL_EPOCHS,
                     avg_train,
+                    epoch_duration,
                 )
 
             model.eval()
