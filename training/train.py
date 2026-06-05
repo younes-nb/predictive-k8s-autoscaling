@@ -375,6 +375,19 @@ def train(args):
                 last_train_loss = avg_train_loss
         else:
             last_train_loss = avg_train_loss
+            delta_display = f"{delta:.4f}" if delta is not None else "N/A"
+            if no_change_streak > 0 and (delta is None or delta >= TRAINING.LOSS_CHANGE_THRESHOLD):
+                log_info(
+                    f"Train loss change above threshold for epoch {epoch} (Δ={delta_display}). "
+                    f"No-change streak reset ({no_change_streak}/{TRAINING.NO_CHANGE_EPOCHS_LIMIT})."
+                )
+            elif no_change_streak >= TRAINING.NO_CHANGE_EPOCHS_LIMIT:
+                log_info(
+                    "\n=== Early Stopping ===\n"
+                    f"Train loss has not changed by at least {TRAINING.LOSS_CHANGE_THRESHOLD} "
+                    f"for {no_change_streak} consecutive epochs."
+                )
+                break
 
         if accelerator.is_local_main_process:
             resume_payload = {

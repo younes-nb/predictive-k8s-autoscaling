@@ -8,7 +8,7 @@ class TrainingDefaults:
     NUM_LAYERS: int = 3
     DROPOUT: float = 0.3
     BATCH_SIZE: int = 512
-    EPOCHS: int = 1000
+    EPOCHS: int = 100
     LR: float = 0.00127
     HIDDEN_SIZE_OPTIONS: Tuple[int, ...] = (32, 64, 128, 256)
     NUM_LAYERS_OPTIONS: Tuple[int, ...] = (1, 2, 3, 4)
@@ -36,6 +36,7 @@ class TrainingDefaults:
     SFOA_EVAL_EPOCHS: int = 5
     SFOA_GP: float = 0.5
     SFOA_EVALUATION_PARALLEL: bool = True
+    NO_CHANGE_EPOCHS_LIMIT: int = 100
 
 
 TRAINING = TrainingDefaults()
