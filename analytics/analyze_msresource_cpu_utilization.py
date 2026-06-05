@@ -1,10 +1,10 @@
+import gc
+import glob
 import os
 import sys
-import glob
 import argparse
 from datetime import datetime
 
-import duckdb
 import numpy as np
 import matplotlib.pyplot as plt
 
@@ -15,9 +15,9 @@ if REPO_ROOT not in sys.path:
 
 from config.defaults import Paths, PREPROCESSING
 
-DEFAULT_CORR_BINS = 30
-DEFAULT_CORR_RANGE = (-1.0, 1.0)
-DEFAULT_CORR_HORIZON_MAX = 30
+DEFAULT_BINS = 128
+CPU_RANGE = (0.0, 1.0)
+CORR_RANGE = (-1.0, 1.0)
 
 
 def log(msg: str) -> None:
@@ -26,49 +26,32 @@ def log(msg: str) -> None:
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Analyze msresource CPU utilization with OOM-safe DuckDB queries."
+        description="Analyze CPU utilization from window shards with OOM-safe processing."
     )
     parser.add_argument(
-        "--parquet_dir",
+        "--windows_dir",
         type=str,
-        default=Paths.PARQUET_MSRESOURCE,
-        help="Directory containing msresource parquet files.",
+        default=Paths.WINDOWS_DIR,
+        help="Directory containing window shard files.",
     )
     parser.add_argument(
-        "--pred_horizon",
-        type=int,
-        default=PREPROCESSING.PRED_HORIZON,
-        help="Prediction horizon for lagged correlation.",
+        "--split",
+        type=str,
+        default="train",
+        choices=["train", "val", "test"],
+        help="Data split to analyze.",
     )
     parser.add_argument(
         "--bins",
         type=int,
-        default=50,
-        help="Number of bins for CPU utilization histogram.",
+        default=DEFAULT_BINS,
+        help="Number of bins for both histograms.",
     )
     parser.add_argument(
         "--cpu_lower_bound",
         type=float,
         default=None,
-        help="Optional CPU utilization lower bound; values below are excluded.",
-    )
-    parser.add_argument(
-        "--temp_dir",
-        type=str,
-        default="/dataset/duckdb_temp",
-        help="Temporary directory for DuckDB spill files.",
-    )
-    parser.add_argument(
-        "--memory_limit",
-        type=str,
-        default="32GB",
-        help="DuckDB memory limit (e.g. 4GB, 16GB).",
-    )
-    parser.add_argument(
-        "--threads",
-        type=int,
-        default=16,
-        help="DuckDB execution threads.",
+        help="Optional CPU utilization lower bound; samples below are excluded.",
     )
     parser.add_argument(
         "--out_dir",
@@ -77,6 +60,33 @@ def parse_args():
         help="Directory to save plots.",
     )
     return parser.parse_args()
+
+
+def _pearson(x: np.ndarray, y: np.ndarray) -> float:
+    """Compute Pearson correlation between two 1-D arrays.
+
+    Returns NaN if fewer than 2 finite pairs exist or either array has zero std.
+    """
+    mask = np.isfinite(x) & np.isfinite(y)
+    x, y = x[mask], y[mask]
+    n = len(x)
+    if n < 2:
+        return float("nan")
+    xs = x - x.mean()
+    ys = y - y.mean()
+    denom = np.sqrt((xs ** 2).sum()) * np.sqrt((ys ** 2).sum())
+    if denom == 0.0:
+        return float("nan")
+    return float((xs * ys).sum() / denom)
+
+
+def _bin_index(value: float, lo: float, hi: float, n_bins: int) -> int:
+    """Map a value in [lo, hi] to an integer bin index in [0, n_bins - 1]."""
+    v = max(lo, min(hi, float(value)))
+    idx = int((v - lo) / (hi - lo) * n_bins)
+    if idx == n_bins:
+        idx -= 1
+    return idx
 
 
 def plot_cpu_histogram(bin_edges, counts, out_path):
@@ -92,328 +102,146 @@ def plot_cpu_histogram(bin_edges, counts, out_path):
         edgecolor="black",
         alpha=0.7,
     )
-    plt.title("CPU Utilization Distribution (msname-aggregated)")
-    plt.xlabel("CPU Utilization")
-    plt.ylabel("Data Points")
+    plt.title("Per-Sample CPU Utilization Distribution")
+    plt.xlabel("Average CPU Utilization (across input window steps)")
+    plt.ylabel("Sample Count")
     plt.grid(axis="y", alpha=0.3)
     plt.tight_layout()
     plt.savefig(out_path)
     log(f"CPU utilization histogram saved to {out_path}")
 
 
-def plot_corr_histogram(
-    values,
-    title,
-    out_path,
-    y_max=None,
-    bins=DEFAULT_CORR_BINS,
-    bin_range=DEFAULT_CORR_RANGE,
-):
+def plot_corr_histogram(values, title, out_path, bins=DEFAULT_BINS, bin_range=CORR_RANGE):
     if len(values) == 0:
         log(f"No correlation values available for {title}.")
         return
 
+    counts, edges = np.histogram(values, bins=bins, range=bin_range)
+    centers = (edges[:-1] + edges[1:]) / 2
+    width = edges[1] - edges[0]
+
     plt.figure(figsize=(10, 6))
-    plt.hist(
-        values,
-        bins=bins,
-        range=bin_range,
+    plt.bar(
+        centers,
+        counts,
+        width=width,
         color="orchid",
         edgecolor="black",
         alpha=0.7,
     )
-    if y_max is not None:
-        plt.ylim(0, y_max)
     plt.title(title)
     plt.xlabel("Correlation")
-    plt.ylabel("Microservice Count")
+    plt.ylabel("Sample Count")
     plt.grid(axis="y", alpha=0.3)
     plt.tight_layout()
     plt.savefig(out_path)
     log(f"Correlation histogram saved to {out_path}")
 
 
-def plot_avg_corr_by_horizon(horizons, avg_corrs, out_path):
-    if len(horizons) == 0:
-        log("No horizon correlation data available.")
-        return
-
-    horizons = np.asarray(horizons, dtype=int)
-    avg_corrs = np.asarray(avg_corrs, dtype=float)
-    valid_mask = np.isfinite(avg_corrs)
-    if not np.any(valid_mask):
-        log("No valid average correlations available to plot.")
-        return
-
-    plt.figure(figsize=(12, 7))
-    plt.plot(
-        horizons[valid_mask],
-        avg_corrs[valid_mask],
-        marker="o",
-        markersize=8,
-        color="teal",
-        linewidth=2.5,
-        label="Average Correlation",
-    )
-
-    plt.title("Average Correlation by Horizon", fontsize=14, fontweight="bold")
-    plt.xlabel("Horizon (t+k)", fontsize=12)
-    plt.ylabel("Average Correlation", fontsize=12)
-
-    plt.yticks(np.arange(0, 1.2, 0.2), fontsize=11)
-    plt.ylim(0, 1.0)
-
-    x_ticks = horizons[valid_mask]
-    if len(x_ticks) > 20:
-        plt.xticks(x_ticks[::2], fontsize=10)
-    else:
-        plt.xticks(x_ticks, fontsize=10)
-
-    plt.grid(True, alpha=0.3, linestyle="--")
-
-    plt.legend(loc="upper right", fontsize=11)
-    plt.tight_layout()
-    plt.savefig(out_path, dpi=300)
-    log(f"Average correlation-by-horizon plot saved to {out_path}")
-
-
 def main():
     args = parse_args()
 
-    parquet_glob = os.path.join(args.parquet_dir, "*.parquet")
-    parquet_files = glob.glob(parquet_glob)
-    if not parquet_files:
-        raise SystemExit(f"No parquet files found under {args.parquet_dir}")
+    input_len = PREPROCESSING.INPUT_LEN
+    pred_horizon = PREPROCESSING.PRED_HORIZON
+    overlap = min(input_len, pred_horizon)  # = pred_horizon (5) when input_len=60
 
+    n_bins = args.bins
+    cpu_hist = np.zeros(n_bins, dtype=np.int64)
+    corr_hist = np.zeros(n_bins, dtype=np.int64)
+
+    cpu_count = 0
+    corr_count = 0
+    total_cpu_sum = 0.0
+    total_cpu_n = 0
+    corr_sum = 0.0  # running sum of correlation values for avg
+
+    pattern = os.path.join(args.windows_dir, f"part-*_X_{args.split}.npy")
+    x_files = sorted(glob.glob(pattern))
+    if not x_files:
+        raise SystemExit(f"No window shards found matching {pattern}")
+
+    log(f"Found {len(x_files)} shard(s) for split='{args.split}'")
     os.makedirs(args.out_dir, exist_ok=True)
-    os.makedirs(args.temp_dir, exist_ok=True)
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    cpu_hist_path = os.path.join(args.out_dir, f"cpu_utilization_hist_{timestamp}.png")
-    corr_lag1_path = os.path.join(args.out_dir, f"cpu_corr_lag1_{timestamp}.png")
-    corr_lag_h_path = os.path.join(
-        args.out_dir, f"cpu_corr_lag{args.pred_horizon}_{timestamp}.png"
-    )
-    corr_avg_path = os.path.join(args.out_dir, f"cpu_corr_horizons_{timestamp}.png")
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    cpu_hist_path = os.path.join(args.out_dir, f"cpu_utilization_hist_{ts}.png")
+    corr_hist_path = os.path.join(args.out_dir, f"cpu_correlation_hist_{ts}.png")
 
-    db_path = os.path.join(args.temp_dir, f"msresource_cpu_{timestamp}.duckdb")
-    if os.path.exists(db_path):
-        os.remove(db_path)
+    for x_path in x_files:
+        base = x_path.rsplit("_X_", 1)[0]
+        y_path = base + f"_y_{args.split}.npy"
 
-    log("Connecting to DuckDB ...")
-    con = duckdb.connect(db_path)
-    con.execute(f"PRAGMA threads={args.threads}")
-    con.execute(f"PRAGMA memory_limit='{args.memory_limit}'")
-    con.execute(f"PRAGMA temp_directory='{args.temp_dir}'")
+        X = np.load(x_path, mmap_mode="r")          # (N, input_len, num_features)
+        Y = np.load(y_path, mmap_mode="r")          # (N, pred_horizon)
+        N = X.shape[0]
 
-    cpu_expr = """
-    CASE
-        WHEN cpu_utilization > 1.0 THEN cpu_utilization / 100.0
-        ELSE cpu_utilization
-    END
-    """
+        log(f"Processing {os.path.basename(x_path)}: {N} samples ...")
 
-    log(f"Reading parquet files from: {parquet_glob}")
-    log("Creating aggregated view ms_agg ...")
-    con.execute(f"""
-        CREATE TEMP VIEW ms_agg AS
-        SELECT
-            COALESCE(timestamp_dt, to_timestamp(timestamp / 1000.0)) AS ts,
-            msname,
-            AVG({cpu_expr}) AS cpu_util
-        FROM read_parquet('{parquet_glob}')
-        WHERE msname IS NOT NULL
-        GROUP BY ts, msname
-        """)
+        cpu_col = X[:, :, 0]                         # (N, input_len) — cpu_utilization always at index 0
 
-    log("Creating filtered view ms_filtered ...")
-    if args.cpu_lower_bound is None:
-        con.execute("CREATE TEMP VIEW ms_filtered AS SELECT * FROM ms_agg")
+        for i in range(N):
+            cpu_vals = cpu_col[i]                    # (input_len,)
+            valid = cpu_vals[np.isfinite(cpu_vals)]
+            if len(valid) == 0:
+                continue
+            if args.cpu_lower_bound is not None and np.min(valid) < args.cpu_lower_bound:
+                continue
+
+            total_cpu_sum += float(valid.sum())
+            total_cpu_n += len(valid)
+
+            # Per-sample average CPU → bin into preallocated histogram
+            sample_mean = float(np.mean(valid))
+            cpu_hist[_bin_index(sample_mean, *CPU_RANGE, n_bins)] += 1
+            cpu_count += 1
+
+            # Per-sample correlation: last `overlap` steps of input window vs horizon
+            x_tail = cpu_vals[-overlap:]             # (overlap,)
+            y_tail = Y[i, -overlap:]                 # (overlap,)
+            r = _pearson(x_tail, y_tail)
+            if np.isfinite(r):
+                corr_sum += r
+                corr_hist[_bin_index(r, *CORR_RANGE, n_bins)] += 1
+                corr_count += 1
+
+        del X, Y
+        gc.collect()
+
+    # Print summary
+    global_avg_cpu = total_cpu_sum / max(total_cpu_n, 1)
+    avg_corr = corr_sum / max(corr_count, 1) if corr_count > 0 else float("nan")
+
+    print("\n" + "=" * 60)
+    print("  WINDOW SHARD CPU UTILIZATION SUMMARY")
+    print("=" * 60)
+    print(f"Split:                          {args.split}")
+    print(f"Shards processed:               {len(x_files)}")
+    print(f"Total samples with valid CPU:   {cpu_count}")
+    print(f"Global avg CPU (all timesteps): {global_avg_cpu:.6f}")
+    print(f"Samples with valid correlation: {corr_count}")
+    if corr_count > 0:
+        print(f"Avg correlation (last input vs horizon): {avg_corr:.6f}")
     else:
-        log(f"Applying CPU lower bound: {args.cpu_lower_bound}")
-        con.execute(
-            "CREATE TEMP VIEW ms_filtered AS SELECT * FROM ms_agg WHERE cpu_util >= ?",
-            [args.cpu_lower_bound],
-        )
+        print("Avg correlation:                  n/a")
+    print("=" * 60 + "\n")
 
-    log("Computing average CPU across microservices ...")
-    avg_df = con.execute("""
-        SELECT
-            AVG(ms_mean) AS avg_across_ms,
-            COUNT(*) AS ms_count
-        FROM (
-            SELECT msname, AVG(cpu_util) AS ms_mean
-            FROM ms_filtered
-            GROUP BY msname
-        )
-        """).fetchdf()
+    # Build bin edges for CPU histogram plot
+    cpu_bin_edges = np.linspace(*CPU_RANGE, n_bins + 1)
+    plot_cpu_histogram(cpu_bin_edges, cpu_hist, cpu_hist_path)
 
-    avg_across_ms = avg_df["avg_across_ms"].iloc[0]
-    ms_count = int(avg_df["ms_count"].iloc[0])
-
-    print("\n" + "=" * 50)
-    print("📊 MSRESOURCE CPU UTILIZATION SUMMARY")
-    print("=" * 50)
-    print(f"Microservices counted: {ms_count}")
-    if avg_across_ms is None or np.isnan(avg_across_ms):
-        print("Avg CPU across MSs:    n/a (insufficient data)")
-    else:
-        print(f"Avg CPU across MSs:    {avg_across_ms:.6f}")
-    print("=" * 50 + "\n")
-
-    log(f"Computing histogram with {args.bins} bins ...")
-    hist_df = con.execute(f"""
-        WITH clamped AS (
-            SELECT
-                LEAST(GREATEST(cpu_util, 0.0), 1.0) AS cpu_clamped
-            FROM ms_filtered
-            WHERE cpu_util IS NOT NULL
-        )
-        SELECT
-            CAST(
-                CASE
-                    WHEN cpu_clamped <= 0.0 THEN 1
-                    WHEN cpu_clamped >= 1.0 THEN {args.bins}
-                    ELSE LEAST({args.bins}, 1 + FLOOR(cpu_clamped * {args.bins}))
-                END AS INTEGER
-            ) AS bucket,
-            COUNT(*) AS count
-        FROM clamped
-        GROUP BY bucket
-        ORDER BY bucket
-        """).fetchdf()
-
-    bin_edges = np.linspace(0.0, 1.0, args.bins + 1)
-
-    counts = np.zeros(args.bins, dtype=int)
-    for _, row in hist_df.iterrows():
-        idx = int(row["bucket"]) - 1
-        if 0 <= idx < args.bins:
-            counts[idx] = int(row["count"])
-
-    plot_cpu_histogram(bin_edges, counts, cpu_hist_path)
-
-    log(
-        f"Computing lag correlations (lag1 and lag{args.pred_horizon}) per microservice ..."
-    )
-    corr_df = con.execute(f"""
-        WITH lagged AS (
-            SELECT
-                msname,
-                cpu_util,
-                lag(cpu_util, 1) OVER (
-                    PARTITION BY msname
-                    ORDER BY ts
-                ) AS cpu_lag1,
-                lag(cpu_util, {args.pred_horizon}) OVER (
-                    PARTITION BY msname
-                    ORDER BY ts
-                ) AS cpu_lag_h
-            FROM ms_filtered
-        )
-        SELECT
-            msname,
-            corr(cpu_util, cpu_lag1) AS corr_lag1,
-            corr(cpu_util, cpu_lag_h) AS corr_lag_h
-        FROM lagged
-        GROUP BY msname
-        """).fetchdf()
-
-    lag1_vals = corr_df["corr_lag1"].dropna().to_numpy()
-    lagh_vals = corr_df["corr_lag_h"].dropna().to_numpy()
-
-    print("📈 Correlation Summary")
-    if len(lag1_vals):
-        avg_lag1 = np.mean(lag1_vals)
-        print(f"Avg corr(t, t+1):           {avg_lag1:.6f} (n={len(lag1_vals)})")
-    else:
-        print("Avg corr(t, t+1):           n/a (insufficient data)")
-    if len(lagh_vals):
-        avg_lagh = np.mean(lagh_vals)
-        print(
-            f"Avg corr(t, t+{args.pred_horizon}): {avg_lagh:.6f} (n={len(lagh_vals)})"
+    # Correlation histogram from accumulated counts
+    if corr_count > 0:
+        corr_centers = np.linspace(*CORR_RANGE, n_bins + 1)[:-1] + (CORR_RANGE[1] - CORR_RANGE[0]) / (2 * n_bins)
+        plot_corr_histogram(
+            corr_centers,
+            "Per-Sample Correlation Distribution: Input Window vs Horizon",
+            corr_hist_path,
+            bins=n_bins,
+            bin_range=CORR_RANGE,
         )
     else:
-        print(f"Avg corr(t, t+{args.pred_horizon}): n/a (insufficient data)")
+        log("No valid correlations to plot.")
 
-    corr_bins = DEFAULT_CORR_BINS
-    corr_range = DEFAULT_CORR_RANGE
-    lag1_counts = (
-        np.histogram(lag1_vals, bins=corr_bins, range=corr_range)[0]
-        if len(lag1_vals)
-        else np.array([])
-    )
-    lagh_counts = (
-        np.histogram(lagh_vals, bins=corr_bins, range=corr_range)[0]
-        if len(lagh_vals)
-        else np.array([])
-    )
-    y_max = None
-    if len(lag1_counts) > 0 or len(lagh_counts) > 0:
-        y_max = max(
-            lag1_counts.max() if len(lag1_counts) else 0,
-            lagh_counts.max() if len(lagh_counts) else 0,
-        )
-        if y_max == 0:
-            y_max = None
-
-    plot_corr_histogram(
-        lag1_vals,
-        "Correlation Distribution: t vs t+1",
-        corr_lag1_path,
-        y_max=y_max,
-        bins=corr_bins,
-        bin_range=corr_range,
-    )
-    plot_corr_histogram(
-        lagh_vals,
-        f"Correlation Distribution: t vs t+{args.pred_horizon}",
-        corr_lag_h_path,
-        y_max=y_max,
-        bins=corr_bins,
-        bin_range=corr_range,
-    )
-
-    log(
-        "Computing average correlations for horizons "
-        f"t+1..t+{DEFAULT_CORR_HORIZON_MAX} ..."
-    )
-    horizons = list(range(1, DEFAULT_CORR_HORIZON_MAX + 1))
-    avg_corrs = []
-    for horizon in horizons:
-        avg_corr_df = con.execute(
-            """
-            WITH lagged AS (
-                SELECT
-                    msname,
-                    cpu_util,
-                    lag(cpu_util, ?) OVER (
-                        PARTITION BY msname
-                        ORDER BY ts
-                    ) AS cpu_lag
-                FROM ms_filtered
-            )
-            SELECT AVG(corr_val) AS avg_corr
-            FROM (
-                SELECT msname, corr(cpu_util, cpu_lag) AS corr_val
-                FROM lagged
-                GROUP BY msname
-            )
-            """,
-            [horizon],
-        ).fetchdf()
-        if avg_corr_df.empty:
-            avg_corrs.append(np.nan)
-        else:
-            avg_corr = avg_corr_df["avg_corr"].iloc[0]
-            avg_corrs.append(avg_corr if avg_corr is not None else np.nan)
-
-    plot_avg_corr_by_horizon(horizons, avg_corrs, corr_avg_path)
-
-    log("Closing DuckDB connection ...")
-    con.close()
-    if os.path.exists(db_path):
-        os.remove(db_path)
     log("Done.")
 
 
