@@ -126,6 +126,8 @@ def plot_corr_histogram(bin_edges, counts, title, out_path):
     plt.title(title)
     plt.xlabel("Correlation")
     plt.ylabel("Sample Count")
+    plt.ylim(0, 350000)
+    plt.yticks(np.arange(0, 350001, 50000))
     plt.grid(axis="y", alpha=0.3)
     plt.tight_layout()
     plt.savefig(out_path)
