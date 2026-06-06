@@ -63,10 +63,6 @@ def parse_args():
 
 
 def _pearson(x: np.ndarray, y: np.ndarray) -> float:
-    """Compute Pearson correlation between two 1-D arrays.
-
-    Returns NaN if fewer than 2 finite pairs exist or either array has zero std.
-    """
     mask = np.isfinite(x) & np.isfinite(y)
     x, y = x[mask], y[mask]
     n = len(x)
@@ -74,14 +70,13 @@ def _pearson(x: np.ndarray, y: np.ndarray) -> float:
         return float("nan")
     xs = x - x.mean()
     ys = y - y.mean()
-    denom = np.sqrt((xs ** 2).sum()) * np.sqrt((ys ** 2).sum())
+    denom = np.sqrt((xs**2).sum()) * np.sqrt((ys**2).sum())
     if denom == 0.0:
         return float("nan")
     return float((xs * ys).sum() / denom)
 
 
 def _bin_index(value: float, lo: float, hi: float, n_bins: int) -> int:
-    """Map a value in [lo, hi] to an integer bin index in [0, n_bins - 1]."""
     v = max(lo, min(hi, float(value)))
     idx = int((v - lo) / (hi - lo) * n_bins)
     if idx == n_bins:
@@ -111,14 +106,13 @@ def plot_cpu_histogram(bin_edges, counts, out_path):
     log(f"CPU utilization histogram saved to {out_path}")
 
 
-def plot_corr_histogram(values, title, out_path, bins=DEFAULT_BINS, bin_range=CORR_RANGE):
-    if len(values) == 0:
-        log(f"No correlation values available for {title}.")
+def plot_corr_histogram(bin_edges, counts, title, out_path):
+    if np.sum(counts) == 0:
+        log(f"No correlation counts available for {title}.")
         return
 
-    counts, edges = np.histogram(values, bins=bins, range=bin_range)
-    centers = (edges[:-1] + edges[1:]) / 2
-    width = edges[1] - edges[0]
+    centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+    width = bin_edges[1] - bin_edges[0]
 
     plt.figure(figsize=(10, 6))
     plt.bar(
@@ -143,7 +137,7 @@ def main():
 
     input_len = PREPROCESSING.INPUT_LEN
     pred_horizon = PREPROCESSING.PRED_HORIZON
-    overlap = min(input_len, pred_horizon)  # = pred_horizon (5) when input_len=60
+    overlap = min(input_len, pred_horizon)
 
     n_bins = args.bins
     cpu_hist = np.zeros(n_bins, dtype=np.int64)
@@ -153,7 +147,7 @@ def main():
     corr_count = 0
     total_cpu_sum = 0.0
     total_cpu_n = 0
-    corr_sum = 0.0  # running sum of correlation values for avg
+    corr_sum = 0.0
 
     pattern = os.path.join(args.windows_dir, f"part-*_X_{args.split}.npy")
     x_files = sorted(glob.glob(pattern))
@@ -171,33 +165,34 @@ def main():
         base = x_path.rsplit("_X_", 1)[0]
         y_path = base + f"_y_{args.split}.npy"
 
-        X = np.load(x_path, mmap_mode="r")          # (N, input_len, num_features)
-        Y = np.load(y_path, mmap_mode="r")          # (N, pred_horizon)
+        X = np.load(x_path, mmap_mode="r")
+        Y = np.load(y_path, mmap_mode="r")
         N = X.shape[0]
 
         log(f"Processing {os.path.basename(x_path)}: {N} samples ...")
 
-        cpu_col = X[:, :, 0]                         # (N, input_len) — cpu_utilization always at index 0
+        cpu_col = X[:, :, 0]
 
         for i in range(N):
-            cpu_vals = cpu_col[i]                    # (input_len,)
+            cpu_vals = cpu_col[i]
             valid = cpu_vals[np.isfinite(cpu_vals)]
             if len(valid) == 0:
                 continue
-            if args.cpu_lower_bound is not None and np.min(valid) < args.cpu_lower_bound:
+            if (
+                args.cpu_lower_bound is not None
+                and np.min(valid) < args.cpu_lower_bound
+            ):
                 continue
 
             total_cpu_sum += float(valid.sum())
             total_cpu_n += len(valid)
 
-            # Per-sample average CPU → bin into preallocated histogram
             sample_mean = float(np.mean(valid))
             cpu_hist[_bin_index(sample_mean, *CPU_RANGE, n_bins)] += 1
             cpu_count += 1
 
-            # Per-sample correlation: last `overlap` steps of input window vs horizon
-            x_tail = cpu_vals[-overlap:]             # (overlap,)
-            y_tail = Y[i, -overlap:]                 # (overlap,)
+            x_tail = cpu_vals[-overlap:]
+            y_tail = Y[i, -overlap:]
             r = _pearson(x_tail, y_tail)
             if np.isfinite(r):
                 corr_sum += r
@@ -207,7 +202,6 @@ def main():
         del X, Y
         gc.collect()
 
-    # Print summary
     global_avg_cpu = total_cpu_sum / max(total_cpu_n, 1)
     avg_corr = corr_sum / max(corr_count, 1) if corr_count > 0 else float("nan")
 
@@ -225,19 +219,16 @@ def main():
         print("Avg correlation:                  n/a")
     print("=" * 60 + "\n")
 
-    # Build bin edges for CPU histogram plot
     cpu_bin_edges = np.linspace(*CPU_RANGE, n_bins + 1)
     plot_cpu_histogram(cpu_bin_edges, cpu_hist, cpu_hist_path)
 
-    # Correlation histogram from accumulated counts
     if corr_count > 0:
-        corr_centers = np.linspace(*CORR_RANGE, n_bins + 1)[:-1] + (CORR_RANGE[1] - CORR_RANGE[0]) / (2 * n_bins)
+        corr_bin_edges = np.linspace(*CORR_RANGE, n_bins + 1)
         plot_corr_histogram(
-            corr_centers,
+            corr_bin_edges,
+            corr_hist,
             "Per-Sample Correlation Distribution: Input Window vs Horizon",
-            corr_hist_path,
-            bins=n_bins,
-            bin_range=CORR_RANGE,
+            corr_hist_path
         )
     else:
         log("No valid correlations to plot.")
