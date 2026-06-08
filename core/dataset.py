@@ -103,9 +103,19 @@ class ShardedWindowsDataset(Dataset):
         sid_t = torch.tensor(sid_val, dtype=torch.long)
 
         if paths["w"] is not None:
-            W_mmap = np.load(paths["w"], mmap_mode="r")
-            w_val = float(W_mmap[local_idx])
-            w_t = torch.tensor(w_val, dtype=torch.float32)
-            return x_t, y_t, w_t, sid_t
+            try:
+                W_mmap = np.load(paths["w"], mmap_mode="r")
+                w_val = float(W_mmap[local_idx])
+                w_t = torch.tensor(w_val, dtype=torch.float32)
+                return x_t, y_t, w_t, sid_t
+            except (EOFError, ValueError) as exc:
+                # Weight file may be empty, truncated, or size-mismatched.
+                # This can happen if compute_boundary_weights is still writing
+                # the file when SFOA starts reading concurrently.
+                logging.warning(
+                    "[Dataset] Weight read failed for shard %s: %s. "
+                    "Falling back to uniform weight=1.0.",
+                    paths.get("w", "?"), exc,
+                )
 
         return x_t, y_t, sid_t
