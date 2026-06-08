@@ -267,33 +267,42 @@ def run_sfoa_search(
     args,
     train_ds,
     val_ds,
-    device,
     *,
     rank_seed: int = 42,
     accelerator=None,
 ) -> dict:
+    import torch.distributed as dist
     from core.models import RNNForecaster
 
-    n_gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 1
-    _sfoa_workers = max(1, (os.cpu_count() or 4) // n_gpu_count)
+    n_gpu = torch.cuda.device_count() if torch.cuda.is_available() else 1
+    is_distributed = accelerator is not None and accelerator.num_processes > 1
+    is_main = not is_distributed or accelerator.is_local_main_process
 
-    train_loader = DataLoader(
-        train_ds,
-        batch_size=args.batch_size,
-        shuffle=True,
-        num_workers=_sfoa_workers,
-        pin_memory=torch.cuda.is_available(),
-    )
-    val_loader = DataLoader(
-        val_ds,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=_sfoa_workers,
-        pin_memory=torch.cuda.is_available(),
-    )
+    if is_distributed and not is_main:
+        logging.info(
+            "[SFOA] Rank %d: waiting for hyperparams broadcast from rank 0...",
+            accelerator.process_index,
+        )
+        hp_list = [None]
+        dist.broadcast_object_list(hp_list, src=0)
+        logging.info(
+            "[SFOA] Rank %d: received hyperparams via broadcast: %s",
+            accelerator.process_index,
+            hp_list[0],
+        )
+        return hp_list[0]
 
     first_x, *_ = train_ds[0]
     input_size = first_x.shape[-1]
+
+    if torch.cuda.is_available() and n_gpu > 0:
+        eval_devices = [torch.device(f"cuda:{i}") for i in range(n_gpu)]
+    else:
+        eval_devices = [torch.device("cpu")]
+
+    n_eval_slots = len(eval_devices)
+    use_parallel = n_eval_slots > 1
+
     eval_counter = {"count": 0}
 
     def _decode_and_log(hyperparams: dict, candidate_idx: int) -> str:
@@ -310,8 +319,25 @@ def run_sfoa_search(
         optimizer = None
         eval_counter["count"] += 1
 
+        eval_device = eval_devices[candidate_idx % n_eval_slots]
+
         torch.manual_seed(rank_seed + candidate_idx)
         label = _decode_and_log(hyperparams, candidate_idx)
+
+        _train_loader = DataLoader(
+            train_ds,
+            batch_size=args.batch_size,
+            shuffle=True,
+            num_workers=0,
+            pin_memory=False,
+        )
+        _val_loader = DataLoader(
+            val_ds,
+            batch_size=args.batch_size,
+            shuffle=False,
+            num_workers=0,
+            pin_memory=False,
+        )
 
         try:
             model = RNNForecaster(
@@ -323,7 +349,7 @@ def run_sfoa_search(
                 rnn_type=args.rnn_type,
                 bidirectional=args.bidirectional,
                 quantiles=None,
-            ).to(device)
+            ).to(eval_device)
 
             optimizer = torch.optim.Adam(
                 model.parameters(),
@@ -336,22 +362,20 @@ def run_sfoa_search(
                 epoch_loss_sum = 0.0
                 epoch_batches = 0
                 epoch_start = _time.time()
-                for batch_idx, batch in enumerate(train_loader):
+                for batch in _train_loader:
                     if args.use_weights:
                         x, y, w, _ = batch
                     else:
                         x, y, _ = batch
                         w = None
-                    x = x.to(device)
-                    y = y.to(device)
+                    x = x.to(eval_device)
+                    y = y.to(eval_device)
                     if w is not None:
-                        w = w.to(device)
+                        w = w.to(eval_device)
 
                     optimizer.zero_grad()
                     preds = model(x)
-
                     loss = weighted_mse(preds, y, w, under_penalty=args.under_penalty)
-
                     loss.backward()
                     optimizer.step()
                     epoch_loss_sum += loss.item() * x.size(0)
@@ -360,9 +384,9 @@ def run_sfoa_search(
                 avg_train = epoch_loss_sum / max(1, epoch_batches)
                 epoch_duration = _time.time() - epoch_start
                 logging.info(
-                    "[SFOA] %s | Rank %d | epoch %d/%d | train_loss=%.6f | duration=%.2fs",
+                    "[SFOA] %s | device=%s | epoch %d/%d | train_loss=%.6f | %.2fs",
                     label,
-                    accelerator.process_index if accelerator else 0,
+                    eval_device,
                     epoch + 1,
                     TRAINING.SFOA_EVAL_EPOCHS,
                     avg_train,
@@ -373,28 +397,31 @@ def run_sfoa_search(
             val_loss_accum = 0.0
             val_samples_seen = 0
             with torch.no_grad():
-                for batch in val_loader:
+                for batch in _val_loader:
                     if args.use_weights:
                         x, y, w, _ = batch
                     else:
                         x, y, _ = batch
                         w = None
-                    x = x.to(device)
-                    y = y.to(device)
+                    x = x.to(eval_device)
+                    y = y.to(eval_device)
                     if w is not None:
-                        w = w.to(device)
+                        w = w.to(eval_device)
 
                     preds = model(x)
                     loss = weighted_mse(preds, y, w, under_penalty=args.under_penalty)
                     val_loss_accum += loss.item() * x.size(0)
                     val_samples_seen += x.size(0)
+
             val_loss = val_loss_accum / max(1, val_samples_seen)
             logging.info(
-                "[SFOA] %s | DONE val_loss=%.6f",
+                "[SFOA] %s | device=%s | DONE val_loss=%.6f",
                 label,
+                eval_device,
                 val_loss,
             )
             return val_loss
+
         except Exception as exc:
             logging.warning(
                 "[SFOA] Evaluation failed for %s: %s", label, exc, exc_info=True
@@ -405,10 +432,13 @@ def run_sfoa_search(
                 del model
             if optimizer is not None:
                 del optimizer
-            torch.cuda.empty_cache()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
     logging.info(
-        "[SFOA] Starting distributed hyperparameter search: N=%d, Tmax=%d, eval_epochs=%d",
+        "[SFOA] Starting search on %d GPU(s) (parallel=%s): N=%d, Tmax=%d, eval_epochs=%d",
+        n_eval_slots,
+        use_parallel,
         TRAINING.SFOA_POPULATION,
         TRAINING.SFOA_ITERATIONS,
         TRAINING.SFOA_EVAL_EPOCHS,
@@ -420,8 +450,8 @@ def run_sfoa_search(
         Tmax=TRAINING.SFOA_ITERATIONS,
         Gp=TRAINING.SFOA_GP,
         seed=rank_seed,
-        parallel_eval=False,
-        accelerator=accelerator,
+        parallel_eval=use_parallel,
+        accelerator=None,
     )
 
     resume_state = load_resume_state(PATHS.RESUME_STATE_FILE)
@@ -433,17 +463,21 @@ def run_sfoa_search(
     best_hp, best_fitness, sfoa_state = sfoa.optimize(initial_state=initial_state)
 
     try:
-        if accelerator is None or accelerator.is_local_main_process:
-            existing = load_resume_state(PATHS.RESUME_STATE_FILE) or {}
-            existing["sfoa_state"] = sfoa_state
-            save_resume_state(PATHS.RESUME_STATE_FILE, existing)
+        existing = load_resume_state(PATHS.RESUME_STATE_FILE) or {}
+        existing["sfoa_state"] = sfoa_state
+        save_resume_state(PATHS.RESUME_STATE_FILE, existing)
     except Exception as exc:
         logging.warning("Could not save SFOA state: %s", exc)
 
-    if accelerator is None or accelerator.is_local_main_process:
-        logging.info(
-            "[SFOA] Search complete. Best val loss: %.6f | Params: %s",
-            best_fitness,
-            best_hp,
-        )
+    logging.info(
+        "[SFOA] Search complete. Best val loss: %.6f | Params: %s",
+        best_fitness,
+        best_hp,
+    )
+
+    if is_distributed:
+        hp_list = [best_hp]
+        dist.broadcast_object_list(hp_list, src=0)
+        logging.info("[SFOA] Rank 0: broadcast complete, all ranks unblocked.")
+
     return best_hp
