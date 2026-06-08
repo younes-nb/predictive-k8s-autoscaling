@@ -62,6 +62,14 @@ def train(args):
         args, "hyperparam_optimizer", TRAINING.HYPERPARAM_OPTIMIZER
     )
 
+    sfoa_done = False
+    if resume_state:
+        sfoa_done = resume_state.get("sfoa_done") is True
+        # Ensure hyperparam_optimizer from the saved session persists (defense-in-depth).
+        # Handles the window where SFOA ran but no epoch save has happened yet.
+        if "hyperparam_optimizer" in resume_state.get("args", {}):
+            args.hyperparam_optimizer = resume_state["args"]["hyperparam_optimizer"]
+
     rng = random.Random(args.seed)
 
     log_path = None
@@ -124,7 +132,7 @@ def train(args):
     if current_hyperparams is not None:
         used_keys.add(hyperparam_key(current_hyperparams))
 
-    if current_hyperparams is None and hyperparam_optimizer == "sfoa":
+    if current_hyperparams is None and not sfoa_done and hyperparam_optimizer == "sfoa":
         if accelerator.num_processes > 1:
             _sync = accelerator.wait_for_everyone
         else:
@@ -145,6 +153,11 @@ def train(args):
             current_hyperparams = sample_hyperparams(rng, used_keys)
 
     elif current_hyperparams is None:
+        if sfoa_done:
+            log_info(
+                "[SFOA] Previously completed but best hyperparams missing from resume state. "
+                "Falling back to random sampling."
+            )
         current_hyperparams = sample_hyperparams(rng, used_keys)
 
     if current_hyperparams is not None:
@@ -399,6 +412,7 @@ def train(args):
                 "sfoa_hyperparams": (
                     current_hyperparams if hyperparam_optimizer == "sfoa" else None
                 ),
+                "sfoa_done": sfoa_done,
                 "used_hyperparams": list(used_keys),
                 "best_score": best_score,
                 "last_train_loss": last_train_loss,
