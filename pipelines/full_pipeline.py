@@ -28,6 +28,7 @@ def main():
     ap.add_argument("--rnn_type", choices=["lstm", "gru"], default="lstm")
     ap.add_argument("--windows_dir", default=PATHS.WINDOWS_DIR)
     ap.add_argument("--skip_preprocessing", action="store_true")
+    ap.add_argument("--skip_weights", action="store_true")
     ap.add_argument("--skip_training", action="store_true")
     ap.add_argument("--skip_testing", action="store_true")
     ap.add_argument("--cpu", action="store_true")
@@ -102,7 +103,7 @@ def main():
 
         total_times["preprocessing"] = run(cmd_pre, "Step 1: Preprocessing")
 
-    if TRAINING.USE_WEIGHTS and not args.skip_training:
+    if TRAINING.USE_WEIGHTS and not args.skip_training and not args.skip_weights:
         base_cmd_w = [
             sys.executable,
             compute_weights_script,
