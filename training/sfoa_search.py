@@ -16,7 +16,6 @@ from .train_helpers import load_resume_state, save_resume_state
 
 
 def _format_elapsed(seconds: float) -> str:
-    """Format elapsed seconds into human-readable string."""
     if seconds < 60:
         return f"{seconds:.1f}s"
     elif seconds < 3600:
@@ -109,8 +108,6 @@ class SFOAOptimizer:
                 return float("inf")
 
         if self.accelerator is not None and self.accelerator.num_processes > 1:
-            # DDP: every rank evaluates a subset of candidates via modulo indexing,
-            # then all ranks gather the full fitness array so they agree on best_idx.
             num_procs = self.accelerator.num_processes
             rank = self.accelerator.process_index
 
@@ -130,7 +127,6 @@ class SFOAOptimizer:
             try:
                 import torch.distributed as dist
 
-                # Convert to tensors; pad inf → NaN so they don't contaminate the gather.
                 device = self.accelerator.device
                 local_tensor = torch.full((len(X),), float("nan"), device=device)
                 for i in range(len(X)):
@@ -270,7 +266,6 @@ class SFOAOptimizer:
                 rand_val = self.rng.uniform(0, 1)
                 mode = "explore" if rand_val > self.Gp else "exploit"
 
-                # Log iteration start so users see progress between evaluations
                 logging.info(
                     "[SFOA] Iteration %d/%d (%s) — evaluating %d candidates",
                     T, self.Tmax, mode, self.N,
@@ -288,7 +283,6 @@ class SFOAOptimizer:
                     T, self.Tmax, mode, _format_elapsed(_time.time() - iter_t0),
                 )
 
-                # All ranks compute best_idx identically (all_gather gives same fitness array)
                 best_idx = int(np.argmin(fitness))
                 if fitness[best_idx] < best_fitness:
                     best_fitness = float(fitness[best_idx])
@@ -296,7 +290,6 @@ class SFOAOptimizer:
 
                 best_params = self._decode(best_pos)
 
-                # Every rank logs so users can see parallel progress across GPUs
                 logging.info(
                     "[SFOA] Iteration %d/%d | Best val loss: %.6f | hidden=%s, layers=%s, dropout=%.4f, lr=%.8f",
                     T,
@@ -336,8 +329,14 @@ def run_sfoa_search(
     is_distributed = accelerator is not None and accelerator.num_processes > 1
     rank = accelerator.process_index if (is_distributed and accelerator is not None) else 0
 
-    # Verify each rank's assigned GPU is responsive before entering SFOA loop.
     logging.info("[SFOA-R%d] GPU health check starting...", rank)
+    
+    if len(train_ds) > 0:
+        first_x, *_ = train_ds[0]
+        input_size = first_x.shape[-1]
+    else:
+        raise RuntimeError("[SFOA] train_ds is empty — cannot derive input_size.")
+        
     if torch.cuda.is_available():
         try:
             props = torch.cuda.get_device_properties(0)
@@ -354,8 +353,6 @@ def run_sfoa_search(
         logging.info("[SFOA-R%d] Running on CPU (no CUDA)", rank)
     logging.info("[SFOA-R%d] GPU health check passed.", rank)
 
-    # Determine the device to use for model training.
-    # In DDP mode, accelerator.device gives the correctly-isolated per-rank GPU.
     if is_distributed and accelerator is not None:
         eval_device = accelerator.device
     elif torch.cuda.is_available():
@@ -378,11 +375,7 @@ def run_sfoa_search(
         model = None
         optimizer = None
         eval_counter["count"] += 1
-
-        # Create a fresh DataLoader per candidate. Reusing across candidates corrupts
-        # the CUDA context when one evaluation fails mid-training (e.g., OOM), causing
-        # subsequent evaluations on the same GPU to hang indefinitely instead of failing.
-        # A deterministic shuffle seed ensures reproducible, comparable results.
+        
         train_loader = DataLoader(
             train_ds, batch_size=args.batch_size, shuffle=True,
             num_workers=0, pin_memory=False,
@@ -396,7 +389,6 @@ def run_sfoa_search(
         torch.manual_seed(rank_seed + candidate_idx)
         label = _decode_and_log(hyperparams, candidate_idx)
 
-        # Log start of each candidate evaluation.
         is_main_rank = (
             accelerator.is_local_main_process
             if (accelerator is not None and is_distributed)
@@ -453,7 +445,6 @@ def run_sfoa_search(
                 avg_train = epoch_loss_sum / max(1, epoch_batches)
                 epoch_duration = _time.time() - epoch_start
 
-                # Run validation at every epoch so users can see convergence.
                 model.eval()
                 val_accum = 0.0
                 val_cnt = 0
@@ -474,7 +465,6 @@ def run_sfoa_search(
                         val_cnt += xb.size(0)
                 avg_val = val_accum / max(1, val_cnt)
 
-                # Only main rank logs per-epoch detail to avoid console spam across ranks.
                 is_main_rank = (
                     accelerator.is_local_main_process
                     if (accelerator is not None and is_distributed)
@@ -495,7 +485,6 @@ def run_sfoa_search(
                             rank, candidate_idx, avg_val,
                         )
 
-            # Use the last epoch's val_loss for the DONE message (no redundant pass).
             if is_main_rank:
                 logging.info(
                     "[SFOA] cand#%d | device=%s | DONE val_loss=%.6f",
@@ -563,7 +552,6 @@ def run_sfoa_search(
     )
 
     if is_distributed:
-        # Verify all ranks reached this point before broadcasting (catches stragglers).
         try:
             dist.barrier()
         except Exception as e:
