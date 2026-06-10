@@ -425,6 +425,7 @@ def run_sfoa_search(
             )
 
         try:
+            logging.info("[SFOA] cand#%d before model creation", candidate_idx)
             model = RNNForecaster(
                 input_size=input_size,
                 hidden_size=hyperparams["hidden_size"],
@@ -435,14 +436,23 @@ def run_sfoa_search(
                 bidirectional=args.bidirectional,
                 quantiles=None,
             ).to(eval_device)
+            
+            logging.info("[SFOA] cand#%d model moved to %s", candidate_idx, eval_device)
 
             optimizer = torch.optim.Adam(
                 model.parameters(),
                 lr=hyperparams["lr"],
                 weight_decay=args.weight_decay,
             )
+            
+            logging.info("[SFOA] cand#%d optimizer created", candidate_idx)
 
             for epoch in range(TRAINING.SFOA_EVAL_EPOCHS):
+                logging.info(
+                    "[SFOA] cand#%d epoch %d starting",
+                    candidate_idx,
+                    epoch + 1,
+                )
                 model.train()
                 epoch_loss_sum = 0.0
                 epoch_batches = 0
