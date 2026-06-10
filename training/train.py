@@ -65,8 +65,6 @@ def train(args):
     sfoa_done = False
     if resume_state:
         sfoa_done = resume_state.get("sfoa_done") is True
-        # Ensure hyperparam_optimizer from the saved session persists (defense-in-depth).
-        # Handles the window where SFOA ran but no epoch save has happened yet.
         if "hyperparam_optimizer" in resume_state.get("args", {}):
             args.hyperparam_optimizer = resume_state["args"]["hyperparam_optimizer"]
 
