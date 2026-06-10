@@ -376,7 +376,7 @@ def run_sfoa_search(
         eval_counter["count"] += 1
         system_cores = os.cpu_count() or 1
         gpu_count = torch.cuda.device_count() or 1
-        workers = min(system_cores, 4 * gpu_count)
+        workers = min(system_cores, 8 * gpu_count)
 
         train_loader = DataLoader(
             train_ds,
@@ -410,7 +410,6 @@ def run_sfoa_search(
             )
 
         try:
-            logging.info("[SFOA] cand#%d before model creation", candidate_idx)
             model = RNNForecaster(
                 input_size=input_size,
                 hidden_size=hyperparams["hidden_size"],
