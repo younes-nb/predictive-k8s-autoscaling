@@ -376,7 +376,7 @@ def run_sfoa_search(
         eval_counter["count"] += 1
         system_cores = os.cpu_count() or 1
         gpu_count = torch.cuda.device_count() or 1
-        workers = min(system_cores, 8 * gpu_count)
+        workers = 40
 
         train_loader = DataLoader(
             train_ds,
@@ -384,7 +384,7 @@ def run_sfoa_search(
             shuffle=True,
             num_workers=workers,
             pin_memory=True,
-            persistent_workers=True,
+            persistent_workers=False,
         )
         val_loader = DataLoader(
             val_ds,
@@ -392,7 +392,7 @@ def run_sfoa_search(
             shuffle=False,
             num_workers=workers,
             pin_memory=True,
-            persistent_workers=True,
+            persistent_workers=False,
         )
 
         torch.manual_seed(rank_seed + candidate_idx)
@@ -511,6 +511,10 @@ def run_sfoa_search(
                 del model
             if optimizer is not None:
                 del optimizer
+            if 'train_loader' in locals():
+                del train_loader
+            if 'val_loader' in locals():
+                del val_loader
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
