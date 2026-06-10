@@ -378,6 +378,14 @@ def run_sfoa_search(
         system_cores = os.cpu_count() or 1
         gpu_count = torch.cuda.device_count() or 1
         workers = min(system_cores, 4 * gpu_count)
+        
+        dl_start = _time.time()
+
+        logging.info(
+            "[SFOA] cand#%d Creating DataLoaders (workers=%d)",
+            candidate_idx,
+            workers,
+        )
 
         train_loader = DataLoader(
             train_ds,
@@ -394,6 +402,12 @@ def run_sfoa_search(
             num_workers=workers,
             pin_memory=True,
             persistent_workers=True,
+        )
+        
+        logging.info(
+            "[SFOA] cand#%d DataLoaders created in %.2fs",
+            candidate_idx,
+            _time.time() - dl_start,
         )
 
         torch.manual_seed(rank_seed + candidate_idx)
