@@ -18,7 +18,7 @@ def find_max_batch_size(
     args,
     device,
     loss_fn: Optional[nn.Module] = None,
-    starting_batch=8192,
+    starting_batch=32768,
 ):
     batch_size = starting_batch
     model.train()

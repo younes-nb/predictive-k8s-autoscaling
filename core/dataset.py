@@ -1,3 +1,4 @@
+import logging
 import os
 import glob
 import re
@@ -84,16 +85,29 @@ class ShardedWindowsDataset(Dataset):
         if idx < 0 or idx >= self.total_len:
             raise IndexError(idx)
 
+        if not hasattr(self, "_mmap_cache"):
+            self._mmap_cache = {}
+
         shard_list_idx, local_idx = self.valid_indices[idx]
         paths = self.shard_paths[shard_list_idx]
 
-        X_mmap = np.load(paths["X"], mmap_mode="r")
-        Y_mmap = np.load(paths["y"], mmap_mode="r")
-        SIDs_mmap = np.load(paths["sid"], mmap_mode="r")
+        if shard_list_idx not in self._mmap_cache:
+            self._mmap_cache[shard_list_idx] = {
+                "X": np.load(paths["X"], mmap_mode="r"),
+                "y": np.load(paths["y"], mmap_mode="r"),
+                "sid": np.load(paths["sid"], mmap_mode="r"),
+                "w": (
+                    np.load(paths["w"], mmap_mode="r")
+                    if paths["w"] is not None
+                    else None
+                ),
+            }
 
-        x_arr = np.array(X_mmap[local_idx], copy=True)
-        y_arr = np.array(Y_mmap[local_idx], copy=True)
-        sid_val = int(SIDs_mmap[local_idx])
+        cache = self._mmap_cache[shard_list_idx]
+
+        x_arr = np.array(cache["X"][local_idx], copy=True)
+        y_arr = np.array(cache["y"][local_idx], copy=True)
+        sid_val = int(cache["sid"][local_idx])
 
         if x_arr.ndim == 1:
             x_arr = x_arr[:, None]
@@ -102,16 +116,12 @@ class ShardedWindowsDataset(Dataset):
         y_t = torch.from_numpy(y_arr).float()
         sid_t = torch.tensor(sid_val, dtype=torch.long)
 
-        if paths["w"] is not None:
+        if cache["w"] is not None:
             try:
-                W_mmap = np.load(paths["w"], mmap_mode="r")
-                w_val = float(W_mmap[local_idx])
+                w_val = float(cache["w"][local_idx])
                 w_t = torch.tensor(w_val, dtype=torch.float32)
                 return x_t, y_t, w_t, sid_t
             except (EOFError, ValueError) as exc:
-                # Weight file may be empty, truncated, or size-mismatched.
-                # This can happen if compute_boundary_weights is still writing
-                # the file when SFOA starts reading concurrently.
                 logging.warning(
                     "[Dataset] Weight read failed for shard %s: %s. "
                     "Falling back to uniform weight=1.0.",

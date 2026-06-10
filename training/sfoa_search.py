@@ -325,7 +325,6 @@ def run_sfoa_search(
     import torch.distributed as dist
     from core.models import RNNForecaster
 
-    n_gpu = torch.cuda.device_count() if torch.cuda.is_available() else 1
     is_distributed = accelerator is not None and accelerator.num_processes > 1
     rank = accelerator.process_index if (is_distributed and accelerator is not None) else 0
 
@@ -378,14 +377,6 @@ def run_sfoa_search(
         system_cores = os.cpu_count() or 1
         gpu_count = torch.cuda.device_count() or 1
         workers = min(system_cores, 4 * gpu_count)
-        
-        dl_start = _time.time()
-
-        logging.info(
-            "[SFOA] cand#%d Creating DataLoaders (workers=%d)",
-            candidate_idx,
-            workers,
-        )
 
         train_loader = DataLoader(
             train_ds,
@@ -402,12 +393,6 @@ def run_sfoa_search(
             num_workers=workers,
             pin_memory=True,
             persistent_workers=True,
-        )
-        
-        logging.info(
-            "[SFOA] cand#%d DataLoaders created in %.2fs",
-            candidate_idx,
-            _time.time() - dl_start,
         )
 
         torch.manual_seed(rank_seed + candidate_idx)
@@ -437,22 +422,13 @@ def run_sfoa_search(
                 quantiles=None,
             ).to(eval_device)
             
-            logging.info("[SFOA] cand#%d model moved to %s", candidate_idx, eval_device)
-
             optimizer = torch.optim.Adam(
                 model.parameters(),
                 lr=hyperparams["lr"],
                 weight_decay=args.weight_decay,
             )
             
-            logging.info("[SFOA] cand#%d optimizer created", candidate_idx)
-
             for epoch in range(TRAINING.SFOA_EVAL_EPOCHS):
-                logging.info(
-                    "[SFOA] cand#%d epoch %d starting",
-                    candidate_idx,
-                    epoch + 1,
-                )
                 model.train()
                 epoch_loss_sum = 0.0
                 epoch_batches = 0
@@ -551,6 +527,32 @@ def run_sfoa_search(
     logging.info(
         "[SFOA] Evaluating candidates in parallel across ranks (DDP all_gather)",
     )
+    
+    if eval_device.type != "cpu":
+        logging.info("[SFOA] Profiling worst-case model architecture boundaries to establish global SFOA batch size...")
+        from training.train_helpers import find_max_batch_size
+        
+        max_possible_hidden = max(TRAINING.HIDDEN_SIZE_OPTIONS)
+        max_possible_layers = max(TRAINING.NUM_LAYERS_OPTIONS)
+        
+        worst_case_model = RNNForecaster(
+            input_size=input_size,
+            hidden_size=max_possible_hidden,
+            num_layers=max_possible_layers,
+            dropout=0.0,
+            horizon=args.pred_horizon,
+            rnn_type=args.rnn_type,
+            bidirectional=args.bidirectional,
+            quantiles=None,
+        ).to(eval_device)
+        
+        max_batch = find_max_batch_size(worst_case_model, input_size, args, eval_device, loss_fn=None)
+        safe_batch_size = int(max_batch * 0.8)
+        args.batch_size = 2 ** int(_math.log2(max(1, safe_batch_size)))
+        
+        del worst_case_model
+        torch.cuda.empty_cache()
+        logging.info("[SFOA] Global SFOA batch size set to %d based on hardware ceilings.", args.batch_size)
 
     sfoa = SFOAOptimizer(
         eval_fn=eval_fn,
