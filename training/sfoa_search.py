@@ -598,8 +598,8 @@ def run_sfoa_search(
         if _rs and "sfoa_state" in _rs:
             initial_state = _rs["sfoa_state"]
             logging.info(
-                "[SFOA] Resuming from saved state (T=%d).",
-                initial_state.get("T", 0),
+                "[SFOA-R%d] Resuming from saved state (T=%d).",
+                rank, initial_state.get("T", 0),
             )
         else:
             logging.info(
@@ -609,14 +609,46 @@ def run_sfoa_search(
         logging.info(
             "[SFOA] resume=False — ignoring any saved sfoa_state and starting fresh."
         )
+
+    # In a multi-rank run, only rank 0 has read the resume state from disk.
+    # Broadcast it so every rank constructs its SFOAOptimizer with the same
+    # `X` / cached `fitness` / `T`. Without this, ranks 1..N-1 would treat
+    # the run as fresh (full ~15h initial re-eval on random X) and the
+    # round-robin `_evaluate_all` would mix correct and garbage candidate
+    # fitnesses into one incoherent global vector.
+    if is_distributed and initial_state is not None:
+        if accelerator.is_local_main_process:
+            _payload = [initial_state]
+        else:
+            _payload = [None]
+        dist.broadcast_object_list(_payload, src=0)
+        initial_state = _payload[0]
+        logging.info(
+            "[SFOA-R%d] Received broadcast initial_state (T=%d) from rank 0.",
+            rank, initial_state.get("T", 0) if isinstance(initial_state, dict) else -1,
+        )
+
     best_hp, best_fitness, sfoa_state = sfoa.optimize(initial_state=initial_state)
 
     try:
-        existing = load_resume_state(PATHS.RESUME_STATE_FILE) or {}
-        existing["sfoa_state"] = sfoa_state
-        existing["sfoa_done"] = True
-        existing["hyperparam_optimizer"] = "sfoa"
-        save_resume_state(PATHS.RESUME_STATE_FILE, existing)
+        if is_distributed:
+            # Make sure all ranks have finished calling optimize() before any
+            # rank touches the resume file. Only rank 0 reads-modifies-writes
+            # so we don't race-clobber a half-written state.
+            dist.barrier()
+            if accelerator.is_local_main_process:
+                existing = load_resume_state(PATHS.RESUME_STATE_FILE) or {}
+                existing["sfoa_state"] = sfoa_state
+                existing["sfoa_done"] = True
+                existing["hyperparam_optimizer"] = "sfoa"
+                save_resume_state(PATHS.RESUME_STATE_FILE, existing)
+            dist.barrier()
+        else:
+            existing = load_resume_state(PATHS.RESUME_STATE_FILE) or {}
+            existing["sfoa_state"] = sfoa_state
+            existing["sfoa_done"] = True
+            existing["hyperparam_optimizer"] = "sfoa"
+            save_resume_state(PATHS.RESUME_STATE_FILE, existing)
     except Exception as exc:
         logging.warning("Could not save SFOA state: %s", exc)
 
