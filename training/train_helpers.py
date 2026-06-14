@@ -84,15 +84,26 @@ def load_resume_state(path):
     if not os.path.exists(path):
         return None
     try:
-        return torch.load(path, map_location="cpu")
+        try:
+            return torch.load(path, map_location="cpu", weights_only=False)
+        except TypeError:
+            return torch.load(path, map_location="cpu")
     except Exception as exc:
         logging.warning("Failed to load resume state: %s", exc)
         return None
 
 
 def save_resume_state(path, state):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    torch.save(state, path)
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    tmp_path = f"{path}.tmp.{os.getpid()}"
+    try:
+        torch.save(state, tmp_path)
+        os.replace(tmp_path, path)
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
 
 
 def apply_hyperparams(args, hyperparams):

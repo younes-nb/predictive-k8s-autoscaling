@@ -72,9 +72,7 @@ def train(args):
 
     log_path = None
     if accelerator.is_local_main_process:
-        log_path = setup_logging(
-            "train", log_path=resume_state.get("log_path") if resume_state else None
-        )
+        log_path = setup_logging("train")  # always fresh — never restore from checkpoint
 
     used_keys = (
         {tuple(k) for k in resume_state.get("used_hyperparams", [])}
@@ -145,6 +143,7 @@ def train(args):
             accelerator=accelerator,
             resume=getattr(args, "resume_training", False),
         )
+        sfoa_done = True
         if accelerator.num_processes > 1:
             accelerator.wait_for_everyone()
         if current_hyperparams is None:
@@ -418,7 +417,7 @@ def train(args):
                 "best_score": best_score,
                 "last_train_loss": last_train_loss,
                 "no_change_streak": no_change_streak,
-                "log_path": log_path,
+                # "log_path" intentionally omitted — generated fresh on every session start
                 "model_state_dict": accelerator.unwrap_model(model).state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
             }

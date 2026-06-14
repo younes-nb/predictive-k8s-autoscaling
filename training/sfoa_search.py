@@ -27,6 +27,39 @@ def _format_elapsed(seconds: float) -> str:
         return f"{h}h{m}m{s}s"
 
 
+def _to_cpu_tree(value):
+    if torch.is_tensor(value):
+        return value.detach().cpu()
+    if isinstance(value, dict):
+        return {key: _to_cpu_tree(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_to_cpu_tree(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_to_cpu_tree(item) for item in value)
+    return copy.deepcopy(value)
+
+
+def _move_optimizer_state_to_device(optimizer, device) -> None:
+    for state in optimizer.state.values():
+        for key, value in list(state.items()):
+            if torch.is_tensor(value):
+                state[key] = value.to(device)
+
+
+def _same_hyperparams(left, right) -> bool:
+    if not left or not right:
+        return False
+    try:
+        return (
+            int(left.get("hidden_size")) == int(right.get("hidden_size"))
+            and int(left.get("num_layers")) == int(right.get("num_layers"))
+            and round(float(left.get("dropout")), 4) == round(float(right.get("dropout")), 4)
+            and round(float(left.get("lr")), 8) == round(float(right.get("lr")), 8)
+        )
+    except (TypeError, ValueError):
+        return False
+
+
 class SFOAOptimizer:
 
     D = 4
@@ -91,12 +124,106 @@ class SFOAOptimizer:
     def _clip_to_bounds(self, x: np.ndarray) -> np.ndarray:
         return np.clip(x, self.BOUNDS_LOW, self.BOUNDS_HIGH)
 
-    def _evaluate_all(self, X: np.ndarray) -> np.ndarray:
+    def _evaluate_all(
+        self,
+        X: np.ndarray,
+        *,
+        fitness=None,
+        T: int = 0,
+        completed_T: int = 0,
+        best_pos=None,
+        best_fitness: float = float("inf"),
+        phase: str = "initial",
+        mode=None,
+        checkpoint_fn=None,
+        initial_state: dict = None,
+    ) -> np.ndarray:
+        if fitness is not None and len(fitness) == len(X):
+            current_fitness = np.asarray(fitness, dtype=float).copy()
+        else:
+            current_fitness = np.full(len(X), np.nan, dtype=float)
+
+        def _candidate_payload_from_resume(candidate_resume: dict, hyperparams: dict) -> dict:
+            payload = {
+                "candidate_hyperparams": copy.deepcopy(hyperparams),
+                "candidate_epoch": 0,
+            }
+            if not candidate_resume:
+                return payload
+            for key in (
+                "candidate_epoch",
+                "candidate_val_loss",
+                "candidate_model_state_dict",
+                "candidate_optimizer_state_dict",
+                "candidate_torch_rng_state",
+                "candidate_cuda_rng_state",
+            ):
+                if key in candidate_resume:
+                    payload[key] = candidate_resume[key]
+            return payload
+
+        def _checkpoint(active_candidate=None, candidate_payload=None) -> None:
+            if checkpoint_fn is None:
+                return
+            interim_state = {
+                "X": X.copy(),
+                "fitness": current_fitness.copy(),
+                "best_pos": None if best_pos is None else np.asarray(best_pos, dtype=float).copy(),
+                "best_fitness": float(best_fitness),
+                "T": int(completed_T),
+                "active_T": int(T),
+                "active_candidate": None if active_candidate is None else int(active_candidate),
+                "phase": phase,
+                "mode": mode,
+                "rng_state": copy.deepcopy(self.rng.bit_generator.state),
+                "N": self.N,
+                "Tmax": self.Tmax,
+            }
+            if candidate_payload:
+                interim_state.update(candidate_payload)
+            checkpoint_fn(interim_state)
+
+        def _candidate_resume_state(idx: int):
+            if not isinstance(initial_state, dict):
+                return None
+            if initial_state.get("active_T") is None:
+                return None
+            if int(initial_state.get("active_T", -1)) != int(T):
+                return None
+            if initial_state.get("active_candidate") is None:
+                return None
+            if int(initial_state.get("active_candidate", -1)) != int(idx):
+                return None
+            if not np.isnan(current_fitness[idx]):
+                return None
+            return initial_state
+
         def _evaluate_one(idx: int, row: np.ndarray) -> float:
+            if not np.isnan(current_fitness[idx]):
+                return float(current_fitness[idx])
             hyperparams = self._decode(row)
+            candidate_resume = _candidate_resume_state(idx)
+
+            def _candidate_checkpoint(candidate_payload: dict) -> None:
+                payload = {"candidate_hyperparams": copy.deepcopy(hyperparams)}
+                if candidate_payload:
+                    payload.update(candidate_payload)
+                _checkpoint(active_candidate=idx, candidate_payload=payload)
+
             try:
+                _checkpoint(
+                    active_candidate=idx,
+                    candidate_payload=_candidate_payload_from_resume(
+                        candidate_resume, hyperparams
+                    ),
+                )
                 return float(
-                    self.eval_fn(copy.deepcopy(hyperparams), candidate_idx=idx)
+                    self.eval_fn(
+                        copy.deepcopy(hyperparams),
+                        candidate_idx=idx,
+                        candidate_state=candidate_resume,
+                        checkpoint_fn=_candidate_checkpoint,
+                    )
                 )
             except Exception as exc:
                 logging.warning(
@@ -107,57 +234,62 @@ class SFOAOptimizer:
                 )
                 return float("inf")
 
+        _checkpoint()
+
         if self.accelerator is not None and self.accelerator.num_processes > 1:
             num_procs = self.accelerator.num_processes
             rank = self.accelerator.process_index
 
-            local_fitness = np.full(len(X), float("inf"), dtype=float)
+            local_fitness = current_fitness.copy()
             rank_t0 = _time.time()
             for i in range(len(X)):
-                if i % num_procs == rank:
+                if np.isnan(local_fitness[i]) and i % num_procs == rank:
                     cand_t0 = _time.time()
                     local_fitness[i] = _evaluate_one(i, X[i])
+                    current_fitness[i] = local_fitness[i]
+                    _checkpoint()
                     elapsed = _time.time() - cand_t0
                     logging.info(
-                        "[SFOA-R%d] Candidate %d evaluated in %.1fs (inf=%d/%d)",
+                        "[SFOA-R%d] Candidate %d evaluated in %.1fs (pending=%d/%d)",
                         rank, i, elapsed,
-                        int(np.sum(np.isinf(local_fitness))), len(X),
+                        int(np.sum(np.isnan(local_fitness))), len(X),
                     )
 
             try:
                 import torch.distributed as dist
 
                 device = self.accelerator.device
-                local_tensor = torch.full((len(X),), float("nan"), device=device)
-                for i in range(len(X)):
-                    if not np.isinf(local_fitness[i]):
-                        local_tensor[i] = local_fitness[i]
+                local_tensor = torch.as_tensor(local_fitness, dtype=torch.float64, device=device)
 
                 all_tensors = [torch.empty_like(local_tensor) for _ in range(num_procs)]
                 dist.all_gather(all_tensors, local_tensor)
 
-                global_fitness = np.full(len(X), float("inf"), dtype=float)
+                global_fitness = np.full(len(X), np.nan, dtype=float)
                 for j, t in enumerate(all_tensors):
                     vals = t.cpu().numpy()
                     mask = ~np.isnan(vals)
                     global_fitness[mask] = vals[mask]
 
+                current_fitness = global_fitness
+                _checkpoint()
+
                 gather_elapsed = _time.time() - rank_t0
+                available = ~np.isnan(global_fitness)
                 logging.info(
-                    "[SFOA-R%d] all_gather OK in %.1fs — global fitness: min=%.6f @ idx=%d",
+                    "[SFOA-R%d] all_gather OK in %.1fs - global fitness: min=%.6f @ idx=%d",
                     rank, gather_elapsed,
-                    float(np.min(global_fitness[~np.isinf(global_fitness)]))
-                    if np.any(~np.isinf(global_fitness)) else float("inf"),
-                    int(np.argmin(global_fitness)),
+                    float(np.nanmin(global_fitness[available]))
+                    if np.any(available) else float("inf"),
+                    int(np.nanargmin(global_fitness)) if np.any(available) else -1,
                 )
                 return global_fitness
             except Exception as e:
                 elapsed = _time.time() - rank_t0
-                inf_count = int(np.sum(np.isinf(local_fitness)))
+                pending_count = int(np.sum(np.isnan(local_fitness)))
                 logging.error(
                     "[SFOA-R%d] all_gather FAILED after %.1fs. "
-                    "Local fitness: %d/%d inf, CUDA alloc=%.0fMB, reserved=%.0fMB",
-                    rank, elapsed, inf_count, len(X),
+                    "Local fitness: %d/%d pending, CUDA alloc=%.0fMB, reserved=%.0fMB",
+                    rank, elapsed, pending_count, len(X),
                     torch.cuda.memory_allocated(device) / 1e6
                     if torch.cuda.is_available() else 0,
                     torch.cuda.memory_reserved(device) / 1e6
@@ -165,33 +297,38 @@ class SFOAOptimizer:
                 )
                 return local_fitness
 
-        if not self.parallel_eval or len(X) <= 1:
-            return np.asarray(
-                [_evaluate_one(i, row) for i, row in enumerate(X)], dtype=float
-            )
+        if checkpoint_fn is not None or not self.parallel_eval or len(X) <= 1:
+            for i, row in enumerate(X):
+                if np.isnan(current_fitness[i]):
+                    current_fitness[i] = _evaluate_one(i, row)
+                    _checkpoint()
+            return current_fitness
 
         n_gpu = torch.cuda.device_count() if torch.cuda.is_available() else 0
         results_map: dict[int, float] = {}
+        pending_indices = [i for i in range(len(X)) if np.isnan(current_fitness[i])]
+        if not pending_indices:
+            return current_fitness
 
         def _worker(idx: int, row: np.ndarray) -> tuple[int, float]:
             return idx, _evaluate_one(idx, row)
 
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
-        with ThreadPoolExecutor(max_workers=n_gpu) as pool:
-            futures = {pool.submit(_worker, i, row): i for i, row in enumerate(X)}
+        with ThreadPoolExecutor(max_workers=max(1, n_gpu)) as pool:
+            futures = {pool.submit(_worker, i, X[i]): i for i in pending_indices}
             for fut in as_completed(futures):
                 idx = futures[fut]
                 try:
                     _, fit = fut.result()
-                    results_map[idx] = fit
+                    current_fitness[idx] = fit
                 except Exception as exc:
                     logging.warning(
                         "[SFOA] Parallel candidate #%d raised: %s", idx, exc
                     )
-                    results_map[idx] = float("inf")
+                    current_fitness[idx] = float("inf")
 
-        return np.asarray([results_map[i] for i in range(len(X))], dtype=float)
+        return current_fitness
 
     def _explore(self, X: np.ndarray, T: int) -> np.ndarray:
         theta = (_math.pi / 2) * (T / self.Tmax)
@@ -228,7 +365,7 @@ class SFOAOptimizer:
                 X_new[i] = self._clip_to_bounds(y)
         return X_new
 
-    def optimize(self, initial_state: dict = None) -> tuple[dict, float, dict]:
+    def optimize(self, initial_state: dict = None, checkpoint_fn=None) -> tuple[dict, float, dict]:
         if initial_state is not None and "X" in initial_state:
             X = np.asarray(initial_state["X"], dtype=float)
             if X.shape != (self.N, self.D):
@@ -249,89 +386,222 @@ class SFOAOptimizer:
                 + self.BOUNDS_LOW
             )
 
-        # Reuse cached fitness when resuming to avoid re-evaluating the full
-        # population (which can take many hours on large datasets).
-        cached_fitness = (
-            initial_state.get("fitness")
-            if initial_state is not None
-            else None
-        )
-        if (
-            cached_fitness is not None
-            and len(cached_fitness) == len(X)
-            and not any(np.isnan(cached_fitness))
-        ):
-            fitness = np.asarray(cached_fitness, dtype=float)
-            logging.info("[SFOA] Reusing cached fitness from resume state (skipping initial eval).")
+        if initial_state is not None and initial_state.get("rng_state") is not None:
+            try:
+                self.rng.bit_generator.state = initial_state["rng_state"]
+            except Exception as exc:
+                logging.warning("[SFOA] Could not restore RNG state: %s", exc)
+
+        cached_fitness = initial_state.get("fitness") if initial_state is not None else None
+        if cached_fitness is not None and len(cached_fitness) == len(X):
+            fitness = np.asarray(cached_fitness, dtype=float).copy()
         else:
-            iter_t0 = _time.time()
-            fitness = self._evaluate_all(X)
-            logging.info("[SFOA] Initial evaluation done in %s", _format_elapsed(_time.time() - iter_t0))
+            fitness = np.full(len(X), np.nan, dtype=float)
 
-        best_idx = int(np.argmin(fitness))
-        best_pos = X[best_idx].copy()
-        best_fitness = float(fitness[best_idx])
+        completed_T = int(initial_state.get("T", 0)) if initial_state is not None else 0
+        active_T_raw = initial_state.get("active_T") if initial_state is not None else None
+        active_T = int(active_T_raw) if active_T_raw is not None else None
 
-        start_T = 1
-        if initial_state is not None:
-            resumed_T = int(initial_state.get("T", 0))
-            start_T = resumed_T + 1
-            if start_T > self.Tmax:
+        best_pos = None
+        if initial_state is not None and initial_state.get("best_pos") is not None:
+            best_pos = np.asarray(initial_state["best_pos"], dtype=float)
+            if best_pos.shape != (self.D,):
+                best_pos = None
+        best_fitness = (
+            float(initial_state.get("best_fitness", float("inf")))
+            if initial_state is not None
+            else float("inf")
+        )
+
+        def _fitness_complete(values: np.ndarray) -> bool:
+            return len(values) == len(X) and not np.any(np.isnan(values))
+
+        def _mark_pending_as_failed(values: np.ndarray) -> np.ndarray:
+            pending = int(np.sum(np.isnan(values)))
+            if pending:
                 logging.warning(
-                    "[SFOA] Resume state T=%d >= Tmax=%d — SFOA is already complete. "
-                    "Returning best known result without iterating. "
-                    "If you intended a fresh run, set resume=False (or delete %s).",
-                    resumed_T, self.Tmax, PATHS.RESUME_STATE_FILE,
+                    "[SFOA] Population evaluation returned with %d pending candidate(s); marking them as inf.",
+                    pending,
                 )
+                return np.where(np.isnan(values), float("inf"), values)
+            return values
 
-        last_T = start_T - 1
-        if start_T <= self.Tmax:
-            for T in range(start_T, self.Tmax + 1):
-                rand_val = self.rng.uniform(0, 1)
-                mode = "explore" if rand_val > self.Gp else "exploit"
+        def _refresh_best_from_fitness() -> None:
+            nonlocal best_pos, best_fitness
+            available = ~np.isnan(fitness)
+            if not np.any(available):
+                return
+            idx = int(np.nanargmin(fitness))
+            if best_pos is None or fitness[idx] < best_fitness:
+                best_fitness = float(fitness[idx])
+                best_pos = X[idx].copy()
 
-                logging.info(
-                    "[SFOA] Iteration %d/%d (%s) — evaluating %d candidates",
-                    T, self.Tmax, mode, self.N,
-                )
+        def _checkpoint_complete(done_T: int) -> None:
+            if checkpoint_fn is None:
+                return
+            complete_state = {
+                "X": X.copy(),
+                "fitness": fitness.copy(),
+                "best_pos": None if best_pos is None else best_pos.copy(),
+                "best_fitness": float(best_fitness),
+                "best_hyperparams": self._decode(best_pos) if best_pos is not None else None,
+                "T": int(done_T),
+                "active_T": None,
+                "active_candidate": None,
+                "phase": "complete",
+                "rng_state": copy.deepcopy(self.rng.bit_generator.state),
+                "N": self.N,
+                "Tmax": self.Tmax,
+            }
+            try:
+                checkpoint_fn(complete_state)
+            except Exception as exc:
+                logging.warning("[SFOA] Completed-state checkpoint failed at T=%d: %s", done_T, exc)
 
-                if rand_val > self.Gp:
-                    X = self._explore(X, T)
-                else:
-                    X = self._exploit(X, best_pos, T)
+        if active_T is not None and not _fitness_complete(fitness):
+            phase = initial_state.get("phase", "initial" if active_T == 0 else "iteration")
+            mode = initial_state.get("mode")
+            logging.info(
+                "[SFOA] Resuming %s evaluation at T=%d candidate=%s epoch=%s.",
+                phase,
+                active_T,
+                initial_state.get("active_candidate"),
+                initial_state.get("candidate_epoch"),
+            )
+            iter_t0 = _time.time()
+            fitness = self._evaluate_all(
+                X,
+                fitness=fitness,
+                T=active_T,
+                completed_T=completed_T,
+                best_pos=best_pos,
+                best_fitness=best_fitness,
+                phase=phase,
+                mode=mode,
+                checkpoint_fn=checkpoint_fn,
+                initial_state=initial_state,
+            )
+            fitness = _mark_pending_as_failed(fitness)
+            logging.info(
+                "[SFOA] Resumed T=%d evaluation done in %s",
+                active_T,
+                _format_elapsed(_time.time() - iter_t0),
+            )
+            _refresh_best_from_fitness()
+            completed_T = active_T
+            _checkpoint_complete(completed_T)
+            initial_state = None
+            active_T = None
 
-                iter_t0 = _time.time()
-                fitness = self._evaluate_all(X)
-                logging.info(
-                    "[SFOA] Iteration %d/%d (%s) done in %s",
-                    T, self.Tmax, mode, _format_elapsed(_time.time() - iter_t0),
-                )
+        if active_T is not None and _fitness_complete(fitness):
+            logging.info(
+                "[SFOA] Resume state has completed active_T=%d; finalizing iteration state.",
+                active_T,
+            )
+            _refresh_best_from_fitness()
+            completed_T = active_T
+            _checkpoint_complete(completed_T)
+            initial_state = None
+            active_T = None
 
-                best_idx = int(np.argmin(fitness))
-                if fitness[best_idx] < best_fitness:
-                    best_fitness = float(fitness[best_idx])
-                    best_pos = X[best_idx].copy()
+        if not _fitness_complete(fitness):
+            iter_t0 = _time.time()
+            fitness = self._evaluate_all(
+                X,
+                fitness=fitness,
+                T=0,
+                completed_T=0,
+                best_pos=best_pos,
+                best_fitness=best_fitness,
+                phase="initial",
+                mode=None,
+                checkpoint_fn=checkpoint_fn,
+                initial_state=initial_state,
+            )
+            fitness = _mark_pending_as_failed(fitness)
+            logging.info("[SFOA] Initial evaluation done in %s", _format_elapsed(_time.time() - iter_t0))
+            _refresh_best_from_fitness()
+            completed_T = 0
+            _checkpoint_complete(completed_T)
+            initial_state = None
+        else:
+            _refresh_best_from_fitness()
+            if initial_state is not None:
+                logging.info("[SFOA] Reusing cached fitness from resume state.")
 
-                best_params = self._decode(best_pos)
+        if completed_T >= self.Tmax:
+            logging.warning(
+                "[SFOA] Resume state T=%d >= Tmax=%d - SFOA is already complete. "
+                "Returning best known result without iterating. "
+                "If you intended a fresh run, set resume=False (or delete %s).",
+                completed_T, self.Tmax, PATHS.RESUME_STATE_FILE,
+            )
 
-                logging.info(
-                    "[SFOA] Iteration %d/%d | Best val loss: %.6f | hidden=%s, layers=%s, dropout=%.4f, lr=%.8f",
-                    T,
-                    self.Tmax,
-                    best_fitness,
-                    best_params["hidden_size"],
-                    best_params["num_layers"],
-                    best_params["dropout"],
-                    best_params["lr"],
-                )
-                last_T = T
+        if best_pos is None:
+            best_pos = X[int(np.nanargmin(fitness))].copy()
+            best_fitness = float(np.nanmin(fitness))
+
+        for T in range(completed_T + 1, self.Tmax + 1):
+            rand_val = self.rng.uniform(0, 1)
+            mode = "explore" if rand_val > self.Gp else "exploit"
+
+            logging.info(
+                "[SFOA] Iteration %d/%d (%s) - evaluating %d candidates",
+                T, self.Tmax, mode, self.N,
+            )
+
+            if rand_val > self.Gp:
+                X = self._explore(X, T)
+            else:
+                X = self._exploit(X, best_pos, T)
+
+            fitness = np.full(len(X), np.nan, dtype=float)
+            iter_t0 = _time.time()
+            fitness = self._evaluate_all(
+                X,
+                fitness=fitness,
+                T=T,
+                completed_T=T - 1,
+                best_pos=best_pos,
+                best_fitness=best_fitness,
+                phase="iteration",
+                mode=mode,
+                checkpoint_fn=checkpoint_fn,
+                initial_state=None,
+            )
+            fitness = _mark_pending_as_failed(fitness)
+            logging.info(
+                "[SFOA] Iteration %d/%d (%s) done in %s",
+                T, self.Tmax, mode, _format_elapsed(_time.time() - iter_t0),
+            )
+
+            _refresh_best_from_fitness()
+            best_params = self._decode(best_pos)
+
+            logging.info(
+                "[SFOA] Iteration %d/%d | Best val loss: %.6f | hidden=%s, layers=%s, dropout=%.4f, lr=%.8f",
+                T,
+                self.Tmax,
+                best_fitness,
+                best_params["hidden_size"],
+                best_params["num_layers"],
+                best_params["dropout"],
+                best_params["lr"],
+            )
+            completed_T = T
+            _checkpoint_complete(completed_T)
 
         final_state = {
             "X": X,
             "fitness": fitness,
             "best_pos": best_pos,
             "best_fitness": best_fitness,
-            "T": last_T,
+            "best_hyperparams": self._decode(best_pos),
+            "T": completed_T,
+            "active_T": None,
+            "active_candidate": None,
+            "phase": "complete",
+            "rng_state": copy.deepcopy(self.rng.bit_generator.state),
             "N": self.N,
             "Tmax": self.Tmax,
         }
@@ -395,7 +665,13 @@ def run_sfoa_search(
             f"lr={hyperparams['lr']:.8f}"
         )
 
-    def eval_fn(hyperparams: dict, *, candidate_idx: int = 0) -> float:
+    def eval_fn(
+        hyperparams: dict,
+        *,
+        candidate_idx: int = 0,
+        candidate_state: dict = None,
+        checkpoint_fn=None,
+    ) -> float:
         model = None
         optimizer = None
         eval_counter["count"] += 1
@@ -422,6 +698,19 @@ def run_sfoa_search(
 
         torch.manual_seed(rank_seed + candidate_idx)
         label = _decode_and_log(hyperparams, candidate_idx)
+        saved_hyperparams = (
+            candidate_state.get("candidate_hyperparams")
+            if isinstance(candidate_state, dict)
+            else None
+        )
+        can_resume_candidate = isinstance(candidate_state, dict) and (
+            saved_hyperparams is None or _same_hyperparams(saved_hyperparams, hyperparams)
+        )
+        if isinstance(candidate_state, dict) and not can_resume_candidate:
+            logging.warning(
+                "[SFOA] Ignoring candidate resume state for cand#%d because hyperparameters differ.",
+                candidate_idx,
+            )
 
         is_main_rank = (
             accelerator.is_local_main_process
@@ -451,8 +740,73 @@ def run_sfoa_search(
                 lr=hyperparams["lr"],
                 weight_decay=args.weight_decay,
             )
+
+            resume_epoch = 0
+            avg_val = None
+            if can_resume_candidate:
+                requested_epoch = int(candidate_state.get("candidate_epoch", 0) or 0)
+                has_model_state = candidate_state.get("candidate_model_state_dict") is not None
+                has_optimizer_state = candidate_state.get("candidate_optimizer_state_dict") is not None
+                if requested_epoch > 0 and not (has_model_state and has_optimizer_state):
+                    logging.warning(
+                        "[SFOA] Candidate cand#%d resume state is missing model/optimizer state; restarting candidate.",
+                        candidate_idx,
+                    )
+                else:
+                    resume_epoch = min(requested_epoch, TRAINING.SFOA_EVAL_EPOCHS)
+                    if has_model_state:
+                        model.load_state_dict(candidate_state["candidate_model_state_dict"])
+                    if has_optimizer_state:
+                        optimizer.load_state_dict(candidate_state["candidate_optimizer_state_dict"])
+                        _move_optimizer_state_to_device(optimizer, eval_device)
+                    avg_val = candidate_state.get("candidate_val_loss")
+                    if candidate_state.get("candidate_torch_rng_state") is not None:
+                        torch.set_rng_state(candidate_state["candidate_torch_rng_state"])
+                    if (
+                        eval_device.type == "cuda"
+                        and candidate_state.get("candidate_cuda_rng_state") is not None
+                    ):
+                        torch.cuda.set_rng_state(
+                            candidate_state["candidate_cuda_rng_state"],
+                            device=eval_device,
+                        )
+                    if resume_epoch > 0 and is_main_rank:
+                        logging.info(
+                            "[SFOA] cand#%d | resuming after epoch %d/%d",
+                            candidate_idx,
+                            resume_epoch,
+                            TRAINING.SFOA_EVAL_EPOCHS,
+                        )
+
+            def _checkpoint_candidate(done_epoch: int, val_loss) -> None:
+                if checkpoint_fn is None:
+                    return
+                payload = {
+                    "candidate_epoch": int(done_epoch),
+                    "candidate_val_loss": None if val_loss is None else float(val_loss),
+                    "candidate_model_state_dict": _to_cpu_tree(model.state_dict()),
+                    "candidate_optimizer_state_dict": _to_cpu_tree(optimizer.state_dict()),
+                    "candidate_torch_rng_state": _to_cpu_tree(torch.get_rng_state()),
+                }
+                if eval_device.type == "cuda":
+                    payload["candidate_cuda_rng_state"] = _to_cpu_tree(
+                        torch.cuda.get_rng_state(eval_device)
+                    )
+                checkpoint_fn(payload)
+
+            _checkpoint_candidate(resume_epoch, avg_val)
+
+            if resume_epoch >= TRAINING.SFOA_EVAL_EPOCHS:
+                if avg_val is None:
+                    avg_val = float("inf")
+                if is_main_rank:
+                    logging.info(
+                        "[SFOA] cand#%d | device=%s | DONE val_loss=%.6f",
+                        candidate_idx, eval_device, avg_val,
+                    )
+                return float(avg_val)
             
-            for epoch in range(TRAINING.SFOA_EVAL_EPOCHS):
+            for epoch in range(resume_epoch, TRAINING.SFOA_EVAL_EPOCHS):
                 model.train()
                 epoch_loss_sum = 0.0
                 epoch_batches = 0
@@ -518,6 +872,8 @@ def run_sfoa_search(
                             "[SFOA-R%d] cand#%d training complete (val_loss=%.6f)",
                             rank, candidate_idx, avg_val,
                         )
+
+                _checkpoint_candidate(epoch + 1, avg_val)
 
             if is_main_rank:
                 logging.info(
@@ -598,8 +954,12 @@ def run_sfoa_search(
         if _rs and "sfoa_state" in _rs:
             initial_state = _rs["sfoa_state"]
             logging.info(
-                "[SFOA-R%d] Resuming from saved state (T=%d).",
-                rank, initial_state.get("T", 0),
+                "[SFOA-R%d] Resuming from saved state (T=%d, active_T=%s, candidate=%s, epoch=%s).",
+                rank,
+                initial_state.get("T", 0),
+                initial_state.get("active_T"),
+                initial_state.get("active_candidate"),
+                initial_state.get("candidate_epoch"),
             )
         else:
             logging.info(
@@ -609,6 +969,54 @@ def run_sfoa_search(
         logging.info(
             "[SFOA] resume=False — ignoring any saved sfoa_state and starting fresh."
         )
+
+    # Keys that belong exclusively to the main training loop.
+    # They must not survive in RESUME_STATE_FILE while SFOA is still running
+    # or has just completed, because a subsequent --resume_training would
+    # misinterpret stale epoch / model / log-path data from a prior run.
+    _STALE_TRAINING_KEYS = (
+        "epoch",
+        "model_state_dict",
+        "optimizer_state_dict",
+        "log_path",
+        "best_score",
+        "last_train_loss",
+        "no_change_streak",
+        "hyperparams",
+        "sfoa_hyperparams",
+    )
+
+    def _sfoa_checkpoint(sfoa_interim_state: dict) -> None:
+        """
+        Called by SFOAOptimizer.optimize() during population/candidate evaluation.
+        Writes a partial sfoa_state so the run can be resumed if interrupted.
+        Sets sfoa_done=False to prevent train.py from skipping SFOA on resume.
+        Purges all stale main-training-loop keys from the file so that a
+        --resume_training after an interrupt cannot accidentally pick up old
+        epoch / model / log-path data.
+        Only rank 0 writes; non-main ranks return immediately.
+        """
+        if is_distributed and not accelerator.is_local_main_process:
+            return
+        try:
+            existing = load_resume_state(PATHS.RESUME_STATE_FILE) or {}
+            existing["sfoa_state"]           = sfoa_interim_state
+            existing["sfoa_done"]            = False   # still in progress
+            existing["hyperparam_optimizer"] = "sfoa"
+            for _k in _STALE_TRAINING_KEYS:
+                existing.pop(_k, None)
+            save_resume_state(PATHS.RESUME_STATE_FILE, existing)
+            logging.info(
+                "[SFOA] Search checkpoint saved: T=%s/%s active_T=%s candidate=%s epoch=%s/%s.",
+                sfoa_interim_state.get("T", "?"),
+                sfoa_interim_state.get("Tmax", "?"),
+                sfoa_interim_state.get("active_T"),
+                sfoa_interim_state.get("active_candidate"),
+                sfoa_interim_state.get("candidate_epoch"),
+                TRAINING.SFOA_EVAL_EPOCHS,
+            )
+        except Exception as _exc:
+            logging.warning("[SFOA] Mid-search checkpoint write failed: %s", _exc)
 
     # In a multi-rank run, only rank 0 has read the resume state from disk.
     # Broadcast it so every rank constructs its SFOAOptimizer with the same
@@ -628,7 +1036,10 @@ def run_sfoa_search(
             rank, initial_state.get("T", 0) if isinstance(initial_state, dict) else -1,
         )
 
-    best_hp, best_fitness, sfoa_state = sfoa.optimize(initial_state=initial_state)
+    best_hp, best_fitness, sfoa_state = sfoa.optimize(
+        initial_state=initial_state,
+        checkpoint_fn=_sfoa_checkpoint,
+    )
 
     try:
         if is_distributed:
@@ -638,16 +1049,24 @@ def run_sfoa_search(
             dist.barrier()
             if accelerator.is_local_main_process:
                 existing = load_resume_state(PATHS.RESUME_STATE_FILE) or {}
-                existing["sfoa_state"] = sfoa_state
-                existing["sfoa_done"] = True
+                existing["sfoa_state"]           = sfoa_state
+                existing["sfoa_done"]            = True
                 existing["hyperparam_optimizer"] = "sfoa"
+                for _k in _STALE_TRAINING_KEYS:
+                    existing.pop(_k, None)
+                existing["hyperparams"] = best_hp
+                existing["sfoa_hyperparams"] = best_hp
                 save_resume_state(PATHS.RESUME_STATE_FILE, existing)
             dist.barrier()
         else:
             existing = load_resume_state(PATHS.RESUME_STATE_FILE) or {}
-            existing["sfoa_state"] = sfoa_state
-            existing["sfoa_done"] = True
+            existing["sfoa_state"]           = sfoa_state
+            existing["sfoa_done"]            = True
             existing["hyperparam_optimizer"] = "sfoa"
+            for _k in _STALE_TRAINING_KEYS:
+                existing.pop(_k, None)
+            existing["hyperparams"] = best_hp
+            existing["sfoa_hyperparams"] = best_hp
             save_resume_state(PATHS.RESUME_STATE_FILE, existing)
     except Exception as exc:
         logging.warning("Could not save SFOA state: %s", exc)
