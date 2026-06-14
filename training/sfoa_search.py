@@ -233,32 +233,56 @@ class SFOAOptimizer:
             X = np.asarray(initial_state["X"], dtype=float)
             if X.shape != (self.N, self.D):
                 logging.warning(
-                    "[SFOA] Resume state shape %s does not match (%d, %d); reinitializing.",
-                    X.shape,
-                    self.N,
-                    self.D,
+                    "[SFOA] Resume state shape %s != (%d, %d); "
+                    "reinitializing X and discarding stale state.",
+                    X.shape, self.N, self.D,
                 )
                 X = (
                     self.rng.random((self.N, self.D))
                     * (self.BOUNDS_HIGH - self.BOUNDS_LOW)
                     + self.BOUNDS_LOW
                 )
+                initial_state = None  # shape mismatch: treat as fresh run
         else:
             X = (
                 self.rng.random((self.N, self.D)) * (self.BOUNDS_HIGH - self.BOUNDS_LOW)
                 + self.BOUNDS_LOW
             )
 
-        iter_t0 = _time.time()
-        fitness = self._evaluate_all(X)
-        logging.info("[SFOA] Initial evaluation done in %s", _format_elapsed(_time.time() - iter_t0))
+        # Reuse cached fitness when resuming to avoid re-evaluating the full
+        # population (which can take many hours on large datasets).
+        cached_fitness = (
+            initial_state.get("fitness")
+            if initial_state is not None
+            else None
+        )
+        if (
+            cached_fitness is not None
+            and len(cached_fitness) == len(X)
+            and not any(np.isnan(cached_fitness))
+        ):
+            fitness = np.asarray(cached_fitness, dtype=float)
+            logging.info("[SFOA] Reusing cached fitness from resume state (skipping initial eval).")
+        else:
+            iter_t0 = _time.time()
+            fitness = self._evaluate_all(X)
+            logging.info("[SFOA] Initial evaluation done in %s", _format_elapsed(_time.time() - iter_t0))
+
         best_idx = int(np.argmin(fitness))
         best_pos = X[best_idx].copy()
         best_fitness = float(fitness[best_idx])
 
         start_T = 1
         if initial_state is not None:
-            start_T = int(initial_state.get("T", 0)) + 1
+            resumed_T = int(initial_state.get("T", 0))
+            start_T = resumed_T + 1
+            if start_T > self.Tmax:
+                logging.warning(
+                    "[SFOA] Resume state T=%d >= Tmax=%d — SFOA is already complete. "
+                    "Returning best known result without iterating. "
+                    "If you intended a fresh run, set resume=False (or delete %s).",
+                    resumed_T, self.Tmax, PATHS.RESUME_STATE_FILE,
+                )
 
         last_T = start_T - 1
         if start_T <= self.Tmax:
@@ -321,6 +345,7 @@ def run_sfoa_search(
     *,
     rank_seed: int = 42,
     accelerator=None,
+    resume: bool = False,
 ) -> dict:
     import torch.distributed as dist
     from core.models import RNNForecaster
@@ -567,12 +592,23 @@ def run_sfoa_search(
         accelerator=accelerator if is_distributed else None,
     )
 
-    resume_state = load_resume_state(PATHS.RESUME_STATE_FILE)
-    initial_state = (
-        resume_state.get("sfoa_state")
-        if resume_state and "sfoa_state" in resume_state
-        else None
-    )
+    initial_state = None
+    if resume:
+        _rs = load_resume_state(PATHS.RESUME_STATE_FILE)
+        if _rs and "sfoa_state" in _rs:
+            initial_state = _rs["sfoa_state"]
+            logging.info(
+                "[SFOA] Resuming from saved state (T=%d).",
+                initial_state.get("T", 0),
+            )
+        else:
+            logging.info(
+                "[SFOA] resume=True but no saved sfoa_state found; starting fresh."
+            )
+    else:
+        logging.info(
+            "[SFOA] resume=False — ignoring any saved sfoa_state and starting fresh."
+        )
     best_hp, best_fitness, sfoa_state = sfoa.optimize(initial_state=initial_state)
 
     try:

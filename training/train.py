@@ -140,7 +140,10 @@ def train(args):
         if _sync is not None:
             _sync()
         current_hyperparams = run_sfoa_search(
-            args, train_ds, val_ds, rank_seed=args.seed, accelerator=accelerator
+            args, train_ds, val_ds,
+            rank_seed=args.seed,
+            accelerator=accelerator,
+            resume=getattr(args, "resume_training", False),
         )
         if accelerator.num_processes > 1:
             accelerator.wait_for_everyone()
