@@ -13,6 +13,8 @@ class Paths:
     PARQUET_NODE: str = "/dataset/parquet/node"
     RAW_MSRTMCRE: str = "/dataset/raw/msrtmcre"
     PARQUET_MSRTMCRE: str = "/dataset/parquet/msrtmcre"
+    RAW_MSCALLGRAPH: str = "/dataset/raw/mscallgraph"
+    PARQUET_MSCALLGRAPH: str = "/dataset/parquet/mscallgraph"
     PARQUET_THRESHOLD_MSRESOURCE: str = "/dataset/threshold/msresource"
     PARQUET_THRESHOLD_MSRTMCRE: str = "/dataset/threshold/msrtmcre"
     WINDOWS_DIR: str = "/dataset/windows"
@@ -47,5 +49,12 @@ DATASET_TABLES: Dict[str, Dict[str, Any]] = {
         "raw_dir": PATHS.RAW_MSRTMCRE,
         "parquet_dir": PATHS.PARQUET_MSRTMCRE,
         "key_cols": ["msname", "msinstanceid"],
+    },
+    "mscallgraph": {
+        "prefix": "CallGraph/CallGraph",
+        "ratio_min": 30,
+        "raw_dir": PATHS.RAW_MSCALLGRAPH,
+        "parquet_dir": PATHS.PARQUET_MSCALLGRAPH,
+        "key_cols": ["traceid", "rpc_id"],
     },
 }
