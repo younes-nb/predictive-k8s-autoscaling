@@ -32,6 +32,18 @@ MIN_ALIGNED = 10
 MIN_UMS = 1
 LOG_EVERY_N = 20
 
+MCR_FEATURES = [
+    "providerrpc_mcr",
+    "consumerrpc_mcr", 
+    "providermq_mcr",
+    "consumermq_mcr",
+    "http_mcr",
+    "writemc_mcr",
+    "readmc_mcr",
+    "writedb_mcr",
+    "readdb_mcr",
+]
+
 
 def setup_logging(out_dir: str) -> None:
     os.makedirs(out_dir, exist_ok=True)
@@ -231,6 +243,35 @@ def load_timeseries_batch(
         return pl.DataFrame()
 
 
+def load_mcr_timeseries_batch(
+    parquet_dir: str,
+    msnames: List[str],
+) -> pl.DataFrame:
+    files = sorted(glob.glob(os.path.join(parquet_dir, "part-*.parquet")))
+    if not files or not msnames:
+        return pl.DataFrame()
+
+    try:
+        # Select timestamp, msname, and all MCR columns
+        columns_to_select = ["timestamp", "msname"] + MCR_FEATURES
+        df = (
+            pl.scan_parquet(files)
+            .filter(pl.col("msname").is_in(msnames))
+            .select(columns_to_select)
+            .drop_nulls()
+            .group_by(["timestamp", "msname"])
+            .agg(
+                *[pl.col(mcr_feat).sum().alias(mcr_feat) for mcr_feat in MCR_FEATURES]
+            )
+            .sort(["msname", "timestamp"])
+            .collect(engine="streaming")
+        )
+        return df
+    except Exception as exc:
+        logging.warning("load_mcr_timeseries_batch failed: %s", exc)
+        return pl.DataFrame()
+
+
 def _ols_r2(X: np.ndarray, y: np.ndarray) -> float:
     if X.ndim == 1:
         X = X[:, np.newaxis]
@@ -251,6 +292,7 @@ def analyze_one_ms(
     um_set: Set[str],
     ts_df: pl.DataFrame,
     pred_horizon: int,
+    mcr_df: Optional[pl.DataFrame] = None,
     keep_arrays: bool = False,
 ) -> Optional[dict]:
     horizon_offset = pred_horizon * STEP_MS
@@ -276,6 +318,19 @@ def analyze_one_ms(
         .sort("timestamp")
     )
 
+    # Process MCR features if provided
+    mcr_agg = None
+    if mcr_df is not None and not mcr_df.is_empty():
+        um_mcr_df = mcr_df.filter(pl.col("msname").is_in(list(um_set)))
+        if not um_mcr_df.is_empty():
+            mcr_agg = (
+                um_mcr_df.group_by("timestamp")
+                .agg(
+                    *[pl.col(mcr_feat).mean().alias(f"up_{mcr_feat}") for mcr_feat in MCR_FEATURES]
+                )
+                .sort("timestamp")
+            )
+
     dm_future = dm_df.rename({"timestamp": "future_ts", "dm_cpu": "dm_cpu_tH"})
 
     ds_A = up_agg.with_columns(
@@ -290,11 +345,18 @@ def analyze_one_ms(
         .join(dm_future, on="future_ts", how="inner")
     )
 
+    # Join with MCR data if available
     ds_C = ds_A.select(["timestamp", "up_cpu", "up_mem", "dm_cpu_tH"]).join(
         ds_B.select(["timestamp", "dm_cpu_t"]),
         on="timestamp",
         how="inner",
     )
+    
+    if mcr_agg is not None:
+        mcr_future = mcr_agg.with_columns(
+            (pl.col("timestamp").cast(pl.Int64) + horizon_offset).alias("future_ts")
+        ).join(dm_future, on="future_ts", how="inner")
+        ds_C = ds_C.join(mcr_future, on="timestamp", how="inner")
 
     n = len(ds_C)
     if n < MIN_ALIGNED:
@@ -311,7 +373,21 @@ def analyze_one_ms(
         & np.isfinite(dm_t)
         & np.isfinite(dm_tH)
     )
+    
+    # Add MCR features to the mask if they exist
+    mcr_features_dict = {}
+    if mcr_agg is not None:
+        for mcr_feat in MCR_FEATURES:
+            mcr_col_name = f"up_{mcr_feat}"
+            if mcr_col_name in ds_C.columns:
+                mcr_vals = ds_C[mcr_col_name].to_numpy().astype(np.float64)
+                mcr_features_dict[mcr_feat] = mcr_vals
+                mask = mask & np.isfinite(mcr_vals)
+    
     up_cpu, up_mem, dm_t, dm_tH = up_cpu[mask], up_mem[mask], dm_t[mask], dm_tH[mask]
+    for mcr_feat in mcr_features_dict:
+        mcr_features_dict[mcr_feat] = mcr_features_dict[mcr_feat][mask]
+        
     n = int(mask.sum())
     if n < MIN_ALIGNED:
         return None
@@ -326,9 +402,44 @@ def analyze_one_ms(
 
     r2_up_cpu_only = _ols_r2(up_cpu, dm_tH)
     r2_up_mem_only = _ols_r2(up_mem, dm_tH)
-    r2_upstream = _ols_r2(np.column_stack([up_cpu, up_mem]), dm_tH)
+    
+    # Prepare upstream features for combined R2 calculation
+    upstream_features = [up_cpu, up_mem]
+    
+    # Calculate correlations and R2 for each MCR feature
+    mcr_results = {}
+    if mcr_agg is not None:
+        for mcr_feat in MCR_FEATURES:
+            if mcr_feat in mcr_features_dict:
+                mcr_vals = mcr_features_dict[mcr_feat]
+                
+                # Calculate Pearson correlation
+                r_mcr, p_mcr = stats.pearsonr(mcr_vals, dm_tH)
+                
+                # Calculate Spearman correlation
+                rs_mcr, _ = stats.spearmanr(mcr_vals, dm_tH)
+                
+                # Calculate R2 for this MCR feature alone
+                r2_mcr_only = _ols_r2(mcr_vals, dm_tH)
+                
+                # Store results
+                mcr_results[f"r_up_{mcr_feat}"] = float(r_mcr)
+                mcr_results[f"p_up_{mcr_feat}"] = float(p_mcr)
+                mcr_results[f"rs_up_{mcr_feat}"] = float(rs_mcr)
+                mcr_results[f"r2_up_{mcr_feat}_only"] = float(r2_mcr_only)
+                
+                # Add this MCR feature to upstream features for combined R2 calculation
+                upstream_features.append(mcr_vals)
+
+    # Calculate combined R2 with all features (CPU, MEM, and MCR)
+    upstream_features_matrix = np.column_stack(upstream_features)
+    r2_upstream = _ols_r2(upstream_features_matrix, dm_tH)
+    
     r2_autocorr = _ols_r2(dm_t, dm_tH)
-    r2_combined = _ols_r2(np.column_stack([up_cpu, up_mem, dm_t]), dm_tH)
+    
+    # Calculate combined R2 with upstream + self
+    combined_features = np.column_stack([upstream_features_matrix, dm_t])
+    r2_combined = _ols_r2(combined_features, dm_tH)
 
     r2_gain = (
         float(r2_combined) - float(r2_autocorr)
@@ -355,12 +466,19 @@ def analyze_one_ms(
         "r2_combined": float(r2_combined),
         "r2_gain": float(r2_gain),
     }
+    
+    # Add MCR results to the result dictionary
+    result.update(mcr_results)
 
     if keep_arrays:
         result["_up_cpu"] = up_cpu
         result["_up_mem"] = up_mem
         result["_dm_t"] = dm_t
         result["_dm_tH"] = dm_tH
+        
+        # Store MCR arrays if requested
+        for mcr_feat, mcr_vals in mcr_features_dict.items():
+            result[f"_up_{mcr_feat}"] = mcr_vals
 
     return result
 
@@ -412,6 +530,54 @@ def plot_correlation_distribution(
         f"H = {pred_horizon} steps  ({pred_horizon} min)  |  "
         f"n = {len(results)} target MSes",
         fontsize=11,
+        fontweight="bold",
+    )
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    logging.info("Saved → %s", out_path)
+
+
+def plot_mcr_correlation_distribution(
+    results: List[dict],
+    pred_horizon: int,
+    out_path: str,
+) -> None:
+    # Extract correlations for each MCR feature
+    mcr_correlations = {}
+    for mcr_feat in MCR_FEATURES:
+        r_key = f"r_up_{mcr_feat}"
+        mcr_correlations[mcr_feat] = _finite([r[r_key] for r in results if r_key in r])
+    
+    # Create a 3x3 subplot for 9 MCR features
+    fig, axes = plt.subplots(3, 3, figsize=(15, 12), sharey=False)
+    axes = axes.flatten()  # Flatten to 1D array for easier indexing
+    
+    for i, (mcr_feat, vals) in enumerate(mcr_correlations.items()):
+        if i < len(axes):  # Safety check
+            ax = axes[i]
+            if len(vals) > 0:
+                ax.hist(vals, bins=30, color='skyblue', edgecolor='white', alpha=0.85)
+                mean_v = float(np.mean(vals))
+                ax.axvline(
+                    mean_v, color="black", linestyle="--", lw=1.5, label=f"mean = {mean_v:+.3f}"
+                )
+                ax.axvline(0, color="gray", linestyle=":", lw=1)
+            ax.set_xlabel("Pearson r", fontsize=10)
+            ax.set_ylabel("MS count", fontsize=10)
+            ax.set_title(f"Upstream {mcr_feat} → Target CPU at t+H", fontsize=9, pad=6)
+            ax.legend(fontsize=9)
+            ax.grid(axis="y", alpha=0.3)
+    
+    # Hide unused subplots if there are fewer than 9
+    for i in range(len(mcr_correlations), len(axes)):
+        axes[i].set_visible(False)
+
+    fig.suptitle(
+        f"MCR Feature Correlations  |  "
+        f"H = {pred_horizon} steps  ({pred_horizon} min)  |  "
+        f"n = {len(results)} target MSes",
+        fontsize=12,
         fontweight="bold",
     )
     plt.tight_layout()
@@ -572,6 +738,26 @@ def _interpret(results: List[dict], pred_horizon: int) -> None:
         1 for r in results if np.isfinite(r["p_up_mem"]) and r["p_up_mem"] < 0.05
     )
 
+    # Count significant MCR features
+    sig_mcr_count = 0
+    total_mcr_tests = 0
+    for r in results:
+        for mcr_feat in MCR_FEATURES:
+            p_key = f"p_up_{mcr_feat}"
+            if p_key in r and np.isfinite(r[p_key]):
+                total_mcr_tests += 1
+                if r[p_key] < 0.05:
+                    sig_mcr_count += 1
+    
+    # Calculate mean correlations for MCR features
+    mcr_mean_correlations = []
+    for mcr_feat in MCR_FEATURES:
+        r_key = f"r_up_{mcr_feat}"
+        r_vals = _finite([r[r_key] for r in results if r_key in r])
+        if len(r_vals) > 0:
+            mean_corr = float(np.mean(r_vals))
+            mcr_mean_correlations.append(mean_corr)
+
     def _desc(r):
         return (
             "strong"
@@ -593,6 +779,21 @@ def _interpret(results: List[dict], pred_horizon: int) -> None:
         float(np.mean(r_up_m)),
         _desc(abs(float(np.mean(r_up_m)))),
     )
+    
+    # Log MCR feature statistics
+    if mcr_mean_correlations:
+        mean_mcr_corr = float(np.mean(mcr_mean_correlations))
+        logging.info(
+            "Mean Pearson r  [upstream MCR → target CPU]  : %+.3f  (%s)",
+            mean_mcr_corr,
+            _desc(abs(mean_mcr_corr)),
+        )
+        logging.info(
+            "MCR Features Correlations Range              : %+.3f to %+.3f",
+            float(np.min(mcr_mean_correlations)),
+            float(np.max(mcr_mean_correlations)),
+        )
+    
     logging.info(
         "Mean Pearson r  [autocorr baseline]           : %+.3f  (%s)",
         float(np.mean(r_auto)),
@@ -600,7 +801,7 @@ def _interpret(results: List[dict], pred_horizon: int) -> None:
     )
     logging.info("─" * 62)
     logging.info(
-        "Mean R²  upstream [cpu+mem]                  : %.4f",
+        "Mean R²  upstream [cpu+mem+MCR]               : %.4f",
         float(np.mean(r2_up)),
     )
     logging.info(
@@ -630,6 +831,12 @@ def _interpret(results: List[dict], pred_horizon: int) -> None:
         sig_mem,
         n,
     )
+    if total_mcr_tests > 0:
+        logging.info(
+            "Sig. upstream MCR (p<0.05)                   : %d / %d",
+            sig_mcr_count,
+            total_mcr_tests,
+        )
     logging.info("─" * 62)
 
     # Plain-language verdict
@@ -706,6 +913,12 @@ def main() -> None:
         type=str,
         default=PATHS.PARQUET_MSRESOURCE,
         help="MSResource parquet directory (default: %(default)s)",
+    )
+    ap.add_argument(
+        "--msrtmcre_dir",
+        type=str,
+        default=PATHS.PARQUET_MSRTMCRE,
+        help="MSRTMCRE parquet directory (default: %(default)s)",
     )
     ap.add_argument(
         "--out_dir",
@@ -803,10 +1016,11 @@ def main() -> None:
         )
 
         ts_df = load_timeseries_batch(args.msresource_dir, batch_all)
+        mcr_df = load_mcr_timeseries_batch(args.msrtmcre_dir, batch_all)
 
         if ts_df.is_empty():
             logging.warning("  No time-series data found for this batch; skipping.")
-            del ts_df
+            del ts_df, mcr_df
             gc.collect()
             continue
 
@@ -817,6 +1031,7 @@ def main() -> None:
                 um_set=adj[dm],
                 ts_df=ts_df,
                 pred_horizon=args.pred_horizon,
+                mcr_df=mcr_df,
                 keep_arrays=False,
             )
             if res is not None:
@@ -825,7 +1040,7 @@ def main() -> None:
                 logging.debug("  [skip] %s: insufficient aligned data points", dm)
 
         all_results.extend(batch_results)
-        del ts_df, batch_results
+        del ts_df, mcr_df, batch_results
         gc.collect()
 
         logging.info(
@@ -859,6 +1074,7 @@ def main() -> None:
             top_scatter_dms | {um for dm in top_scatter_dms for um in adj[dm]}
         )
         ts_top = load_timeseries_batch(args.msresource_dir, top_all_msnames)
+        mcr_top = load_mcr_timeseries_batch(args.msrtmcre_dir, top_all_msnames)
 
         if not ts_top.is_empty():
             top_with_arrays: List[dict] = []
@@ -868,6 +1084,7 @@ def main() -> None:
                     um_set=adj[dm],
                     ts_df=ts_top,
                     pred_horizon=args.pred_horizon,
+                    mcr_df=mcr_top,
                     keep_arrays=True,
                 )
                 if res is not None:
@@ -875,7 +1092,7 @@ def main() -> None:
 
             top_map = {r["dm"]: r for r in top_with_arrays}
             all_results = [top_map.get(r["dm"], r) for r in all_results]
-            del ts_top, top_with_arrays
+            del ts_top, mcr_top, top_with_arrays
             gc.collect()
 
     n = len(all_results)
@@ -900,12 +1117,16 @@ def main() -> None:
 
     _stat_row("r  upstream CPU → target CPU(t+H)", [r["r_up_cpu"] for r in all_results])
     _stat_row("r  upstream MEM → target CPU(t+H)", [r["r_up_mem"] for r in all_results])
+    # Add statistics for each MCR feature
+    for mcr_feat in MCR_FEATURES:
+        r_key = f"r_up_{mcr_feat}"
+        _stat_row(f"r  upstream {mcr_feat} → target CPU(t+H)", [r[r_key] for r in all_results if r_key in r])
     _stat_row("rs upstream CPU (Spearman)", [r["rs_up_cpu"] for r in all_results])
     _stat_row(
         "r  autocorr target_t → target_tH", [r["r_autocorr"] for r in all_results]
     )
     logging.info("─" * 62)
-    _stat_row("R² upstream [cpu+mem]", [r["r2_upstream"] for r in all_results])
+    _stat_row("R² upstream [cpu+mem+MCR]", [r["r2_upstream"] for r in all_results])
     _stat_row("R² autocorr (naive baseline)", [r["r2_autocorr"] for r in all_results])
     _stat_row("R² combined [upstream + self]", [r["r2_combined"] for r in all_results])
     _stat_row("R² gain  (combined − autocorr)", [r["r2_gain"] for r in all_results])
@@ -932,6 +1153,14 @@ def main() -> None:
         "r2_combined",
         "r2_gain",
     ]
+    # Add fieldnames for each MCR feature
+    for mcr_feat in MCR_FEATURES:
+        fieldnames.extend([
+            f"r_up_{mcr_feat}",
+            f"p_up_{mcr_feat}",
+            f"rs_up_{mcr_feat}",
+            f"r2_up_{mcr_feat}_only",
+        ])
     with open(csv_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
@@ -942,6 +1171,11 @@ def main() -> None:
         all_results,
         args.pred_horizon,
         os.path.join(args.out_dir, "correlation_dist.png"),
+    )
+    plot_mcr_correlation_distribution(
+        all_results,
+        args.pred_horizon,
+        os.path.join(args.out_dir, "mcr_correlation_dist.png"),
     )
     plot_r2_comparison(
         all_results,
