@@ -80,7 +80,30 @@ FEATURE_SETS: Dict[str, Dict[str, Any]] = {
             "msrtmcre": ["msname", "msinstanceid"],
         },
     },
+    "cpu_delta_upstream": {
+        "features": [
+            "cpu_utilization",
+            "cpu_utilization_delta",
+            "upstream_cpu_utilization_mean",
+            "upstream_cpu_utilization_delta_mean",
+        ],
+        "target": "cpu_utilization",
+        "base_table": "msresource",
+        "requires_callgraph": True,
+        "requires_delta": True,
+    },
 }
+
+
+DERIVED_FEATURES = {
+    "cpu_utilization_delta",
+    "upstream_cpu_utilization_mean",
+    "upstream_cpu_utilization_delta_mean",
+}
+
+
+def is_derived_feature(feat_name: str) -> bool:
+    return feat_name in DERIVED_FEATURES
 
 
 def get_feature_set(name: str) -> Dict[str, Any]:
@@ -97,7 +120,7 @@ def get_feature_set(name: str) -> Dict[str, Any]:
             f"feature_set='{name}': target='{target}' must be included in features={feats}"
         )
     for f in feats:
-        if f not in FEATURES:
+        if f not in FEATURES and not is_derived_feature(f):
             raise KeyError(
                 f"feature_set='{name}': feature '{f}' not defined in FEATURES"
             )
@@ -114,13 +137,15 @@ def target_feature_for_feature_set(feature_set: str) -> str:
 
 def tables_for_feature_set(feature_set: str) -> Set[str]:
     feats = feature_names_for_feature_set(feature_set)
-    return {FEATURES[f]["table"] for f in feats}
+    return {FEATURES[f]["table"] for f in feats if not is_derived_feature(f)}
 
 
 def table_to_raw_columns(feature_set: str) -> Dict[str, List[str]]:
     spec = get_feature_set(feature_set)
     out: Dict[str, List[str]] = {}
     for feat_name in spec["features"]:
+        if is_derived_feature(feat_name):
+            continue
         meta = FEATURES[feat_name]
         t = meta["table"]
         c = meta["column"]
@@ -134,6 +159,8 @@ def table_to_feature_exprs(feature_set: str) -> Dict[str, List[tuple]]:
     spec = get_feature_set(feature_set)
     out: Dict[str, List[tuple]] = {}
     for feat_name in spec["features"]:
+        if is_derived_feature(feat_name):
+            continue
         meta = FEATURES[feat_name]
         t = meta["table"]
         c = meta["column"]
