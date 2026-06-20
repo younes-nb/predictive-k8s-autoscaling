@@ -31,12 +31,15 @@ class TrainingDefaults:
     PROBABILISTIC_TRAINING: bool = False
     QUANTILES: Tuple[float, ...] = (0.5, 0.9, 0.95)
     HYPERPARAM_OPTIMIZER: str = "sfoa"
-    SFOA_POPULATION: int = 20
-    SFOA_ITERATIONS: int = 10
-    SFOA_EVAL_EPOCHS: int = 10
+    SFOA_POPULATION: int = 10
+    SFOA_ITERATIONS: int = 5
+    SFOA_EVAL_EPOCHS: int = 5
     SFOA_GP: float = 0.5
     SFOA_EVALUATION_PARALLEL: bool = True
-    NO_CHANGE_EPOCHS_LIMIT: int = 100
+    SFOA_TRAIN_PCT: float = 10.0
+    SFOA_VAL_PCT: float = 10.0
+    SFOA_NUM_WORKERS: int = 40
+    NO_CHANGE_EPOCHS_LIMIT: int = 50
 
 
 TRAINING = TrainingDefaults()

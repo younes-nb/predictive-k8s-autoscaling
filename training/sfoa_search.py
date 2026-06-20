@@ -6,7 +6,7 @@ import time as _time
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 
 from shared.config_paths import PATHS
 from shared.config_training_defaults import TRAINING
@@ -44,6 +44,27 @@ def _move_optimizer_state_to_device(optimizer, device) -> None:
         for key, value in list(state.items()):
             if torch.is_tensor(value):
                 state[key] = value.to(device)
+
+
+def _int_arg(args, name: str, default) -> int:
+    try:
+        return int(getattr(args, name, default))
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _use_file_system_tensor_sharing() -> None:
+    try:
+        torch.multiprocessing.set_sharing_strategy("file_system")
+    except RuntimeError as exc:
+        logging.warning("[SFOA] Could not set torch sharing strategy: %s", exc)
+
+
+def _head_slice_dataset(dataset, max_samples: int):
+    total = len(dataset)
+    if max_samples <= 0 or total <= max_samples:
+        return dataset
+    return Subset(dataset, range(int(max_samples)))
 
 
 def _same_hyperparams(left, right) -> bool:
@@ -654,6 +675,32 @@ def run_sfoa_search(
     else:
         eval_device = torch.device("cpu")
 
+    _use_file_system_tensor_sharing()
+
+    sfoa_train_pct = float(getattr(args, "sfoa_train_pct", TRAINING.SFOA_TRAIN_PCT))
+    sfoa_val_pct = float(getattr(args, "sfoa_val_pct", TRAINING.SFOA_VAL_PCT))
+    sfoa_train_ds = _head_slice_dataset(
+        train_ds, int(len(train_ds) * sfoa_train_pct / 100.0)
+    )
+    sfoa_val_ds = _head_slice_dataset(
+        val_ds, int(len(val_ds) * sfoa_val_pct / 100.0)
+    )
+
+    system_cores = os.cpu_count() or 1
+    sfoa_workers = max(
+        0,
+        min(system_cores, _int_arg(args, "sfoa_num_workers", TRAINING.SFOA_NUM_WORKERS)),
+    )
+    logging.info(
+        "[SFOA] Evaluation data: train=%d/%d val=%d/%d samples | "
+        "num_workers=%d | shuffle=False",
+        len(sfoa_train_ds),
+        len(train_ds),
+        len(sfoa_val_ds),
+        len(val_ds),
+        sfoa_workers,
+    )
+
     eval_counter = {"count": 0}
 
     def _decode_and_log(hyperparams: dict, candidate_idx: int) -> str:
@@ -675,24 +722,22 @@ def run_sfoa_search(
         model = None
         optimizer = None
         eval_counter["count"] += 1
-        system_cores = os.cpu_count() or 1
-        gpu_count = torch.cuda.device_count() or 1
-        workers = 40
+        pin_memory = eval_device.type == "cuda"
 
         train_loader = DataLoader(
-            train_ds,
+            sfoa_train_ds,
             batch_size=args.batch_size,
-            shuffle=True,
-            num_workers=workers,
-            pin_memory=True,
+            shuffle=False,
+            num_workers=sfoa_workers,
+            pin_memory=pin_memory,
             persistent_workers=False,
         )
         val_loader = DataLoader(
-            val_ds,
+            sfoa_val_ds,
             batch_size=args.batch_size,
             shuffle=False,
-            num_workers=workers,
-            pin_memory=True,
+            num_workers=sfoa_workers,
+            pin_memory=pin_memory,
             persistent_workers=False,
         )
 

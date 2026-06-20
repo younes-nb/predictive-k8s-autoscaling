@@ -52,6 +52,11 @@ def main():
         help="Hyperparameter optimizer to use during training.",
     )
     ap.add_argument(
+        "--sfoa_train_pct", type=float, default=TRAINING.SFOA_TRAIN_PCT
+    )
+    ap.add_argument("--sfoa_val_pct", type=float, default=TRAINING.SFOA_VAL_PCT)
+    ap.add_argument("--sfoa_num_workers", type=int, default=TRAINING.SFOA_NUM_WORKERS)
+    ap.add_argument(
         "--max_services",
         type=int,
         default=PREPROCESSING.MAX_SERVICES,
@@ -156,6 +161,9 @@ def main():
         if args.probabilistic:
             cmd_train.append("--probabilistic")
         cmd_train.extend(["--hyperparam_optimizer", args.hyperparam_optimizer])
+        cmd_train.extend(["--sfoa_train_pct", str(args.sfoa_train_pct)])
+        cmd_train.extend(["--sfoa_val_pct", str(args.sfoa_val_pct)])
+        cmd_train.extend(["--sfoa_num_workers", str(args.sfoa_num_workers)])
         if args.resume_training:
             cmd_train.append("--resume_training")
         if args.cpu:

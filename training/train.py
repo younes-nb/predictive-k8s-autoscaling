@@ -58,6 +58,14 @@ def train(args):
         args.resume_training = True
     if not hasattr(args, "probabilistic"):
         args.probabilistic = TRAINING.PROBABILISTIC_TRAINING
+    sfoa_defaults = {
+        "sfoa_train_pct": TRAINING.SFOA_TRAIN_PCT,
+        "sfoa_val_pct": TRAINING.SFOA_VAL_PCT,
+        "sfoa_num_workers": TRAINING.SFOA_NUM_WORKERS,
+    }
+    for attr, default in sfoa_defaults.items():
+        if not hasattr(args, attr):
+            setattr(args, attr, default)
     hyperparam_optimizer = getattr(
         args, "hyperparam_optimizer", TRAINING.HYPERPARAM_OPTIMIZER
     )
@@ -463,7 +471,24 @@ def main():
         default=TRAINING.HYPERPARAM_OPTIMIZER,
         choices=["random", "sfoa"],
     )
-
+    p.add_argument(
+        "--sfoa_train_pct",
+        type=float,
+        default=TRAINING.SFOA_TRAIN_PCT,
+        help="Percentage of training samples per SFOA candidate (<=0 uses all).",
+    )
+    p.add_argument(
+        "--sfoa_val_pct",
+        type=float,
+        default=TRAINING.SFOA_VAL_PCT,
+        help="Percentage of validation samples per SFOA candidate (<=0 uses all).",
+    )
+    p.add_argument(
+        "--sfoa_num_workers",
+        type=int,
+        default=TRAINING.SFOA_NUM_WORKERS,
+        help="DataLoader workers for SFOA candidate evaluation.",
+    )
     try:
         train(p.parse_args())
     except Exception as e:
