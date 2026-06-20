@@ -39,6 +39,9 @@ class TrainingDefaults:
     SFOA_TRAIN_PCT: float = 10.0
     SFOA_VAL_PCT: float = 10.0
     SFOA_NUM_WORKERS: int = 40
+    TRAIN_PCT: float = 100.0
+    VAL_PCT: float = 100.0
+    TEST_PCT: float = 100.0
     NO_CHANGE_EPOCHS_LIMIT: int = 50
 
 

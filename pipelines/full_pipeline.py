@@ -68,6 +68,24 @@ def main():
         default=PREPROCESSING.SMOTE_TOMEK,
         help="Apply SMOTE-Tomek to training windows.",
     )
+    ap.add_argument(
+        "--train_pct",
+        type=float,
+        default=TRAINING.TRAIN_PCT,
+        help="Percentage of training samples for main training; 25 means 25%, not 0.25 (100 uses all; <=0 uses all).",
+    )
+    ap.add_argument(
+        "--val_pct",
+        type=float,
+        default=TRAINING.VAL_PCT,
+        help="Percentage of validation samples for main training; 25 means 25%, not 0.25 (100 uses all; <=0 uses all).",
+    )
+    ap.add_argument(
+        "--test_pct",
+        type=float,
+        default=TRAINING.TEST_PCT,
+        help="Percentage of test samples for evaluation; 25 means 25%, not 0.25 (100 uses all; <=0 uses all).",
+    )
 
     args = ap.parse_args()
 
@@ -164,6 +182,8 @@ def main():
         cmd_train.extend(["--sfoa_train_pct", str(args.sfoa_train_pct)])
         cmd_train.extend(["--sfoa_val_pct", str(args.sfoa_val_pct)])
         cmd_train.extend(["--sfoa_num_workers", str(args.sfoa_num_workers)])
+        cmd_train.extend(["--train_pct", str(args.train_pct)])
+        cmd_train.extend(["--val_pct", str(args.val_pct)])
         if args.resume_training:
             cmd_train.append("--resume_training")
         if args.cpu:
@@ -183,6 +203,7 @@ def main():
         ]
         if args.cpu:
             cmd_test.append("--cpu")
+        cmd_test.extend(["--test_pct", str(args.test_pct)])
 
         total_times["testing"] = run(cmd_test, "Step 3: Evaluation & Diagnostics")
 

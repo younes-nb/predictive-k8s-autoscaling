@@ -32,6 +32,7 @@ from training.train_helpers import (
     hyperparam_key,
     sample_hyperparams,
     apply_hyperparams,
+    head_slice_dataset_by_pct,
     load_resume_state,
     save_resume_state,
 )
@@ -54,8 +55,16 @@ def train(args):
         load_resume_state(PATHS.RESUME_STATE_FILE) if args.resume_training else None
     )
     if resume_state and "args" in resume_state:
+        _cli_pct = {
+            k: getattr(args, k) for k in (
+                "sfoa_train_pct", "sfoa_val_pct", "sfoa_num_workers",
+                "train_pct", "val_pct",
+            ) if hasattr(args, k)
+        }
         args = argparse.Namespace(**resume_state["args"])
         args.resume_training = True
+        for _k, _v in _cli_pct.items():
+            setattr(args, _k, _v)
     if not hasattr(args, "probabilistic"):
         args.probabilistic = TRAINING.PROBABILISTIC_TRAINING
     sfoa_defaults = {
@@ -64,6 +73,13 @@ def train(args):
         "sfoa_num_workers": TRAINING.SFOA_NUM_WORKERS,
     }
     for attr, default in sfoa_defaults.items():
+        if not hasattr(args, attr):
+            setattr(args, attr, default)
+    dataset_pct_defaults = {
+        "train_pct": TRAINING.TRAIN_PCT,
+        "val_pct": TRAINING.VAL_PCT,
+    }
+    for attr, default in dataset_pct_defaults.items():
         if not hasattr(args, attr):
             setattr(args, attr, default)
     hyperparam_optimizer = getattr(
@@ -122,8 +138,10 @@ def train(args):
         args.windows_dir, "val", args.input_len, args.pred_horizon, args.use_weights
     )
 
-    log_info(f"Train samples (Total): {len(train_ds)}")
-    log_info(f"Val samples (Total):   {len(val_ds)}")
+    total_train_samples = len(train_ds)
+    total_val_samples = len(val_ds)
+    log_info(f"Train samples (Total): {total_train_samples}")
+    log_info(f"Val samples (Total):   {total_val_samples}")
 
     if len(train_ds) > 0:
         first_x, _, *_ = train_ds[0]
@@ -179,6 +197,17 @@ def train(args):
 
     apply_hyperparams(args, current_hyperparams)
 
+    train_ds = head_slice_dataset_by_pct(train_ds, args.train_pct)
+    val_ds = head_slice_dataset_by_pct(val_ds, args.val_pct)
+    log_info(
+        f"Train samples (Used):  {len(train_ds)}/{total_train_samples} "
+        f"({float(args.train_pct):g}%)"
+    )
+    log_info(
+        f"Val samples (Used):    {len(val_ds)}/{total_val_samples} "
+        f"({float(args.val_pct):g}%)"
+    )
+
     log_info("\n--- Configuration Inputs ---")
     for key, value in vars(args).items():
         log_info(f"{key:<20}: {value}")
@@ -215,7 +244,7 @@ def train(args):
 
     system_cores = os.cpu_count() or 1
     gpu_count = torch.cuda.device_count() or 1
-    optimal_workers = min(system_cores, 4 * gpu_count)
+    optimal_workers = 40
     log_info(
         f"Dynamically set num_workers to {optimal_workers} (Cores: {system_cores}, GPUs: {gpu_count})"
     )
@@ -488,6 +517,18 @@ def main():
         type=int,
         default=TRAINING.SFOA_NUM_WORKERS,
         help="DataLoader workers for SFOA candidate evaluation.",
+    )
+    p.add_argument(
+        "--train_pct",
+        type=float,
+        default=TRAINING.TRAIN_PCT,
+        help="Percentage of training samples for main training; 25 means 25%, not 0.25 (100 uses all; <=0 uses all).",
+    )
+    p.add_argument(
+        "--val_pct",
+        type=float,
+        default=TRAINING.VAL_PCT,
+        help="Percentage of validation samples for main training; 25 means 25%, not 0.25 (100 uses all; <=0 uses all).",
     )
     try:
         train(p.parse_args())

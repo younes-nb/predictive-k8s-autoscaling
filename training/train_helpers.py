@@ -7,6 +7,7 @@ from typing import Optional
 import numpy as np
 import torch
 import torch.nn as nn
+from torch.utils.data import Subset
 
 from shared.config_paths import PATHS
 from shared.config_training_defaults import TRAINING
@@ -111,3 +112,14 @@ def apply_hyperparams(args, hyperparams):
     args.num_layers = hyperparams["num_layers"]
     args.dropout = hyperparams["dropout"]
     args.lr = hyperparams["lr"]
+
+
+def head_slice_dataset_by_pct(dataset, pct: float):
+    total = len(dataset)
+    pct = float(pct)
+    if pct <= 0 or pct >= 100 or total == 0:
+        return dataset
+    max_samples = max(1, int(total * pct / 100.0))
+    if max_samples >= total:
+        return dataset
+    return Subset(dataset, range(max_samples))

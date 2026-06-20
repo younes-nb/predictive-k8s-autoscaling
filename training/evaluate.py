@@ -24,6 +24,7 @@ from core.dataset import ShardedWindowsDataset
 from core.models import RNNForecaster
 
 from training.metrics import compute_metrics, find_max_inference_batch_size
+from training.train_helpers import head_slice_dataset_by_pct
 
 
 def evaluate(args):
@@ -75,7 +76,13 @@ def evaluate(args):
     test_ds = ShardedWindowsDataset(
         args.windows_dir, "test", input_len, horizon, use_weights=False
     )
-    log_info(f"Test samples (Total): {len(test_ds)}")
+    total_test_samples = len(test_ds)
+    test_ds = head_slice_dataset_by_pct(test_ds, args.test_pct)
+    log_info(f"Test samples (Total): {total_test_samples}")
+    log_info(
+        f"Test samples (Used):  {len(test_ds)}/{total_test_samples} "
+        f"({float(args.test_pct):g}%)"
+    )
 
     if len(test_ds) > 0:
         first_x, *_ = test_ds[0]
@@ -187,6 +194,12 @@ def main():
     p.add_argument("--batch_size", type=int, default=TRAINING.BATCH_SIZE)
     p.add_argument("--input_len", type=int, default=PREPROCESSING.INPUT_LEN)
     p.add_argument("--cpu", action="store_true", default=False)
+    p.add_argument(
+        "--test_pct",
+        type=float,
+        default=TRAINING.TEST_PCT,
+        help="Percentage of test samples for evaluation; 25 means 25%, not 0.25 (100 uses all; <=0 uses all).",
+    )
 
     try:
         evaluate(p.parse_args())
