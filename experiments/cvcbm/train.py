@@ -7,7 +7,41 @@ import time
 
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader
+from torch.amp import autocast, GradScaler
+class FastTensorDataLoader:
+    def __init__(self, dataset, batch_size=32, shuffle=False, device=None):
+        self.device = device
+        if device is not None:
+            self.X = dataset.X.to(device)
+            self.y = dataset.y.to(device)
+        else:
+            self.X = dataset.X
+            self.y = dataset.y
+        self.dataset_len = len(dataset)
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+
+    def __iter__(self):
+        if self.shuffle:
+            self.indices = torch.randperm(self.dataset_len, device=self.device)
+        else:
+            self.indices = torch.arange(self.dataset_len, device=self.device)
+        self.idx = 0
+        return self
+
+    def __next__(self):
+        if self.idx >= self.dataset_len:
+            raise StopIteration
+        batch_indices = self.indices[self.idx : self.idx + self.batch_size]
+        self.idx += self.batch_size
+        
+        x = self.X[batch_indices]
+        y = self.y[batch_indices]
+        last = self.X[batch_indices, -1, 0]
+        return x, y, last
+
+    def __len__(self):
+        return (self.dataset_len + self.batch_size - 1) // self.batch_size
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, "..", ".."))
@@ -57,15 +91,18 @@ def train_one_co_imf(co_imf_index: int, args) -> None:
         logging.error("Empty training dataset for co_imf_%d. Aborting.", co_imf_index)
         return
 
-    pin = device.type == "cuda"
-    train_loader = DataLoader(
-        train_ds, batch_size=CFG.BATCH_SIZE, shuffle=True,
-        num_workers=0, pin_memory=pin,
+    n_train = len(train_ds)
+    n_val = len(val_ds)
+    train_loader = FastTensorDataLoader(
+        train_ds, batch_size=CFG.BATCH_SIZE, shuffle=True, device=device,
     )
-    val_loader = DataLoader(
-        val_ds, batch_size=CFG.BATCH_SIZE, shuffle=False,
-        num_workers=0, pin_memory=pin,
+    val_loader = FastTensorDataLoader(
+        val_ds, batch_size=CFG.BATCH_SIZE * 2, shuffle=False, device=device,
     )
+
+    del train_ds, val_ds
+
+    scaler = GradScaler("cuda", enabled=(device.type == "cuda"))
 
     model = CvcbmModel(
         input_len=CFG.INPUT_LEN,
@@ -80,7 +117,7 @@ def train_one_co_imf(co_imf_index: int, args) -> None:
 
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logging.info("Model parameters: %d", n_params)
-    logging.info("Train windows: %d | Val windows: %d", len(train_ds), len(val_ds))
+    logging.info("Train windows: %d | Val windows: %d", n_train, n_val)
     logging.info("Epochs: %d", epochs)
 
     ckpt_path = os.path.join(args.out_dir, f"cvcbm_co_imf_{co_imf_index}.pt")
@@ -92,12 +129,13 @@ def train_one_co_imf(co_imf_index: int, args) -> None:
         model.train()
         train_accum, n_train = 0.0, 0
         for x, y, _ in train_loader:
-            x, y = x.to(device), y.to(device)
             optimizer.zero_grad()
-            pred = model(x)
-            loss = criterion(pred, y)
-            loss.backward()
-            optimizer.step()
+            with autocast("cuda", enabled=(device.type == "cuda")):
+                pred = model(x)
+                loss = criterion(pred, y)
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
             train_accum += loss.item() * x.size(0)
             n_train += x.size(0)
         avg_train = train_accum / max(n_train, 1)
@@ -106,9 +144,9 @@ def train_one_co_imf(co_imf_index: int, args) -> None:
         val_accum, n_val = 0.0, 0
         with torch.no_grad():
             for x, y, _ in val_loader:
-                x, y = x.to(device), y.to(device)
-                pred = model(x)
-                loss = criterion(pred, y)
+                with autocast("cuda", enabled=(device.type == "cuda")):
+                    pred = model(x)
+                    loss = criterion(pred, y)
                 val_accum += loss.item() * x.size(0)
                 n_val += x.size(0)
         avg_val = val_accum / max(n_val, 1)

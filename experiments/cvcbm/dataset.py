@@ -53,7 +53,11 @@ class CoImfDataset(Dataset):
         all_X, all_y = [], []
 
         for sf in service_files:
-            signal = np.load(sf).astype(np.float64)
+            try:
+                signal = np.load(sf).astype(np.float64)
+            except (EOFError, ValueError) as e:
+                logger.warning("Skipping corrupted file %s: %s", sf, e)
+                continue
             N = len(signal)
 
             if N < input_len + test_size + 1:
@@ -82,11 +86,11 @@ class CoImfDataset(Dataset):
                 "CoImfDataset[co_imf_%d/%s]: no valid windows found in %s",
                 co_imf_index, split, preprocess_dir,
             )
-            self.X = np.empty((0, input_len), dtype=np.float32)
-            self.y = np.empty((0, 1), dtype=np.float32)
+            self.X = torch.empty((0, input_len, 1), dtype=torch.float32)
+            self.y = torch.empty((0, 1), dtype=torch.float32)
         else:
-            self.X = np.concatenate(all_X, axis=0)
-            self.y = np.concatenate(all_y, axis=0)
+            self.X = torch.from_numpy(np.concatenate(all_X, axis=0)).unsqueeze(-1)
+            self.y = torch.from_numpy(np.concatenate(all_y, axis=0))
 
         logger.info(
             "CoImfDataset[co_imf_%d/%s]: %d windows from %d service files",
@@ -97,10 +101,7 @@ class CoImfDataset(Dataset):
         return len(self.X)
 
     def __getitem__(self, idx: int):
-        x = torch.from_numpy(self.X[idx]).unsqueeze(-1)
-        y = torch.from_numpy(self.y[idx])
-        last = torch.tensor(self.X[idx, -1], dtype=torch.float32)
-        return x, y, last
+        return self.X[idx], self.y[idx], self.X[idx, -1, 0]
 
 def _smoke_check(preprocess_dir: str, co_imf_index: int, split: str) -> None:
     from experiments.cvcbm.config import CFG

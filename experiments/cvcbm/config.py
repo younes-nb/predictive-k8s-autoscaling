@@ -9,7 +9,7 @@ class CvcbmConfig:
     PRED_HORIZON: int = 1
 
     LEARNING_RATE: float = 0.001
-    BATCH_SIZE: int = 128
+    BATCH_SIZE: int = 2048
     EPOCHS: int = 100
 
     KERNEL_SIZES: tuple = (2, 4, 8)
