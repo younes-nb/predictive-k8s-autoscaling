@@ -48,8 +48,8 @@ def main():
     ap.add_argument(
         "--hyperparam_optimizer",
         default=TRAINING.HYPERPARAM_OPTIMIZER,
-        choices=["random", "sfoa"],
-        help="Hyperparameter optimizer to use during training.",
+        choices=["random", "sfoa", "none"],
+        help="Hyperparameter optimizer to use during training ('none' uses TrainingDefaults directly).",
     )
     ap.add_argument(
         "--sfoa_train_pct", type=float, default=TRAINING.SFOA_TRAIN_PCT

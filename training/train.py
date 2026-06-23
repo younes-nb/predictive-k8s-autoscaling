@@ -154,6 +154,15 @@ def train(args):
     if current_hyperparams is not None:
         used_keys.add(hyperparam_key(current_hyperparams))
 
+    if hyperparam_optimizer == "none":
+        current_hyperparams = {
+            "hidden_size": TRAINING.HIDDEN_SIZE,
+            "num_layers": TRAINING.NUM_LAYERS,
+            "dropout": TRAINING.DROPOUT,
+            "lr": TRAINING.LR,
+        }
+        sfoa_done = True
+
     if current_hyperparams is None and not sfoa_done and hyperparam_optimizer == "sfoa":
         if accelerator.num_processes > 1:
             _sync = accelerator.wait_for_everyone
@@ -498,7 +507,7 @@ def main():
     p.add_argument(
         "--hyperparam_optimizer",
         default=TRAINING.HYPERPARAM_OPTIMIZER,
-        choices=["random", "sfoa"],
+        choices=["random", "sfoa", "none"],
     )
     p.add_argument(
         "--sfoa_train_pct",
