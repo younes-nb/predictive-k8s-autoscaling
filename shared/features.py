@@ -92,6 +92,11 @@ FEATURE_SETS: Dict[str, Dict[str, Any]] = {
         "requires_callgraph": True,
         "requires_delta": True,
     },
+    "cpu_mem_both": {
+        "features": ["cpu_utilization", "memory_utilization"],
+        "targets": ["cpu_utilization", "memory_utilization"],
+        "base_table": "msresource",
+    },
 }
 
 
@@ -111,14 +116,25 @@ def get_feature_set(name: str) -> Dict[str, Any]:
         raise KeyError(
             f"Unknown feature_set='{name}'. Available: {list(FEATURE_SETS.keys())}"
         )
-    spec = FEATURE_SETS[name]
+    spec = dict(FEATURE_SETS[name])
     feats = list(spec["features"])
-    target = str(spec["target"])
 
-    if target not in feats:
-        raise ValueError(
-            f"feature_set='{name}': target='{target}' must be included in features={feats}"
+    if "targets" in spec:
+        target_feats = list(spec["targets"])
+        spec["target"] = target_feats[0]
+    elif "target" in spec:
+        target_feats = [str(spec["target"])]
+        spec["targets"] = target_feats
+    else:
+        raise KeyError(
+            f"feature_set='{name}' must define 'target' or 'targets'"
         )
+
+    for tf in target_feats:
+        if tf not in feats:
+            raise ValueError(
+                f"feature_set='{name}': target='{tf}' must be included in features={feats}"
+            )
     for f in feats:
         if f not in FEATURES and not is_derived_feature(f):
             raise KeyError(
@@ -133,6 +149,10 @@ def feature_names_for_feature_set(feature_set: str) -> List[str]:
 
 def target_feature_for_feature_set(feature_set: str) -> str:
     return str(get_feature_set(feature_set)["target"])
+
+
+def target_features_for_feature_set(feature_set: str) -> List[str]:
+    return list(get_feature_set(feature_set)["targets"])
 
 
 def tables_for_feature_set(feature_set: str) -> Set[str]:

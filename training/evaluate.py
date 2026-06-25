@@ -20,6 +20,7 @@ from shared.config_paths import PATHS
 from shared.config_training_defaults import TRAINING
 from shared.config_preprocessing_defaults import PREPROCESSING
 from shared.logging_utils import setup_logging
+from shared.features import target_features_for_feature_set, feature_names_for_feature_set
 from core.dataset import ShardedWindowsDataset
 from core.models import RNNForecaster
 
@@ -66,10 +67,16 @@ def evaluate(args):
         "probabilistic", TRAINING.PROBABILISTIC_TRAINING
     )
     quantiles = TRAINING.QUANTILES if probabilistic else None
+    feature_set_name = ckpt_args.get("feature_set", PREPROCESSING.FEATURE_SET)
+    target_features = target_features_for_feature_set(feature_set_name)
+    feature_names = feature_names_for_feature_set(feature_set_name)
+    num_targets = len(target_features)
+    target_idxs_in_features = [feature_names.index(f) for f in target_features]
 
     log_info(
         f"RNN Architecture:   {rnn_type} (Layers: {num_layers}, Hidden: {hidden_size})"
     )
+    log_info(f"Target Feature(s): {target_features}")
 
     log_info("\n--- Loading Test Dataset ---")
 
@@ -99,6 +106,7 @@ def evaluate(args):
         rnn_type=rnn_type,
         bidirectional=bidirectional,
         quantiles=quantiles,
+        num_targets=num_targets,
     ).to(device)
 
     model.load_state_dict(checkpoint["model_state_dict"])
@@ -156,7 +164,7 @@ def evaluate(args):
         gathered_mu, gathered_y, gathered_x = accelerator.gather_for_metrics((mu, y, x))
 
         if accelerator.is_local_main_process:
-            y_last = gathered_x[:, -1, 0].cpu().numpy()
+            y_last = gathered_x[:, -1, :].cpu().numpy()
 
             all_preds.append(gathered_mu.cpu().numpy())
             all_trues.append(gathered_y.cpu().numpy())
@@ -172,13 +180,22 @@ def evaluate(args):
 
     y_pred = np.concatenate(all_preds, axis=0)
     y_true = np.concatenate(all_trues, axis=0)
-    y_last = np.concatenate(all_lasts, axis=0)
+    y_last_all = np.concatenate(all_lasts, axis=0)
 
     total_samples = y_pred.shape[0]
 
     log_info("\n=== Inference Summary ===")
     log_info(f"Model: {rnn_type}")
-    compute_metrics(y_pred, y_true, y_last, horizon, total_samples, log_info)
+
+    for t_idx, t_name in zip(target_idxs_in_features, target_features):
+        y_last_t = y_last_all[:, t_idx]
+        if num_targets > 1:
+            y_pred_t = y_pred[:, :, t_idx]
+            y_true_t = y_true[:, :, t_idx]
+        else:
+            y_pred_t = y_pred
+            y_true_t = y_true
+        compute_metrics(y_pred_t, y_true_t, y_last_t, horizon, total_samples, log_info, target_name=t_name)
 
     avg_inference_time_ms = (inference_time / max(1, total_samples)) * 1000.0
     log_info(f"Total Inference Time:  {inference_time:.2f}s")

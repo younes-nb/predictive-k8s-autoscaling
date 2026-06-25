@@ -114,8 +114,8 @@ def main():
 
     spec = get_feature_set(args.feature_set)
     feature_names = list(spec["features"])
-    target_feature = str(spec["target"])
-    target_idx = feature_names.index(target_feature)
+    target_features = list(spec["targets"])
+    target_indices = [feature_names.index(f) for f in target_features]
     mcr_feats = [f for f in feature_names if "mcr" in f.lower()]
 
     requires_callgraph = spec.get("requires_callgraph", False)
@@ -123,9 +123,9 @@ def main():
 
     needed_tables = sorted(list(tables_for_feature_set(args.feature_set)))
     table_exprs = table_to_feature_exprs(args.feature_set)
-    base_table = FEATURES[target_feature]["table"]
+    base_table = FEATURES[target_features[0]]["table"]
 
-    use_service_level = args.feature_set in ("cpu_mem_mcr", "cpu_delta_upstream")
+    use_service_level = True
     effective_id_cols = [args.service_col] if use_service_level else list(args.id_cols)
 
     def agg_exprs_for_table(table_name: str):
@@ -412,7 +412,7 @@ def main():
             for j in range(len(feature_names)):
                 vals = moving_average(feat_raw[:, j], args.smoothing_window)
                 if vals is None:
-                    if j == target_idx:
+                    if j in target_indices:
                         valid_group = False
                         break
                     feat_processed[:, j] = 0.0
@@ -437,9 +437,13 @@ def main():
                 if len(sub_feat) < args.input_len + args.pred_horizon:
                     continue
 
+                y_target = sub_feat[:, target_indices]
+                if len(target_indices) == 1:
+                    y_target = y_target[:, 0]
+
                 Xs, Ys, Ss = windowize_multivariate(
                     sub_feat,
-                    sub_feat[:, target_idx],
+                    y_target,
                     args.input_len,
                     args.pred_horizon,
                     args.stride,

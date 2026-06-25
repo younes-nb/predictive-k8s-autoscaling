@@ -30,11 +30,13 @@ class RNNForecaster(nn.Module):
         rnn_type: str = "lstm",
         bidirectional: bool = False,
         quantiles: Optional[Sequence[float]] = None,
+        num_targets: int = 1,
     ):
         super().__init__()
         self.horizon = horizon
         self.rnn_type = rnn_type.lower()
         self.bidirectional = bidirectional
+        self.num_targets = num_targets
         self.quantiles: Optional[Tuple[float, ...]] = (
             tuple(float(q) for q in quantiles) if quantiles else None
         )
@@ -52,7 +54,8 @@ class RNNForecaster(nn.Module):
 
         self.dropout_layer = nn.Dropout(dropout)
         fc_input_dim = hidden_size * 2 if self.bidirectional else hidden_size
-        self.fc = nn.Linear(fc_input_dim, horizon * self.num_quantiles)
+        fc_out = horizon * self.num_targets * self.num_quantiles
+        self.fc = nn.Linear(fc_input_dim, fc_out)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if x.dim() == 2:
@@ -63,5 +66,7 @@ class RNNForecaster(nn.Module):
         last_step = self.dropout_layer(last_step)
         out = self.fc(last_step)
         if self.quantiles:
-            return out.view(out.size(0), self.horizon, self.num_quantiles)
+            return out.view(out.size(0), self.horizon, self.num_targets, self.num_quantiles)
+        if self.num_targets > 1:
+            return out.view(out.size(0), self.horizon, self.num_targets)
         return out

@@ -4,12 +4,12 @@ from typing import Tuple
 
 @dataclass(frozen=True)
 class TrainingDefaults:
-    HIDDEN_SIZE: int = 128
+    HIDDEN_SIZE: int = 64
     NUM_LAYERS: int = 3
-    DROPOUT: float = 0.3
+    DROPOUT: float = 0.5
     BATCH_SIZE: int = 512
-    EPOCHS: int = 100
-    LR: float = 0.00127
+    EPOCHS: int = 1000
+    LR: float = 0.0005
     HIDDEN_SIZE_OPTIONS: Tuple[int, ...] = (32, 64, 128, 256)
     NUM_LAYERS_OPTIONS: Tuple[int, ...] = (1, 2, 3, 4)
     DROPOUT_RANGE: Tuple[float, float] = (0.1, 0.5)
@@ -21,16 +21,16 @@ class TrainingDefaults:
     WEIGHT_DECAY: float = 1e-4
     UNDER_PENALTY: float = 8.0
     SEED: int = 42
-    USE_WEIGHTS: bool = True
+    USE_WEIGHTS: bool = False
     GAMMA: float = 20.0
     DELTA: float = 0.08
     THETA_MODE: str = "adaptive"
     THETA_BASE: float = 0.75
     THETA_MIN: float = 0.60
-    BIDIRECTIONAL: bool = False
+    BIDIRECTIONAL: bool = True
     PROBABILISTIC_TRAINING: bool = False
     QUANTILES: Tuple[float, ...] = (0.5, 0.9, 0.95)
-    HYPERPARAM_OPTIMIZER: str = "sfoa"
+    HYPERPARAM_OPTIMIZER: str = "none"
     SFOA_POPULATION: int = 10
     SFOA_ITERATIONS: int = 5
     SFOA_EVAL_EPOCHS: int = 5

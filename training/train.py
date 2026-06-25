@@ -23,6 +23,7 @@ from shared.config_paths import PATHS
 from shared.config_preprocessing_defaults import PREPROCESSING
 from shared.config_training_defaults import TRAINING
 from shared.logging_utils import setup_logging
+from shared.features import target_features_for_feature_set
 from core.dataset import ShardedWindowsDataset
 from core.models import RNNForecaster
 
@@ -228,6 +229,8 @@ def train(args):
     quantiles = TRAINING.QUANTILES
     pinball_loss = PinballLoss(quantiles).to(device) if args.probabilistic else None
 
+    num_targets = len(target_features_for_feature_set(args.feature_set))
+
     model = RNNForecaster(
         input_size=input_size,
         hidden_size=args.hidden_size,
@@ -237,6 +240,7 @@ def train(args):
         rnn_type=args.rnn_type,
         bidirectional=args.bidirectional,
         quantiles=quantiles if args.probabilistic else None,
+        num_targets=num_targets,
     ).to(device)
 
     if device.type != "cpu":
@@ -253,7 +257,7 @@ def train(args):
 
     system_cores = os.cpu_count() or 1
     gpu_count = torch.cuda.device_count() or 1
-    optimal_workers = 40
+    optimal_workers = min(system_cores, 4 * gpu_count)
     log_info(
         f"Dynamically set num_workers to {optimal_workers} (Cores: {system_cores}, GPUs: {gpu_count})"
     )
@@ -388,7 +392,7 @@ def train(args):
             else:
                 no_change_streak = 0
 
-        if hyperparam_optimizer != "sfoa":
+        if hyperparam_optimizer == "random":
             if (
                 no_change_streak >= TRAINING.HYPERPARAM_CHECK_INTERVAL
                 and epoch < args.epochs
@@ -414,6 +418,7 @@ def train(args):
                         rnn_type=args.rnn_type,
                         bidirectional=args.bidirectional,
                         quantiles=quantiles if args.probabilistic else None,
+                        num_targets=num_targets,
                     ).to(device)
 
                     new_optimizer = torch.optim.Adam(

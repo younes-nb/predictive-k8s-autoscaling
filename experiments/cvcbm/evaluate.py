@@ -36,6 +36,7 @@ def load_cvcbm_model(ckpt_path: str, device: torch.device) -> CvcbmModel:
     saved_cfg = ckpt.get("cfg", {})
     model = CvcbmModel(
         input_len=saved_cfg.get("input_len", CFG.INPUT_LEN),
+        pred_horizon=saved_cfg.get("pred_horizon", CFG.PRED_HORIZON),
         kernel_sizes=saved_cfg.get("kernel_sizes", CFG.KERNEL_SIZES),
         conv1_out_ch=saved_cfg.get("conv1_out_ch", CFG.CONV1_OUT_CH),
         conv2_out_ch=saved_cfg.get("conv2_out_ch", CFG.CONV2_OUT_CH),
@@ -54,17 +55,18 @@ def predict_component(
 
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
     preds_list, true_list, last_list = [], [], []
+    pred_horizon = dataset.y.shape[1]
 
     with torch.no_grad():
         for x, y, last in loader:
-            pred = model(x.to(device)).cpu().numpy().ravel()
+            pred = model(x.to(device)).cpu().numpy()
             preds_list.append(pred)
-            true_list.append(y.numpy().ravel())
+            true_list.append(y.numpy())
             last_list.append(last.numpy().ravel())
 
     return (
-        np.concatenate(preds_list),
-        np.concatenate(true_list),
+        np.concatenate(preds_list, axis=0),
+        np.concatenate(true_list, axis=0),
         np.concatenate(last_list),
     )
 
@@ -102,7 +104,8 @@ def main() -> None:
     for k in range(CFG.N_CLUSTERS):
         test_ds = CoImfDataset(
             args.preprocess_dir, k, "test",
-            input_len=CFG.INPUT_LEN, stride=1,
+            input_len=CFG.INPUT_LEN, pred_horizon=CFG.PRED_HORIZON,
+            stride=1,
             test_size=CFG.TEST_SIZE, val_frac=CFG.VAL_FRAC,
         )
         if len(test_ds) == 0:
@@ -136,8 +139,8 @@ def main() -> None:
     logging.info("  MSE : %.8f", mse)
     logging.info("-" * 60)
 
-    y_pred_2d = summed_preds.reshape(-1, 1)
-    y_true_2d = summed_true.reshape(-1, 1)
+    y_pred_2d = summed_preds.reshape(-1, CFG.PRED_HORIZON)
+    y_true_2d = summed_true.reshape(-1, CFG.PRED_HORIZON)
 
     logging.info("Shadowing Diagnostics (via training.metrics.compute_metrics):")
     compute_metrics(

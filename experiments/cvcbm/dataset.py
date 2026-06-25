@@ -12,18 +12,18 @@ from torch.utils.data import Dataset
 logger = logging.getLogger(__name__)
 
 def build_windows(
-    signal: np.ndarray, input_len: int, stride: int = 1
+    signal: np.ndarray, input_len: int, stride: int = 1, pred_horizon: int = 1
 ) -> Tuple[np.ndarray, np.ndarray]:
 
-    T = len(signal) - input_len
+    T = len(signal) - input_len - pred_horizon + 1
     if T <= 0:
         return (
             np.empty((0, input_len), dtype=np.float32),
-            np.empty((0, 1), dtype=np.float32),
+            np.empty((0, pred_horizon), dtype=np.float32),
         )
     indices = np.arange(0, T, stride)
     X = np.stack([signal[i: i + input_len] for i in indices]).astype(np.float32)
-    y = signal[indices + input_len].reshape(-1, 1).astype(np.float32)
+    y = np.stack([signal[i + input_len: i + input_len + pred_horizon] for i in indices]).astype(np.float32)
     return X, y
 
 class CoImfDataset(Dataset):
@@ -34,6 +34,7 @@ class CoImfDataset(Dataset):
         co_imf_index: int,
         split: str,
         input_len: int = 30,
+        pred_horizon: int = 1,
         stride: int = 1,
         test_size: int = 500,
         val_frac: float = 0.10,
@@ -60,7 +61,7 @@ class CoImfDataset(Dataset):
                 continue
             N = len(signal)
 
-            if N < input_len + test_size + 1:
+            if N < input_len + pred_horizon + test_size:
                 continue
 
             test_start = N - test_size
@@ -73,10 +74,10 @@ class CoImfDataset(Dataset):
             else:
                 seg = signal[test_start:]
 
-            if len(seg) < input_len + 1:
+            if len(seg) < input_len + pred_horizon:
                 continue
 
-            X, y = build_windows(seg.astype(np.float32), input_len, stride)
+            X, y = build_windows(seg.astype(np.float32), input_len, stride, pred_horizon)
             if len(X) > 0:
                 all_X.append(X)
                 all_y.append(y)
@@ -87,7 +88,7 @@ class CoImfDataset(Dataset):
                 co_imf_index, split, preprocess_dir,
             )
             self.X = torch.empty((0, input_len, 1), dtype=torch.float32)
-            self.y = torch.empty((0, 1), dtype=torch.float32)
+            self.y = torch.empty((0, pred_horizon), dtype=torch.float32)
         else:
             self.X = torch.from_numpy(np.concatenate(all_X, axis=0)).unsqueeze(-1)
             self.y = torch.from_numpy(np.concatenate(all_y, axis=0))
@@ -111,6 +112,7 @@ def _smoke_check(preprocess_dir: str, co_imf_index: int, split: str) -> None:
         co_imf_index,
         split,
         input_len=CFG.INPUT_LEN,
+        pred_horizon=CFG.PRED_HORIZON,
         stride=CFG.STRIDE,
         test_size=CFG.TEST_SIZE,
         val_frac=CFG.VAL_FRAC,
@@ -118,7 +120,7 @@ def _smoke_check(preprocess_dir: str, co_imf_index: int, split: str) -> None:
     assert len(ds) > 0, "Dataset has no windows"
     x, y, last = ds[0]
     assert tuple(x.shape) == (CFG.INPUT_LEN, 1), f"Bad x shape: {tuple(x.shape)}"
-    assert tuple(y.shape) == (1,), f"Bad y shape: {tuple(y.shape)}"
+    assert tuple(y.shape) == (CFG.PRED_HORIZON,), f"Bad y shape: {tuple(y.shape)}"
     assert last.dim() == 0, f"Bad last shape: {tuple(last.shape)}"
     print(f"Dataset windows: {len(ds)}")
     print(f"x={tuple(x.shape)} y={tuple(y.shape)} last_dim={last.dim()}")

@@ -18,6 +18,7 @@ class CvcbmModel(nn.Module):
     def __init__(
         self,
         input_len: int = 30,
+        pred_horizon: int = 1,
         kernel_sizes: tuple = (2, 4, 8),
         conv1_out_ch: int = 32,
         conv2_out_ch: int = 64,
@@ -50,7 +51,7 @@ class CvcbmModel(nn.Module):
         self.bilstm2 = nn.LSTM(h[0] * 2, h[1], batch_first=True, bidirectional=True)
         self.bilstm3 = nn.LSTM(h[1] * 2, h[2], batch_first=True, bidirectional=True)
 
-        self.fc = nn.Linear(h[2] * 2, 1)
+        self.fc = nn.Linear(h[2] * 2, pred_horizon)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
 
@@ -76,6 +77,7 @@ if __name__ == "__main__":
 
     model = CvcbmModel(
         input_len=CFG.INPUT_LEN,
+        pred_horizon=CFG.PRED_HORIZON,
         kernel_sizes=CFG.KERNEL_SIZES,
         conv1_out_ch=CFG.CONV1_OUT_CH,
         conv2_out_ch=CFG.CONV2_OUT_CH,
@@ -83,7 +85,7 @@ if __name__ == "__main__":
     )
     x = torch.randn(4, CFG.INPUT_LEN, 1)
     out = model(x)
-    assert out.shape == (4, 1), f"Expected (4, 1), got {tuple(out.shape)}"
+    assert out.shape == (4, CFG.PRED_HORIZON), f"Expected (4, {CFG.PRED_HORIZON}), got {tuple(out.shape)}"
     print(f"Output shape: {tuple(out.shape)}")
     print(f"Parameters: {sum(p.numel() for p in model.parameters()):,}")
     print("CvcbmModel smoke test passed")

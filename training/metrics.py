@@ -30,7 +30,7 @@ def find_max_inference_batch_size(
 
 
 def compute_metrics(
-    y_pred, y_true, y_last, horizon, total_samples, log_info
+    y_pred, y_true, y_last, horizon, total_samples, log_info, target_name=None
 ):
     if total_samples == 0:
         log_info("No samples found in test set.")
@@ -57,7 +57,8 @@ def compute_metrics(
 
     is_shadowing = (skill_score < 0.05) or (corr_1 > corr_0) or (mda < 0.55)
 
-    log_info("\n=== Performance Metrics ===")
+    header = f"=== Performance Metrics{f' [{target_name}]' if target_name else ''} ==="
+    log_info(f"\n{header}")
     log_info("-" * 30)
     log_info(f"MSE:                   {mse:.4f}")
     log_info(f"MAE:                   {mae:.4f}")

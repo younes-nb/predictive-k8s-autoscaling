@@ -78,12 +78,14 @@ def train_one_co_imf(co_imf_index: int, args) -> None:
 
     train_ds = CoImfDataset(
         args.preprocess_dir, co_imf_index, "train",
-        input_len=CFG.INPUT_LEN, stride=CFG.STRIDE,
+        input_len=CFG.INPUT_LEN, pred_horizon=CFG.PRED_HORIZON,
+        stride=CFG.STRIDE,
         test_size=CFG.TEST_SIZE, val_frac=CFG.VAL_FRAC,
     )
     val_ds = CoImfDataset(
         args.preprocess_dir, co_imf_index, "val",
-        input_len=CFG.INPUT_LEN, stride=CFG.STRIDE,
+        input_len=CFG.INPUT_LEN, pred_horizon=CFG.PRED_HORIZON,
+        stride=CFG.STRIDE,
         test_size=CFG.TEST_SIZE, val_frac=CFG.VAL_FRAC,
     )
 
@@ -106,6 +108,7 @@ def train_one_co_imf(co_imf_index: int, args) -> None:
 
     model = CvcbmModel(
         input_len=CFG.INPUT_LEN,
+        pred_horizon=CFG.PRED_HORIZON,
         kernel_sizes=CFG.KERNEL_SIZES,
         conv1_out_ch=CFG.CONV1_OUT_CH,
         conv2_out_ch=CFG.CONV2_OUT_CH,
@@ -163,6 +166,7 @@ def train_one_co_imf(co_imf_index: int, args) -> None:
                     "best_val_loss": best_val_loss,
                     "cfg": {
                         "input_len": CFG.INPUT_LEN,
+                        "pred_horizon": CFG.PRED_HORIZON,
                         "kernel_sizes": CFG.KERNEL_SIZES,
                         "conv1_out_ch": CFG.CONV1_OUT_CH,
                         "conv2_out_ch": CFG.CONV2_OUT_CH,
