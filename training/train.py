@@ -257,7 +257,7 @@ def train(args):
 
     system_cores = os.cpu_count() or 1
     gpu_count = torch.cuda.device_count() or 1
-    optimal_workers = min(system_cores, 4 * gpu_count)
+    optimal_workers = 48
     log_info(
         f"Dynamically set num_workers to {optimal_workers} (Cores: {system_cores}, GPUs: {gpu_count})"
     )

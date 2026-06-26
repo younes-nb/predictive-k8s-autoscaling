@@ -90,7 +90,7 @@ def main():
             X = np.load(x_path, mmap_mode="r")
             sid = np.load(sid_path, mmap_mode="r")
 
-            u_now = X[:, -1, -1] if X.ndim == 3 else X[:, -1]
+            u_now = X[:, -1, :].max(axis=1) if X.ndim == 3 else X[:, -1]
             for s in np.unique(sid):
                 if (
                     args.archetype_id is not None
@@ -126,7 +126,7 @@ def main():
 
         for i in range(0, Y.shape[0], args.batch_size):
             end = i + args.batch_size
-            y_target = torch.from_numpy(Y[i:end, -1].copy()).float()
+            y_last = Y[i:end, -1].copy()  # (batch,) or (batch, num_targets)
             sid_batch = sid[i:end]
 
             if args.archetype_id is not None:
@@ -143,13 +143,27 @@ def main():
                 tb = torch.tensor(
                     [theta_base_dict.get(int(s), args.theta_base) for s in sid_batch]
                 )
+                if y_last.ndim == 2:
+                    tb = tb.unsqueeze(-1)
+
+                y_target = torch.from_numpy(y_last).float()
                 dist = torch.max(
                     torch.zeros_like(y_target),
                     torch.max(args.theta_min - y_target, y_target - tb),
                 )
+
+                if dist.ndim == 2:
+                    dist = dist.min(dim=-1).values
+
                 w = 1.0 + args.gamma * torch.exp(-(dist**2) / (2.0 * (args.delta**2)))
             else:
-                dist_sq = (y_target - args.theta_base) ** 2
+                if y_last.ndim == 2:
+                    y_target = torch.from_numpy(y_last).float()
+                    dist_sq = ((y_target - args.theta_base) ** 2).min(dim=-1).values
+                else:
+                    y_target = torch.from_numpy(y_last).float()
+                    dist_sq = (y_target - args.theta_base) ** 2
+
                 w = 1.0 + args.gamma * torch.exp(-dist_sq / (2.0 * (args.delta**2)))
 
             final_w = torch.ones_like(w)

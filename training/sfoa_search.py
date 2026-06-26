@@ -10,6 +10,7 @@ from torch.utils.data import DataLoader, Subset
 
 from shared.config_paths import PATHS
 from shared.config_training_defaults import TRAINING
+from shared.features import target_features_for_feature_set
 from shared.logging_utils import setup_logging
 from .loss import weighted_mse
 from .train_helpers import load_resume_state, save_resume_state
@@ -686,6 +687,8 @@ def run_sfoa_search(
         val_ds, int(len(val_ds) * sfoa_val_pct / 100.0)
     )
 
+    num_targets = len(target_features_for_feature_set(args.feature_set))
+
     system_cores = os.cpu_count() or 1
     sfoa_workers = max(
         0,
@@ -777,6 +780,7 @@ def run_sfoa_search(
                 horizon=args.pred_horizon,
                 rnn_type=args.rnn_type,
                 bidirectional=args.bidirectional,
+                num_targets=num_targets,
                 quantiles=None,
             ).to(eval_device)
             
@@ -972,6 +976,7 @@ def run_sfoa_search(
             horizon=args.pred_horizon,
             rnn_type=args.rnn_type,
             bidirectional=args.bidirectional,
+            num_targets=num_targets,
             quantiles=None,
         ).to(eval_device)
         

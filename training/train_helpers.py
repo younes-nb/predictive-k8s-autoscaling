@@ -26,8 +26,12 @@ def find_max_batch_size(
 
     while batch_size > 0:
         try:
+            num_targets = getattr(model, 'num_targets', 1)
             dummy_x = torch.randn(batch_size, args.input_len, input_size, device=device)
-            dummy_y = torch.randn(batch_size, args.pred_horizon, device=device)
+            if num_targets > 1:
+                dummy_y = torch.randn(batch_size, args.pred_horizon, num_targets, device=device)
+            else:
+                dummy_y = torch.randn(batch_size, args.pred_horizon, device=device)
 
             optimizer_dummy = torch.optim.Adam(model.parameters(), lr=0.001)
             optimizer_dummy.zero_grad()
