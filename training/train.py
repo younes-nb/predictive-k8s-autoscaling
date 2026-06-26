@@ -2,7 +2,6 @@ import os
 import sys
 import argparse
 import logging
-import math as _math
 import random
 from datetime import datetime, timedelta
 
@@ -29,7 +28,6 @@ from core.models import RNNForecaster
 
 from training.loss import PinballLoss, weighted_mse
 from training.train_helpers import (
-    find_max_batch_size,
     hyperparam_key,
     sample_hyperparams,
     apply_hyperparams,
@@ -42,7 +40,8 @@ from training.sfoa_search import run_sfoa_search
 
 def train(args):
     timeout_kwargs = InitProcessGroupKwargs(timeout=timedelta(seconds=14400))
-    accelerator = Accelerator(cpu=args.cpu, kwargs_handlers=[timeout_kwargs])
+    mixed_precision = "fp16" if not args.cpu and torch.cuda.is_available() else "no"
+    accelerator = Accelerator(cpu=args.cpu, mixed_precision=mixed_precision, kwargs_handlers=[timeout_kwargs])
     device = accelerator.device
 
     log_info = lambda msg: (
@@ -56,15 +55,16 @@ def train(args):
         load_resume_state(PATHS.RESUME_STATE_FILE) if args.resume_training else None
     )
     if resume_state and "args" in resume_state:
-        _cli_pct = {
+        _cli_overrides = {
             k: getattr(args, k) for k in (
                 "sfoa_train_pct", "sfoa_val_pct", "sfoa_num_workers",
-                "train_pct", "val_pct",
+                "train_pct", "val_pct", "batch_size", "num_workers",
+                "epochs",
             ) if hasattr(args, k)
         }
         args = argparse.Namespace(**resume_state["args"])
         args.resume_training = True
-        for _k, _v in _cli_pct.items():
+        for _k, _v in _cli_overrides.items():
             setattr(args, _k, _v)
     if not hasattr(args, "probabilistic"):
         args.probabilistic = TRAINING.PROBABILISTIC_TRAINING
@@ -243,23 +243,13 @@ def train(args):
         num_targets=num_targets,
     ).to(device)
 
-    if device.type != "cpu":
-        log_info("Tuning per-GPU batch size to hardware limits...")
-        max_batch = find_max_batch_size(model, input_size, args, device, pinball_loss)
-
-        safe_batch_size = int(max_batch * 0.8)
-        safe_batch_size = 2 ** int(_math.log2(max(1, safe_batch_size)))
-
-        log_info(
-            f"Auto-selected per-GPU Batch Size: {safe_batch_size} (Global Batch Size: {safe_batch_size * accelerator.num_processes})"
-        )
-        args.batch_size = safe_batch_size
-
-    system_cores = os.cpu_count() or 1
-    gpu_count = torch.cuda.device_count() or 1
-    optimal_workers = 48
     log_info(
-        f"Dynamically set num_workers to {optimal_workers} (Cores: {system_cores}, GPUs: {gpu_count})"
+        f"Using fixed per-GPU batch size: {args.batch_size} "
+        f"(Global: {args.batch_size * accelerator.num_processes})"
+    )
+    optimal_workers = getattr(args, "num_workers", TRAINING.NUM_WORKERS)
+    log_info(
+        f"num_workers: {optimal_workers}"
     )
 
     pin_memory = device.type != "cpu"
@@ -294,6 +284,9 @@ def train(args):
         model, optimizer, train_loader, val_loader
     )
 
+    if accelerator.mixed_precision == "fp16":
+        log_info("AMP (FP16 mixed precision) enabled via Accelerate")
+
     log_info("\n--- Starting Training Loop ---")
 
     for epoch in range(start_epoch, args.epochs + 1):
@@ -310,12 +303,13 @@ def train(args):
                 w = None
 
             optimizer.zero_grad()
-            preds = model(x)
 
-            if args.probabilistic:
-                loss = pinball_loss(preds, y, w)
-            else:
-                loss = weighted_mse(preds, y, w, under_penalty=args.under_penalty)
+            with accelerator.autocast():
+                preds = model(x)
+                if args.probabilistic:
+                    loss = pinball_loss(preds, y, w)
+                else:
+                    loss = weighted_mse(preds, y, w, under_penalty=args.under_penalty)
 
             accelerator.backward(loss)
 
@@ -495,6 +489,8 @@ def main():
     p.add_argument("--under_penalty", type=float, default=TRAINING.UNDER_PENALTY)
     p.add_argument("--seed", type=int, default=TRAINING.SEED)
     p.add_argument("--cpu", action="store_true")
+    p.add_argument("--num_workers", type=int, default=TRAINING.NUM_WORKERS,
+                   help="DataLoader workers for main training (default: 0 = in-process)")
     p.add_argument("--rnn_type", default="lstm")
     p.add_argument("--feature_set", default=PREPROCESSING.FEATURE_SET)
     p.add_argument(

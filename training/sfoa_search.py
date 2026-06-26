@@ -961,33 +961,6 @@ def run_sfoa_search(
         "[SFOA] Evaluating candidates in parallel across ranks (DDP all_gather)",
     )
     
-    if eval_device.type != "cpu":
-        logging.info("[SFOA] Profiling worst-case model architecture boundaries to establish global SFOA batch size...")
-        from training.train_helpers import find_max_batch_size
-        
-        max_possible_hidden = max(TRAINING.HIDDEN_SIZE_OPTIONS)
-        max_possible_layers = max(TRAINING.NUM_LAYERS_OPTIONS)
-        
-        worst_case_model = RNNForecaster(
-            input_size=input_size,
-            hidden_size=max_possible_hidden,
-            num_layers=max_possible_layers,
-            dropout=0.0,
-            horizon=args.pred_horizon,
-            rnn_type=args.rnn_type,
-            bidirectional=args.bidirectional,
-            num_targets=num_targets,
-            quantiles=None,
-        ).to(eval_device)
-        
-        max_batch = find_max_batch_size(worst_case_model, input_size, args, eval_device, loss_fn=None)
-        safe_batch_size = int(max_batch * 0.8)
-        args.batch_size = 2 ** int(_math.log2(max(1, safe_batch_size)))
-        
-        del worst_case_model
-        torch.cuda.empty_cache()
-        logging.info("[SFOA] Global SFOA batch size set to %d based on hardware ceilings.", args.batch_size)
-
     sfoa = SFOAOptimizer(
         eval_fn=eval_fn,
         N=TRAINING.SFOA_POPULATION,

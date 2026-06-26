@@ -7,8 +7,9 @@ class TrainingDefaults:
     HIDDEN_SIZE: int = 64
     NUM_LAYERS: int = 3
     DROPOUT: float = 0.5
-    BATCH_SIZE: int = 512
-    EPOCHS: int = 1000
+    BATCH_SIZE: int = 16384
+    NUM_WORKERS: int = 12
+    EPOCHS: int = 300
     LR: float = 0.0005
     HIDDEN_SIZE_OPTIONS: Tuple[int, ...] = (32, 64, 128, 256)
     NUM_LAYERS_OPTIONS: Tuple[int, ...] = (1, 2, 3, 4)
@@ -38,7 +39,7 @@ class TrainingDefaults:
     SFOA_EVALUATION_PARALLEL: bool = True
     SFOA_TRAIN_PCT: float = 20.0
     SFOA_VAL_PCT: float = 20.0
-    SFOA_NUM_WORKERS: int = 12
+    SFOA_NUM_WORKERS: int = 4
     TRAIN_PCT: float = 100.0
     VAL_PCT: float = 100.0
     TEST_PCT: float = 100.0
