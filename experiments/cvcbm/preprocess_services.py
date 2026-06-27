@@ -5,6 +5,8 @@ import os
 import subprocess
 import sys
 import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -19,16 +21,11 @@ if REPO_ROOT not in sys.path:
 from shared.config_paths import PATHS
 from experiments.cvcbm.config import CFG
 
-class _ElapsedFormatter(logging.Formatter):
-
-    def __init__(self):
-        super().__init__()
-        self._start = time.time()
+class _TehranFormatter(logging.Formatter):
 
     def format(self, record: logging.LogRecord) -> str:
-        elapsed = time.time() - self._start
-        record.elapsed = f"{elapsed:8.1f}"
-        return f"  {record.elapsed}s [{record.levelname}] {record.getMessage()}"
+        ts = datetime.now(ZoneInfo("Asia/Tehran")).strftime("%Y-%m-%d %H:%M:%S")
+        return f"{ts} [{record.levelname}] {record.getMessage()}"
 
 def setup_logging(out_dir: str) -> None:
     os.makedirs(out_dir, exist_ok=True)
@@ -36,7 +33,7 @@ def setup_logging(out_dir: str) -> None:
     root = logging.getLogger()
     root.setLevel(logging.INFO)
     root.handlers.clear()
-    fmt = _ElapsedFormatter()
+    fmt = _TehranFormatter()
     fh = logging.FileHandler(log_path, mode="a")
     fh.setFormatter(fmt)
     root.addHandler(fh)
@@ -109,6 +106,17 @@ def main() -> None:
     skipped = 0
     t_start = time.time()
 
+    pre_done = 0
+    for i in range(total):
+        dm = os.path.join(args.out_dir, f"service_{i:05d}.done")
+        if os.path.exists(dm) and all(
+            os.path.exists(os.path.join(args.out_dir, f"co_imf_{k}", f"service_{i:05d}.npy"))
+            for k in range(CFG.N_CLUSTERS)
+        ):
+            pre_done += 1
+    if pre_done:
+        logging.info("Pre-existing completed services: %d", pre_done)
+
     for batch_idx in range(n_batches):
         batch_services = services[batch_idx * batch_size: (batch_idx + 1) * batch_size]
 
@@ -160,7 +168,7 @@ def main() -> None:
         logging.info("  Batch %d/%d: submitting %d services to %d workers...",
                      batch_idx + 1, n_batches, n_submitted, args.num_workers)
 
-        def _run_worker(ms_name: str, idx: int) -> tuple[int, str, str]:
+        def _run_worker(ms_name: str, idx: int) -> tuple[int, str, str, float]:
             worker_env = os.environ.copy()
             worker_env["OMP_NUM_THREADS"] = "1"
             worker_env["MKL_NUM_THREADS"] = "1"
@@ -174,8 +182,10 @@ def main() -> None:
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 env=worker_env,
             )
+            t0 = time.time()
             stdout, stderr = proc.communicate()
-            return proc.returncode, stdout.decode(), stderr.decode()
+            duration = time.time() - t0
+            return proc.returncode, stdout.decode(), stderr.decode(), duration
 
         with ThreadPoolExecutor(max_workers=args.num_workers) as executor:
             fut_to_meta = {
@@ -185,7 +195,7 @@ def main() -> None:
 
             for future in as_completed(fut_to_meta):
                 ms_name, idx = fut_to_meta[future]
-                returncode, r_msg, err_msg = future.result()
+                returncode, r_msg, err_msg, duration = future.result()
                 r_msg_lines = r_msg.strip().split("\n") if r_msg else []
 
                 result_line = ""
@@ -194,28 +204,28 @@ def main() -> None:
                         result_line = line
                         break
 
-                elapsed = time.time() - t_start
-                done_count = processed + skipped + 1
+                done_count = pre_done + processed + skipped + 1
 
                 if returncode == 0 and result_line:
                     parts = result_line.split(":", 2)
                     success = parts[1] == "True" if len(parts) >= 2 else True
                     message = parts[2] if len(parts) >= 3 else "ok"
+                    if "(MAE=" in message:
+                        message = "ok"
                     if success:
                         if "already done" in message or "too short" in message:
                             skipped += 1
                         else:
                             processed += 1
                         logging.info(
-                            "[%d/%d] %s  (%d done, batch %d/%d, %.1fs)",
-                            done_count, total, message,
-                            done_count, batch_idx + 1, n_batches, elapsed,
+                            "ok (%d done, batch %d/%d, %.1fs)",
+                            done_count, batch_idx + 1, n_batches, duration,
                         )
                     else:
                         skipped += 1
                         logging.error(
-                            "[%d/%d] ERROR — %s",
-                            done_count, total, message,
+                            "ERROR — %s",
+                            message,
                         )
                 else:
                     skipped += 1
@@ -228,8 +238,8 @@ def main() -> None:
                     if not err_msg_short:
                         err_msg_short = "unknown"
                     logging.error(
-                        "[%d/%d] Worker crashed (exit=%d): %s",
-                        done_count, total, returncode, err_msg_short,
+                        "Worker crashed (exit=%d): %s",
+                        returncode, err_msg_short,
                     )
 
         logging.info("  Batch %d/%d done — %d services, %.1fs elapsed.",
