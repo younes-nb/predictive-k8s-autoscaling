@@ -6,6 +6,8 @@ import subprocess
 import sys
 import time
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 import numpy as np
 import polars as pl
 
@@ -72,10 +74,10 @@ def main() -> None:
     ap.add_argument("--msresource_dir", default=PATHS.PARQUET_MSRESOURCE)
     ap.add_argument("--out_dir", default="/dataset/cvcbm_preprocess")
     ap.add_argument("--max_services", type=int, default=0, help="Max services (0 = all)")
-    ap.add_argument("--num_workers", type=int, default=32,
-                    help="Parallel worker count (default: 32)")
-    ap.add_argument("--batch_size", type=int, default=256,
-                    help="Services per batch (default: 256). Load this many from parquet at once.")
+    ap.add_argument("--num_workers", type=int, default=80,
+                    help="Parallel worker count (default: 80)")
+    ap.add_argument("--batch_size", type=int, default=512,
+                    help="Services per batch (default: 512). Load this many from parquet at once.")
     args = ap.parse_args()
 
     setup_logging(args.out_dir)
@@ -110,54 +112,81 @@ def main() -> None:
     for batch_idx in range(n_batches):
         batch_services = services[batch_idx * batch_size: (batch_idx + 1) * batch_size]
 
-        logging.info("Batch %d/%d: loading %d services from parquet...",
-                     batch_idx + 1, n_batches, len(batch_services))
-        signals = _load_batch_signals(args.msresource_dir, batch_services)
+        signals = {}
+        for ms_name in batch_services:
+            idx = svc_to_idx[ms_name]
+            path = os.path.join(args.out_dir, "original", f"service_{idx:05d}.npy")
+            if os.path.exists(path):
+                sig = np.load(path).astype(np.float32)
+                if len(sig) >= CFG.MIN_SIGNAL_LEN:
+                    signals[ms_name] = sig
 
         worker_args = []
         for ms_name, sig in signals.items():
             idx = svc_to_idx[ms_name]
-            np.save(os.path.join(args.out_dir, "original", f"service_{idx:05d}.npy"), sig)
+            out_path = os.path.join(args.out_dir, "original", f"service_{idx:05d}.npy")
+            if not os.path.exists(out_path):
+                np.save(out_path, sig)
+            done_marker = os.path.join(args.out_dir, f"service_{idx:05d}.done")
+            if os.path.exists(done_marker):
+                co_imf_files_exist = all(
+                    os.path.exists(os.path.join(args.out_dir, f"co_imf_{k}", f"service_{idx:05d}.npy"))
+                    for k in range(CFG.N_CLUSTERS)
+                )
+                if co_imf_files_exist:
+                    continue
+                os.remove(done_marker)
             worker_args.append((ms_name, idx))
 
         for ms_name in batch_services:
             if ms_name not in signals:
                 idx = svc_to_idx.get(ms_name, -1)
-                if idx >= 0 and not os.path.exists(
-                    os.path.join(args.out_dir, f"service_{idx:05d}.done")
-                ):
-                    skipped += 1
+                if idx >= 0:
+                    dm = os.path.join(args.out_dir, f"service_{idx:05d}.done")
+                    if not os.path.exists(dm):
+                        skipped += 1
+                    elif not all(
+                        os.path.exists(os.path.join(args.out_dir, f"co_imf_{k}", f"service_{idx:05d}.npy"))
+                        for k in range(CFG.N_CLUSTERS)
+                    ):
+                        os.remove(dm)
+                        skipped += 1
 
         if not worker_args:
-            logging.info("  No valid services in this batch.")
+            logging.info("  Batch %d/%d: no valid services.", batch_idx + 1, n_batches)
             continue
 
         n_submitted = len(worker_args)
-        logging.info("  Submitting %d services to %d workers...", n_submitted, args.num_workers)
+        logging.info("  Batch %d/%d: submitting %d services to %d workers...",
+                     batch_idx + 1, n_batches, n_submitted, args.num_workers)
 
-        idx_in_batch = 0
-        while idx_in_batch < n_submitted:
-            chunk = worker_args[idx_in_batch: idx_in_batch + args.num_workers]
-            procs = []
-            for ms_name, idx in chunk:
-                worker_env = os.environ.copy()
-                worker_env["OMP_NUM_THREADS"] = "1"
-                worker_env["MKL_NUM_THREADS"] = "1"
-                worker_env["OPENBLAS_NUM_THREADS"] = "1"
-                worker_env["VECLIB_MAXIMUM_THREADS"] = "1"
-                worker_env["NUMEXPR_NUM_THREADS"] = "1"
-                worker_env["LOKY_MAX_CPU_COUNT"] = "1"
-                worker_env["JOBLIB_NUM_THREADS"] = "1"
-                procs.append(subprocess.Popen(
-                    [sys.executable, worker_script, ms_name, str(idx), args.out_dir],
-                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                    env=worker_env,
-                ))
+        def _run_worker(ms_name: str, idx: int) -> tuple[int, str, str]:
+            worker_env = os.environ.copy()
+            worker_env["OMP_NUM_THREADS"] = "1"
+            worker_env["MKL_NUM_THREADS"] = "1"
+            worker_env["OPENBLAS_NUM_THREADS"] = "1"
+            worker_env["VECLIB_MAXIMUM_THREADS"] = "1"
+            worker_env["NUMEXPR_NUM_THREADS"] = "1"
+            worker_env["LOKY_MAX_CPU_COUNT"] = "1"
+            worker_env["JOBLIB_NUM_THREADS"] = "1"
+            proc = subprocess.Popen(
+                [sys.executable, worker_script, ms_name, str(idx), args.out_dir],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                env=worker_env,
+            )
+            stdout, stderr = proc.communicate()
+            return proc.returncode, stdout.decode(), stderr.decode()
 
-            for p in procs:
-                stdout, stderr = p.communicate()
-                r_msg = stdout.decode().strip() if stdout else ""
-                r_msg_lines = r_msg.split("\n") if r_msg else []
+        with ThreadPoolExecutor(max_workers=args.num_workers) as executor:
+            fut_to_meta = {
+                executor.submit(_run_worker, ms_name, idx): (ms_name, idx)
+                for ms_name, idx in worker_args
+            }
+
+            for future in as_completed(fut_to_meta):
+                ms_name, idx = fut_to_meta[future]
+                returncode, r_msg, err_msg = future.result()
+                r_msg_lines = r_msg.strip().split("\n") if r_msg else []
 
                 result_line = ""
                 for line in r_msg_lines:
@@ -168,7 +197,7 @@ def main() -> None:
                 elapsed = time.time() - t_start
                 done_count = processed + skipped + 1
 
-                if p.returncode == 0 and result_line:
+                if returncode == 0 and result_line:
                     parts = result_line.split(":", 2)
                     success = parts[1] == "True" if len(parts) >= 2 else True
                     message = parts[2] if len(parts) >= 3 else "ok"
@@ -190,13 +219,18 @@ def main() -> None:
                         )
                 else:
                     skipped += 1
-                    err_msg = stderr.decode().strip()[:200] if stderr else "unknown"
+                    err_msg_short = err_msg.strip()[:200] if err_msg else ""
+                    if not err_msg_short:
+                        for line in r_msg_lines:
+                            if line.startswith("RESULT:False:ERROR:"):
+                                err_msg_short = line.split(":", 2)[-1].strip()[:200]
+                                break
+                    if not err_msg_short:
+                        err_msg_short = "unknown"
                     logging.error(
                         "[%d/%d] Worker crashed (exit=%d): %s",
-                        done_count, total, p.returncode, err_msg,
+                        done_count, total, returncode, err_msg_short,
                     )
-
-            idx_in_batch += len(chunk)
 
         logging.info("  Batch %d/%d done — %d services, %.1fs elapsed.",
                      batch_idx + 1, n_batches, n_submitted,

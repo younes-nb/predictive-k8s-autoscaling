@@ -43,10 +43,16 @@ def main() -> None:
         rec_mae = float(np.mean(np.abs(rec.astype(np.float32) - signal)))
 
         for k, co_imf in enumerate(co_imfs):
-            np.save(
-                os.path.join(out_dir, f"co_imf_{k}", f"service_{idx:05d}.npy"),
-                np.asarray(co_imf, dtype=np.float32),
-            )
+            imf_path = os.path.join(out_dir, f"co_imf_{k}", f"service_{idx:05d}.npy")
+            for attempt in range(3):
+                try:
+                    np.save(imf_path, np.asarray(co_imf, dtype=np.float32))
+                    break
+                except OSError as e:
+                    if attempt == 2 or "Read-only" not in str(e):
+                        raise
+                    import time
+                    time.sleep(5 * (attempt + 1))
 
         with open(os.path.join(out_dir, f"service_{idx:05d}.meta.txt"), "w") as f:
             f.write(f"{ms_name}\n")
