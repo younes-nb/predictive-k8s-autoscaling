@@ -3,28 +3,12 @@ import argparse
 import glob
 import logging
 import os
-from typing import Tuple
 
 import numpy as np
 import torch
 from torch.utils.data import Dataset
 
 logger = logging.getLogger(__name__)
-
-def build_windows(
-    signal: np.ndarray, input_len: int, stride: int = 1, pred_horizon: int = 1
-) -> Tuple[np.ndarray, np.ndarray]:
-
-    T = len(signal) - input_len - pred_horizon + 1
-    if T <= 0:
-        return (
-            np.empty((0, input_len), dtype=np.float32),
-            np.empty((0, pred_horizon), dtype=np.float32),
-        )
-    indices = np.arange(0, T, stride)
-    X = np.stack([signal[i: i + input_len] for i in indices]).astype(np.float32)
-    y = np.stack([signal[i + input_len: i + input_len + pred_horizon] for i in indices]).astype(np.float32)
-    return X, y
 
 class CoImfDataset(Dataset):
 
@@ -43,6 +27,7 @@ class CoImfDataset(Dataset):
         self.split = split
 
         co_imf_dir = os.path.join(preprocess_dir, f"co_imf_{co_imf_index}")
+        original_dir = os.path.join(preprocess_dir, "original")
         service_files = sorted(glob.glob(os.path.join(co_imf_dir, "service_*.npy")))
 
         if not service_files:
@@ -51,36 +36,57 @@ class CoImfDataset(Dataset):
                 "Run preprocess_services.py first."
             )
 
-        all_X, all_y = [], []
+        all_X, all_y, all_last = [], [], []
 
         for sf in service_files:
             try:
-                signal = np.load(sf).astype(np.float64)
+                co_imf_windows = np.load(sf).astype(np.float64)
             except (EOFError, ValueError) as e:
                 logger.warning("Skipping corrupted file %s: %s", sf, e)
                 continue
-            N = len(signal)
 
-            if N < input_len + pred_horizon + test_size:
+            num_windows = co_imf_windows.shape[0]
+            if num_windows <= test_size:
                 continue
 
-            test_start = N - test_size
-            train_end = test_start - max(1, int((N - test_size) * val_frac))
+            base = os.path.basename(sf)
+            svc_idx = int(base.replace("service_", "").replace(".npy", ""))
+            orig_path = os.path.join(original_dir, f"service_{svc_idx:05d}.npy")
+            if not os.path.exists(orig_path):
+                logger.warning("Original signal not found: %s", orig_path)
+                continue
+            try:
+                original = np.load(orig_path).astype(np.float64)
+            except (EOFError, ValueError) as e:
+                logger.warning("Skipping corrupted original %s: %s", orig_path, e)
+                continue
+
+            test_start = num_windows - test_size
+            train_end = test_start - max(1, int((num_windows - test_size) * val_frac))
 
             if split == "train":
-                seg = signal[:train_end]
+                w_start, w_end = 0, train_end
             elif split == "val":
-                seg = signal[train_end:test_start]
+                w_start, w_end = train_end, test_start
             else:
-                seg = signal[test_start:]
+                w_start, w_end = test_start, num_windows
 
-            if len(seg) < input_len + pred_horizon:
+            if w_start >= w_end:
                 continue
 
-            X, y = build_windows(seg.astype(np.float32), input_len, stride, pred_horizon)
-            if len(X) > 0:
-                all_X.append(X)
-                all_y.append(y)
+            # Each Co-IMF window corresponds to a sliding window of the original signal.
+            # Target y = next PRED_HORIZON values of the original signal after the window.
+            # last_val = last observed value in the window (used for persistence baseline).
+            for j in range(w_start, w_end):
+                pos = j * stride
+                if pos + input_len + pred_horizon > len(original):
+                    continue
+                X = co_imf_windows[j]
+                y = original[pos + input_len : pos + input_len + pred_horizon]
+                last_val = original[pos + input_len - 1]
+                all_X.append(X.astype(np.float32))
+                all_y.append(y.astype(np.float32))
+                all_last.append(last_val.astype(np.float32))
 
         if not all_X:
             logger.warning(
@@ -89,9 +95,11 @@ class CoImfDataset(Dataset):
             )
             self.X = torch.empty((0, input_len, 1), dtype=torch.float32)
             self.y = torch.empty((0, pred_horizon), dtype=torch.float32)
+            self.last = torch.empty((0,), dtype=torch.float32)
         else:
-            self.X = torch.from_numpy(np.concatenate(all_X, axis=0)).unsqueeze(-1)
-            self.y = torch.from_numpy(np.concatenate(all_y, axis=0))
+            self.X = torch.from_numpy(np.stack(all_X, axis=0)).unsqueeze(-1)
+            self.y = torch.from_numpy(np.stack(all_y, axis=0))
+            self.last = torch.from_numpy(np.stack(all_last, axis=0))
 
         logger.info(
             "CoImfDataset[co_imf_%d/%s]: %d windows from %d service files",
@@ -102,7 +110,7 @@ class CoImfDataset(Dataset):
         return len(self.X)
 
     def __getitem__(self, idx: int):
-        return self.X[idx], self.y[idx], self.X[idx, -1, 0]
+        return self.X[idx], self.y[idx], self.last[idx]
 
 def _smoke_check(preprocess_dir: str, co_imf_index: int, split: str) -> None:
     from experiments.cvcbm.config import CFG

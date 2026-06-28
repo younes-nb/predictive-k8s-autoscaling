@@ -60,7 +60,7 @@ def _load_batch_signals(
     for key, group in df.group_by("msname", maintain_order=True):
         ms_name = key[0] if isinstance(key, tuple) else key
         sig = group["cpu_utilization"].to_numpy().astype(np.float32)
-        if len(sig) >= CFG.MIN_SIGNAL_LEN:
+        if len(sig) >= CFG.INPUT_LEN + CFG.PRED_HORIZON:
             signals[ms_name] = sig
     return signals
 
@@ -71,11 +71,15 @@ def main() -> None:
     ap.add_argument("--msresource_dir", default=PATHS.PARQUET_MSRESOURCE)
     ap.add_argument("--out_dir", default="/dataset/cvcbm_preprocess")
     ap.add_argument("--max_services", type=int, default=0, help="Max services (0 = all)")
-    ap.add_argument("--num_workers", type=int, default=80,
-                    help="Parallel worker count (default: 80)")
+    ap.add_argument("--num_workers", type=float, default=0.9,
+                    help="Fraction of CPU cores to use (default: 0.9)")
     ap.add_argument("--batch_size", type=int, default=512,
                     help="Services per batch (default: 512). Load this many from parquet at once.")
     args = ap.parse_args()
+
+    # Compute worker count as a fraction of available CPU cores (default 90%).
+    n_cpus = os.cpu_count() or 1
+    num_workers = max(1, int(n_cpus * args.num_workers))
 
     setup_logging(args.out_dir)
     for k in range(CFG.N_CLUSTERS):
@@ -94,11 +98,11 @@ def main() -> None:
 
     services = all_services[:args.max_services] if args.max_services else all_services
     total = len(services)
-    batch_size = args.batch_size if args.batch_size > 0 else args.num_workers
+    batch_size = args.batch_size if args.batch_size > 0 else num_workers
     n_batches = (total + batch_size - 1) // batch_size
 
     logging.info("Services: %d | Workers: %d | Batch: %d | Batches: %d",
-                 total, args.num_workers, batch_size, n_batches)
+                 total, num_workers, batch_size, n_batches)
 
     svc_to_idx = {name: i for i, name in enumerate(services)}
     worker_script = os.path.join(THIS_DIR, "_decompose_worker.py")
@@ -126,7 +130,7 @@ def main() -> None:
             path = os.path.join(args.out_dir, "original", f"service_{idx:05d}.npy")
             if os.path.exists(path):
                 sig = np.load(path).astype(np.float32)
-                if len(sig) >= CFG.MIN_SIGNAL_LEN:
+                if len(sig) >= CFG.INPUT_LEN + CFG.PRED_HORIZON:
                     signals[ms_name] = sig
 
         worker_args = []
@@ -166,7 +170,7 @@ def main() -> None:
 
         n_submitted = len(worker_args)
         logging.info("  Batch %d/%d: submitting %d services to %d workers...",
-                     batch_idx + 1, n_batches, n_submitted, args.num_workers)
+                     batch_idx + 1, n_batches, n_submitted, num_workers)
 
         def _run_worker(ms_name: str, idx: int) -> tuple[int, str, str, float]:
             worker_env = os.environ.copy()
@@ -187,7 +191,7 @@ def main() -> None:
             duration = time.time() - t0
             return proc.returncode, stdout.decode(), stderr.decode(), duration
 
-        with ThreadPoolExecutor(max_workers=args.num_workers) as executor:
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
             fut_to_meta = {
                 executor.submit(_run_worker, ms_name, idx): (ms_name, idx)
                 for ms_name, idx in worker_args

@@ -37,6 +37,5 @@ class CvcbmConfig:
     TEST_SIZE: int = 500
     VAL_FRAC: float = 0.10
     STRIDE: int = 1
-    MIN_SIGNAL_LEN: int = 600
 
 CFG = CvcbmConfig()

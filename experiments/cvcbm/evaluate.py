@@ -123,9 +123,12 @@ def main() -> None:
         logging.error("Zero aligned test samples. Exiting.")
         sys.exit(1)
 
-    summed_preds = sum(component_preds[k][:n] for k in range(CFG.N_CLUSTERS))
-    summed_true = sum(component_true[k][:n] for k in range(CFG.N_CLUSTERS))
-    y_last = sum(component_last[k][:n] for k in range(CFG.N_CLUSTERS))
+    # With windowed decomposition, each Co-IMF model predicts the full original signal's next value.
+    # Average predictions across components rather than summing them.
+    # All Co-IMFs share the same target (original signal value), so component_true[0] suffices.
+    summed_preds = sum(component_preds[k][:n] for k in range(CFG.N_CLUSTERS)) / CFG.N_CLUSTERS
+    summed_true = component_true[0][:n]
+    y_last = component_last[0][:n]
 
     mae = float(np.mean(np.abs(summed_preds - summed_true)))
     mse = float(np.mean((summed_preds - summed_true) ** 2))

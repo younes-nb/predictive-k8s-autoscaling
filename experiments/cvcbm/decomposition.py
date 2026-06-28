@@ -186,10 +186,12 @@ def decompose_service_signal(signal: np.ndarray, cfg) -> List[np.ndarray]:
 
     signal = np.asarray(signal, dtype=np.float64)
 
-    if len(signal) < cfg.MIN_SIGNAL_LEN:
+    # Guard against signals shorter than the window size (INPUT_LEN).
+    # Decomposition is done per sliding window, so individual windows must be at least INPUT_LEN.
+    if len(signal) < cfg.INPUT_LEN:
         logger.warning(
             "Signal too short (%d < %d); returning trivial decomposition.",
-            len(signal), cfg.MIN_SIGNAL_LEN,
+            len(signal), cfg.INPUT_LEN,
         )
         zeros = np.zeros_like(signal)
         return [signal.astype(np.float32), zeros.astype(np.float32), zeros.astype(np.float32)]

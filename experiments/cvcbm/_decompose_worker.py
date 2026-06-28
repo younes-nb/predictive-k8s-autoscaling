@@ -2,6 +2,8 @@
 import os
 import sys
 
+import numpy as np
+
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, "..", ".."))
 if REPO_ROOT not in sys.path:
@@ -9,7 +11,6 @@ if REPO_ROOT not in sys.path:
 
 from experiments.cvcbm.config import CFG
 from experiments.cvcbm.decomposition import decompose_service_signal
-import numpy as np
 
 def main() -> None:
     ms_name = sys.argv[1]
@@ -33,26 +34,41 @@ def main() -> None:
             os.path.join(out_dir, "original", f"service_{idx:05d}.npy")
         ).astype(np.float32)
 
-        if len(signal) < CFG.MIN_SIGNAL_LEN:
+        # Split signal into sliding windows of INPUT_LEN; each window is decomposed independently.
+        # T = number of valid starting positions for which a target (next value) also exists.
+        T = len(signal) - CFG.INPUT_LEN - CFG.PRED_HORIZON + 1
+        if T <= 0:
             print(f"RESULT:True:too short ({len(signal)})")
             sys.exit(0)
 
-        co_imfs = decompose_service_signal(signal.astype(np.float64), CFG)
+        window_imfs = [[] for _ in range(CFG.N_CLUSTERS)]
+        windows = []
+        for i in range(0, T, CFG.STRIDE):
+            window = signal[i : i + CFG.INPUT_LEN]
+            windows.append(window)
+            co_imfs = decompose_service_signal(window.astype(np.float64), CFG)
+            for k in range(CFG.N_CLUSTERS):
+                window_imfs[k].append(np.asarray(co_imfs[k], dtype=np.float32))
 
-        rec = np.sum([np.asarray(c) for c in co_imfs], axis=0)
-        rec_mae = float(np.mean(np.abs(rec.astype(np.float32) - signal)))
-
-        for k, co_imf in enumerate(co_imfs):
+        # Save each Co-IMF as a single (num_windows, INPUT_LEN) array per service.
+        windows_arr = np.stack(windows, axis=0)
+        stacked = []
+        for k in range(CFG.N_CLUSTERS):
+            arr = np.stack(window_imfs[k], axis=0)
+            stacked.append(arr)
             imf_path = os.path.join(out_dir, f"co_imf_{k}", f"service_{idx:05d}.npy")
             for attempt in range(3):
                 try:
-                    np.save(imf_path, np.asarray(co_imf, dtype=np.float32))
+                    np.save(imf_path, arr)
                     break
                 except OSError as e:
                     if attempt == 2 or "Read-only" not in str(e):
                         raise
                     import time
                     time.sleep(5 * (attempt + 1))
+
+        total_rec = sum(stacked)
+        rec_mae = float(np.mean(np.abs(total_rec - windows_arr)))
 
         with open(os.path.join(out_dir, f"service_{idx:05d}.meta.txt"), "w") as f:
             f.write(f"{ms_name}\n")
