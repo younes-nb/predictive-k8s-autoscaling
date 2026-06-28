@@ -105,8 +105,8 @@ def main() -> None:
         test_ds = CoImfDataset(
             args.preprocess_dir, k, "test",
             input_len=CFG.INPUT_LEN, pred_horizon=CFG.PRED_HORIZON,
-            stride=1,
-            test_size=CFG.TEST_SIZE, val_frac=CFG.VAL_FRAC,
+            stride=CFG.STRIDE,
+            train_frac=CFG.TRAIN_FRAC, val_frac=CFG.VAL_FRAC,
         )
         if len(test_ds) == 0:
             logging.error("Empty test dataset for co_imf_%d. Cannot evaluate.", k)

@@ -96,13 +96,29 @@ def main() -> None:
     )
     all_services.sort()
 
-    services = all_services[:args.max_services] if args.max_services else all_services
+    # Load all signals from parquet once upfront (avoids re-scanning per batch).
+    # Also filters out signals shorter than INPUT_LEN + PRED_HORIZON.
+    logging.info("Loading all signals from parquet (single pass)...")
+    t_load = time.time()
+    all_signals = _load_batch_signals(args.msresource_dir, all_services)
+    logging.info("Loaded %d valid signals from parquet in %.1fs",
+                 len(all_signals), time.time() - t_load)
+
+    # Build services list from valid signals; if max_services is set,
+    # take the first N valid ones (skips past any that are too short).
+    services = sorted(all_signals.keys())
+    if args.max_services:
+        services = services[:args.max_services]
+        all_signals = {ms: all_signals[ms] for ms in services}
+
     total = len(services)
     batch_size = args.batch_size if args.batch_size > 0 else num_workers
     n_batches = (total + batch_size - 1) // batch_size
 
     logging.info("Services: %d | Workers: %d | Batch: %d | Batches: %d",
                  total, num_workers, batch_size, n_batches)
+    if args.max_services and total < args.max_services:
+        logging.warning("Only %d valid services found (requested %d)", total, args.max_services)
 
     svc_to_idx = {name: i for i, name in enumerate(services)}
     worker_script = os.path.join(THIS_DIR, "_decompose_worker.py")
@@ -126,12 +142,17 @@ def main() -> None:
 
         signals = {}
         for ms_name in batch_services:
+            # Prefer cached original file if it exists (resume path)
             idx = svc_to_idx[ms_name]
             path = os.path.join(args.out_dir, "original", f"service_{idx:05d}.npy")
             if os.path.exists(path):
                 sig = np.load(path).astype(np.float32)
                 if len(sig) >= CFG.INPUT_LEN + CFG.PRED_HORIZON:
                     signals[ms_name] = sig
+                    continue
+            # Fall back to pre-loaded parquet signal
+            if ms_name in all_signals:
+                signals[ms_name] = all_signals[ms_name]
 
         worker_args = []
         for ms_name, sig in signals.items():
@@ -197,6 +218,10 @@ def main() -> None:
                 for ms_name, idx in worker_args
             }
 
+            batch_done = 0
+            batch_start_t = time.time()
+            log_every = max(1, n_submitted // 10)
+
             for future in as_completed(fut_to_meta):
                 ms_name, idx = fut_to_meta[future]
                 returncode, r_msg, err_msg, duration = future.result()
@@ -221,18 +246,19 @@ def main() -> None:
                             skipped += 1
                         else:
                             processed += 1
-                        logging.info(
-                            "ok (%d done, batch %d/%d, %.1fs)",
-                            done_count, batch_idx + 1, n_batches, duration,
-                        )
+                            batch_ok += 1
+                        batch_done += 1
                     else:
                         skipped += 1
+                        batch_done += 1
                         logging.error(
-                            "ERROR — %s",
-                            message,
+                            "  [%s] ERROR — %s",
+                            ms_name, message,
                         )
+                        continue
                 else:
                     skipped += 1
+                    batch_done += 1
                     err_msg_short = err_msg.strip()[:200] if err_msg else ""
                     if not err_msg_short:
                         for line in r_msg_lines:
@@ -242,13 +268,40 @@ def main() -> None:
                     if not err_msg_short:
                         err_msg_short = "unknown"
                     logging.error(
-                        "Worker crashed (exit=%d): %s",
-                        returncode, err_msg_short,
+                        "  [%s] CRASHED (exit=%d): %s",
+                        ms_name, returncode, err_msg_short,
+                    )
+                    continue
+
+                # Show per-service completion with name and timing
+                pct = f" ({done_count*100//total}%)" if total else ""
+                logging.info(
+                    "  [%s] done (%d/%d%s, batch %d/%d, %.1fs)",
+                    ms_name, done_count, total, pct,
+                    batch_idx + 1, n_batches, duration,
+                )
+
+                # Periodic batch-level progress with ETA
+                if batch_done % log_every == 0 or batch_done == n_submitted:
+                    elapsed_batch = time.time() - batch_start_t
+                    rate = batch_done / elapsed_batch if elapsed_batch > 0 else 0
+                    remaining = n_submitted - batch_done
+                    eta = remaining / rate if rate > 0 else 0
+                    total_elapsed = time.time() - t_start
+                    total_rate = done_count / total_elapsed if total_elapsed > 0 else 0
+                    total_remaining = total - done_count
+                    total_eta = total_remaining / total_rate if total_rate > 0 else 0
+                    logging.info(
+                        "  batch %d/%d: %d/%d services, %.1f/s, batch ETA=%.0fs, overall ETA=%.0fs",
+                        batch_idx + 1, n_batches, batch_done, n_submitted,
+                        rate, eta, total_eta,
                     )
 
-        logging.info("  Batch %d/%d done — %d services, %.1fs elapsed.",
+        batch_elapsed = time.time() - batch_start_t
+        logging.info("  Batch %d/%d done — %d services (%.1f/s), %.1fs elapsed, %.0fs total.",
                      batch_idx + 1, n_batches, n_submitted,
-                     time.time() - t_start)
+                     n_submitted / batch_elapsed if batch_elapsed > 0 else 0,
+                     batch_elapsed, time.time() - t_start)
 
     elapsed = time.time() - t_start
     logging.info(

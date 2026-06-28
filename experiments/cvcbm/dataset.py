@@ -20,7 +20,7 @@ class CoImfDataset(Dataset):
         input_len: int = 30,
         pred_horizon: int = 1,
         stride: int = 1,
-        test_size: int = 500,
+        train_frac: float = 0.70,
         val_frac: float = 0.10,
     ):
         assert split in ("train", "val", "test"), f"Unknown split: {split}"
@@ -46,7 +46,10 @@ class CoImfDataset(Dataset):
                 continue
 
             num_windows = co_imf_windows.shape[0]
-            if num_windows <= test_size:
+            idx_tr = int(num_windows * train_frac)
+            idx_val = int(num_windows * (train_frac + val_frac))
+
+            if idx_tr == 0 or idx_tr >= idx_val or idx_val >= num_windows:
                 continue
 
             base = os.path.basename(sf)
@@ -61,15 +64,12 @@ class CoImfDataset(Dataset):
                 logger.warning("Skipping corrupted original %s: %s", orig_path, e)
                 continue
 
-            test_start = num_windows - test_size
-            train_end = test_start - max(1, int((num_windows - test_size) * val_frac))
-
             if split == "train":
-                w_start, w_end = 0, train_end
+                w_start, w_end = 0, idx_tr
             elif split == "val":
-                w_start, w_end = train_end, test_start
+                w_start, w_end = idx_tr, idx_val
             else:
-                w_start, w_end = test_start, num_windows
+                w_start, w_end = idx_val, num_windows
 
             if w_start >= w_end:
                 continue
@@ -122,7 +122,7 @@ def _smoke_check(preprocess_dir: str, co_imf_index: int, split: str) -> None:
         input_len=CFG.INPUT_LEN,
         pred_horizon=CFG.PRED_HORIZON,
         stride=CFG.STRIDE,
-        test_size=CFG.TEST_SIZE,
+        train_frac=CFG.TRAIN_FRAC,
         val_frac=CFG.VAL_FRAC,
     )
     assert len(ds) > 0, "Dataset has no windows"

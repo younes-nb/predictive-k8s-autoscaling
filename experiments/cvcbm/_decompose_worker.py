@@ -1,6 +1,7 @@
 
 import os
 import sys
+import time as _time
 
 import numpy as np
 
@@ -12,10 +13,14 @@ if REPO_ROOT not in sys.path:
 from experiments.cvcbm.config import CFG
 from experiments.cvcbm.decomposition import decompose_service_signal
 
+def _log(msg: str) -> None:
+    print(msg, file=sys.stderr, flush=True)
+
 def main() -> None:
     ms_name = sys.argv[1]
     idx = int(sys.argv[2])
     out_dir = sys.argv[3]
+    _t0 = _time.time()
 
     done_marker = os.path.join(out_dir, f"service_{idx:05d}.done")
     if os.path.exists(done_marker):
@@ -41,9 +46,19 @@ def main() -> None:
             print(f"RESULT:True:too short ({len(signal)})")
             sys.exit(0)
 
+        n_windows = len(range(0, T, CFG.STRIDE))
+        _log(f"[{ms_name}] {len(signal)} steps, {n_windows} windows, "
+             f"INPUT_LEN={CFG.INPUT_LEN}, STRIDE={CFG.STRIDE}")
+
         window_imfs = [[] for _ in range(CFG.N_CLUSTERS)]
         windows = []
-        for i in range(0, T, CFG.STRIDE):
+        _last_pct = 0
+        for wi, i in enumerate(range(0, T, CFG.STRIDE)):
+            pct = (wi + 1) * 100 // n_windows
+            if pct >= _last_pct + 10:
+                _last_pct = pct - (pct % 10)
+                _log(f"[{ms_name}] {_last_pct}% ({wi+1}/{n_windows}, {_time.time()-_t0:.0f}s)")
+
             window = signal[i : i + CFG.INPUT_LEN]
             windows.append(window)
             co_imfs = decompose_service_signal(window.astype(np.float64), CFG)
@@ -64,8 +79,7 @@ def main() -> None:
                 except OSError as e:
                     if attempt == 2 or "Read-only" not in str(e):
                         raise
-                    import time
-                    time.sleep(5 * (attempt + 1))
+                    _time.sleep(5 * (attempt + 1))
 
         total_rec = sum(stacked)
         rec_mae = float(np.mean(np.abs(total_rec - windows_arr)))
@@ -74,6 +88,8 @@ def main() -> None:
             f.write(f"{ms_name}\n")
 
         open(done_marker, "a").close()
+        _elapsed = _time.time() - _t0
+        _log(f"[{ms_name}] 100% ({n_windows}/{n_windows}, {_elapsed:.0f}s)")
         print(f"RESULT:True:ok (MAE={rec_mae:.8f})")
         sys.exit(0)
 

@@ -80,13 +80,13 @@ def train_one_co_imf(co_imf_index: int, args) -> None:
         args.preprocess_dir, co_imf_index, "train",
         input_len=CFG.INPUT_LEN, pred_horizon=CFG.PRED_HORIZON,
         stride=CFG.STRIDE,
-        test_size=CFG.TEST_SIZE, val_frac=CFG.VAL_FRAC,
+        train_frac=CFG.TRAIN_FRAC, val_frac=CFG.VAL_FRAC,
     )
     val_ds = CoImfDataset(
         args.preprocess_dir, co_imf_index, "val",
         input_len=CFG.INPUT_LEN, pred_horizon=CFG.PRED_HORIZON,
         stride=CFG.STRIDE,
-        test_size=CFG.TEST_SIZE, val_frac=CFG.VAL_FRAC,
+        train_frac=CFG.TRAIN_FRAC, val_frac=CFG.VAL_FRAC,
     )
 
     if len(train_ds) == 0:
