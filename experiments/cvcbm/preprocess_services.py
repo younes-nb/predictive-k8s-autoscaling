@@ -1,5 +1,6 @@
 
 import argparse
+import json
 import logging
 import os
 import subprocess
@@ -86,23 +87,102 @@ def main() -> None:
         os.makedirs(os.path.join(args.out_dir, f"co_imf_{k}"), exist_ok=True)
     os.makedirs(os.path.join(args.out_dir, "original"), exist_ok=True)
 
-    logging.info("Loading service list from: %s", args.msresource_dir)
-    all_services = (
-        pl.scan_parquet(os.path.join(args.msresource_dir, "*.parquet"))
-        .select("msname").unique()
-        .collect(engine="streaming")
-        .to_series()
-        .to_list()
-    )
-    all_services.sort()
+    # --- Service list ---
+    # Reuse a persistent service name index to avoid re-scanning 112 GB of parquet.
+    svc_names_path = os.path.join(args.out_dir, "_service_names.npy")
+    if os.path.exists(svc_names_path):
+        all_services = np.load(svc_names_path, allow_pickle=True).tolist()
+        logging.info("Loaded %d service names from index: %s", len(all_services), svc_names_path)
+    else:
+        logging.info("Scanning parquet for service names (one-time index creation)...")
+        t0 = time.time()
+        all_services = (
+            pl.scan_parquet(os.path.join(args.msresource_dir, "*.parquet"))
+            .select("msname").unique()
+            .collect(engine="streaming")
+            .to_series()
+            .to_list()
+        )
+        all_services.sort()
+        np.save(svc_names_path, np.array(all_services, dtype=object))
+        logging.info("Found %d unique services and saved index in %.1fs",
+                     len(all_services), time.time() - t0)
 
-    # Load all signals from parquet once upfront (avoids re-scanning per batch).
-    # Also filters out signals shorter than INPUT_LEN + PRED_HORIZON.
-    logging.info("Loading all signals from parquet (single pass)...")
+    # On reruns, load the previous service-to-index mapping so we can
+    # look up cached original/ files by service name.
+    svc_to_idx_path = os.path.join(args.out_dir, "_svc_to_idx.json")
+    prev_svc_to_idx: dict[str, int] = {}
+    if os.path.exists(svc_to_idx_path):
+        with open(svc_to_idx_path) as f:
+            prev_svc_to_idx = json.load(f)
+        logging.info("Loaded previous index mapping with %d entries", len(prev_svc_to_idx))
+    else:
+        # Fallback: reconstruct from .meta files left by a previous run.
+        meta_dir = args.out_dir
+        meta_files = sorted(
+            f for f in os.listdir(meta_dir)
+            if f.endswith(".meta.txt") and f.startswith("service_")
+        )
+        if meta_files:
+            for fname in meta_files:
+                meta_path = os.path.join(meta_dir, fname)
+                try:
+                    with open(meta_path) as f:
+                        ms_name = f.read().strip()
+                    idx_str = fname.replace("service_", "").replace(".meta.txt", "")
+                    prev_svc_to_idx[ms_name] = int(idx_str)
+                except Exception:
+                    pass
+            if prev_svc_to_idx:
+                logging.info("Reconstructed index mapping from %d meta files",
+                             len(prev_svc_to_idx))
+
     t_load = time.time()
-    all_signals = _load_batch_signals(args.msresource_dir, all_services)
-    logging.info("Loaded %d valid signals from parquet in %.1fs",
-                 len(all_signals), time.time() - t_load)
+    all_signals: dict[str, np.ndarray] = {}
+
+    # First, try to fill from cached files — avoids any parquet access on reruns.
+    need = args.max_services or len(all_services)
+    for ms_name in all_services:
+        if len(all_signals) >= need:
+            break
+        idx = prev_svc_to_idx.get(ms_name)
+        if idx is None:
+            continue
+        path = os.path.join(args.out_dir, "original", f"service_{idx:05d}.npy")
+        if not os.path.exists(path):
+            continue
+        try:
+            sig = np.load(path).astype(np.float32)
+            if len(sig) >= CFG.INPUT_LEN + CFG.PRED_HORIZON:
+                all_signals[ms_name] = sig
+        except Exception:
+            pass
+
+    if len(all_signals) >= need:
+        logging.info("Filled %d/%d services from cache (%.1fs) — skipping parquet",
+                     len(all_signals), need, time.time() - t_load)
+    else:
+        logging.info("Cache provided %d/%d services, loading remaining from parquet...",
+                     len(all_signals), need)
+        # Load remaining signals from parquet in chunks.
+        remaining = [ms for ms in all_services if ms not in all_signals]
+        batch_size_parquet = 2000
+        for chunk_start in range(0, len(remaining), batch_size_parquet):
+            chunk = remaining[chunk_start:chunk_start + batch_size_parquet]
+            chunk_signals = _load_batch_signals(args.msresource_dir, chunk)
+            for ms_name, sig in chunk_signals.items():
+                if ms_name not in all_signals:
+                    all_signals[ms_name] = sig
+                    if len(all_signals) >= need:
+                        break
+            elapsed = time.time() - t_load
+            logging.info("Loaded %d / %d needed signals (%.1fs, chunk %d)",
+                         len(all_signals), need, elapsed,
+                         chunk_start // batch_size_parquet + 1)
+            if len(all_signals) >= need:
+                break
+
+    logging.info("Total valid signals: %d (%.1fs)", len(all_signals), time.time() - t_load)
 
     # Build services list from valid signals; if max_services is set,
     # take the first N valid ones (skips past any that are too short).
@@ -121,6 +201,8 @@ def main() -> None:
         logging.warning("Only %d valid services found (requested %d)", total, args.max_services)
 
     svc_to_idx = {name: i for i, name in enumerate(services)}
+    with open(svc_to_idx_path, "w") as f:
+        json.dump(svc_to_idx, f)
     worker_script = os.path.join(THIS_DIR, "_decompose_worker.py")
     processed = 0
     skipped = 0
@@ -142,7 +224,6 @@ def main() -> None:
 
         signals = {}
         for ms_name in batch_services:
-            # Prefer cached original file if it exists (resume path)
             idx = svc_to_idx[ms_name]
             path = os.path.join(args.out_dir, "original", f"service_{idx:05d}.npy")
             if os.path.exists(path):
@@ -150,7 +231,6 @@ def main() -> None:
                 if len(sig) >= CFG.INPUT_LEN + CFG.PRED_HORIZON:
                     signals[ms_name] = sig
                     continue
-            # Fall back to pre-loaded parquet signal
             if ms_name in all_signals:
                 signals[ms_name] = all_signals[ms_name]
 
@@ -246,7 +326,6 @@ def main() -> None:
                             skipped += 1
                         else:
                             processed += 1
-                            batch_ok += 1
                         batch_done += 1
                     else:
                         skipped += 1
