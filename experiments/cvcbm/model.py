@@ -17,8 +17,9 @@ class CvcbmModel(nn.Module):
 
     def __init__(
         self,
-        input_len: int = 30,
-        pred_horizon: int = 1,
+        in_channels: int = 7,
+        input_len: int = 60,
+        pred_horizon: int = 5,
         kernel_sizes: tuple = (2, 4, 8),
         conv1_out_ch: int = 32,
         conv2_out_ch: int = 64,
@@ -30,7 +31,7 @@ class CvcbmModel(nn.Module):
 
         self.conv_set1 = nn.ModuleList([
             nn.Sequential(
-                nn.Conv1d(1, conv1_out_ch, ks, padding="same"),
+                nn.Conv1d(in_channels, conv1_out_ch, ks, padding="same"),
                 nn.ReLU(),
             )
             for ks in kernel_sizes
@@ -75,7 +76,9 @@ class CvcbmModel(nn.Module):
 if __name__ == "__main__":
     from experiments.cvcbm.config import CFG
 
+    total_channels = CFG.VMD_K + 2
     model = CvcbmModel(
+        in_channels=total_channels,
         input_len=CFG.INPUT_LEN,
         pred_horizon=CFG.PRED_HORIZON,
         kernel_sizes=CFG.KERNEL_SIZES,
@@ -83,7 +86,7 @@ if __name__ == "__main__":
         conv2_out_ch=CFG.CONV2_OUT_CH,
         bilstm_hidden=CFG.BILSTM_HIDDEN,
     )
-    x = torch.randn(4, CFG.INPUT_LEN, 1)
+    x = torch.randn(4, CFG.INPUT_LEN, total_channels)
     out = model(x)
     assert out.shape == (4, CFG.PRED_HORIZON), f"Expected (4, {CFG.PRED_HORIZON}), got {tuple(out.shape)}"
     print(f"Output shape: {tuple(out.shape)}")

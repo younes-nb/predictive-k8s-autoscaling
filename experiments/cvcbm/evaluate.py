@@ -14,9 +14,10 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from experiments.cvcbm.config import CFG
-from experiments.cvcbm.dataset import CoImfDataset
+from experiments.cvcbm.dataset import CvcbmDataset
 from experiments.cvcbm.model import CvcbmModel
 from training.metrics import compute_metrics
+
 
 def setup_logging(out_dir: str) -> str:
     os.makedirs(out_dir, exist_ok=True)
@@ -31,10 +32,13 @@ def setup_logging(out_dir: str) -> str:
     )
     return log_path
 
+
 def load_cvcbm_model(ckpt_path: str, device: torch.device) -> CvcbmModel:
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
     saved_cfg = ckpt.get("cfg", {})
+    total_channels = ckpt.get("total_channels", CFG.VMD_K + 2)
     model = CvcbmModel(
+        in_channels=total_channels,
         input_len=saved_cfg.get("input_len", CFG.INPUT_LEN),
         pred_horizon=saved_cfg.get("pred_horizon", CFG.PRED_HORIZON),
         kernel_sizes=saved_cfg.get("kernel_sizes", CFG.KERNEL_SIZES),
@@ -46,16 +50,15 @@ def load_cvcbm_model(ckpt_path: str, device: torch.device) -> CvcbmModel:
     model.eval()
     return model
 
-def predict_component(
+
+def predict(
     model: CvcbmModel,
-    dataset: CoImfDataset,
+    dataset: CvcbmDataset,
     device: torch.device,
     batch_size: int = 512,
 ):
-
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
     preds_list, true_list, last_list = [], [], []
-    pred_horizon = dataset.y.shape[1]
 
     with torch.no_grad():
         for x, y, last in loader:
@@ -70,9 +73,10 @@ def predict_component(
         np.concatenate(last_list),
     )
 
+
 def main() -> None:
     ap = argparse.ArgumentParser(
-        description="Evaluate CVCBM models with shadowing diagnostics."
+        description="Evaluate CVCBM model (no averaging across components)."
     )
     ap.add_argument("--preprocess_dir", default="/dataset/cvcbm_preprocess",
                     help="Co-IMF directory (default: /dataset/cvcbm_preprocess)")
@@ -88,86 +92,57 @@ def main() -> None:
     )
     logging.info("Evaluating CVCBM on %s", device)
 
-    models = {}
-    for k in range(CFG.N_CLUSTERS):
-        ckpt = os.path.join(args.model_dir, f"cvcbm_co_imf_{k}.pt")
-        if not os.path.exists(ckpt):
-            logging.error("Checkpoint not found: %s — train this model first.", ckpt)
-            sys.exit(1)
-        models[k] = load_cvcbm_model(ckpt, device)
-        logging.info("Loaded Co-IMF-%d model from %s", k, ckpt)
-
-    component_preds = {}
-    component_true = {}
-    component_last = {}
-
-    for k in range(CFG.N_CLUSTERS):
-        test_ds = CoImfDataset(
-            args.preprocess_dir, k, "test",
-            input_len=CFG.INPUT_LEN, pred_horizon=CFG.PRED_HORIZON,
-            stride=CFG.STRIDE,
-            train_frac=CFG.TRAIN_FRAC, val_frac=CFG.VAL_FRAC,
-        )
-        if len(test_ds) == 0:
-            logging.error("Empty test dataset for co_imf_%d. Cannot evaluate.", k)
-            sys.exit(1)
-
-        preds, trues, lasts = predict_component(models[k], test_ds, device, args.batch_size)
-        component_preds[k] = preds
-        component_true[k] = trues
-        component_last[k] = lasts
-        logging.info("Co-IMF-%d: %d test windows", k, len(preds))
-
-    n = min(len(v) for v in component_preds.values())
-    if n == 0:
-        logging.error("Zero aligned test samples. Exiting.")
+    ckpt = os.path.join(args.model_dir, "cvcbm.pt")
+    if not os.path.exists(ckpt):
+        logging.error("Checkpoint not found: %s — train the model first.", ckpt)
         sys.exit(1)
 
-    # With windowed decomposition, each Co-IMF model predicts the full original signal's next value.
-    # Average predictions across components rather than summing them.
-    # All Co-IMFs share the same target (original signal value), so component_true[0] suffices.
-    summed_preds = sum(component_preds[k][:n] for k in range(CFG.N_CLUSTERS)) / CFG.N_CLUSTERS
-    summed_true = component_true[0][:n]
-    y_last = component_last[0][:n]
+    model = load_cvcbm_model(ckpt, device)
+    logging.info("Loaded CVCBM model from %s", ckpt)
 
-    mae = float(np.mean(np.abs(summed_preds - summed_true)))
-    mse = float(np.mean((summed_preds - summed_true) ** 2))
+    test_ds = CvcbmDataset(
+        args.preprocess_dir, "test",
+        input_len=CFG.INPUT_LEN, pred_horizon=CFG.PRED_HORIZON,
+        stride=CFG.STRIDE,
+        train_frac=CFG.TRAIN_FRAC, val_frac=CFG.VAL_FRAC,
+    )
+    if len(test_ds) == 0:
+        logging.error("Empty test dataset. Cannot evaluate.")
+        sys.exit(1)
+
+    preds, trues, lasts = predict(model, test_ds, device, args.batch_size)
+    n = len(preds)
+    logging.info("Test windows: %d", n)
+
+    mae = float(np.mean(np.abs(preds - trues)))
+    mse = float(np.mean((preds - trues) ** 2))
 
     logging.info("")
     logging.info("=" * 60)
-    logging.info("CVCBM — Test Results  (n=%d samples)", n)
+    logging.info("CVCBM Unified — Test Results  (n=%d samples)", n)
     logging.info("=" * 60)
-    logging.info("Paper Metrics (on reconstructed signal):")
+    logging.info("Paper Metrics:")
     logging.info("  MAE : %.8f", mae)
     logging.info("  MSE : %.8f", mse)
     logging.info("-" * 60)
 
-    y_pred_2d = summed_preds.reshape(-1, CFG.PRED_HORIZON)
-    y_true_2d = summed_true.reshape(-1, CFG.PRED_HORIZON)
+    y_pred_2d = preds.reshape(-1, CFG.PRED_HORIZON)
+    y_true_2d = trues.reshape(-1, CFG.PRED_HORIZON)
 
     logging.info("Shadowing Diagnostics (via training.metrics.compute_metrics):")
     compute_metrics(
         y_pred=y_pred_2d,
         y_true=y_true_2d,
-        y_last=y_last,
+        y_last=lasts,
         horizon=CFG.PRED_HORIZON,
         total_samples=n,
         log_info=logging.info,
     )
 
     logging.info("")
-    logging.info("Per-Component Breakdown:")
-    for k in range(CFG.N_CLUSTERS):
-        cp = component_preds[k][:n]
-        ct = component_true[k][:n]
-        logging.info(
-            "  Co-IMF-%d: MAE=%.8f  MSE=%.8f",
-            k,
-            float(np.mean(np.abs(cp - ct))),
-            float(np.mean((cp - ct) ** 2)),
-        )
     logging.info("=" * 60)
     logging.info("Full log saved to: %s", log_path)
+
 
 if __name__ == "__main__":
     main()

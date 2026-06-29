@@ -55,7 +55,7 @@ def main() -> None:
             train_cmd.append("--cpu")
         if args.epochs_override is not None:
             train_cmd.extend(["--epochs", str(args.epochs_override)])
-        run_step(train_cmd, "Step 2 — Train 3 CVCBM Models")
+        run_step(train_cmd, "Step 2 — Train Unified CVCBM Model")
 
     if not args.skip_eval:
         eval_cmd = py + [

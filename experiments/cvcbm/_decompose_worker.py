@@ -51,6 +51,7 @@ def main() -> None:
              f"INPUT_LEN={CFG.INPUT_LEN}, STRIDE={CFG.STRIDE}")
 
         window_imfs = [[] for _ in range(CFG.N_CLUSTERS)]
+        window_vmd_modes = [[] for _ in range(CFG.VMD_K)]
         windows = []
         _last_pct = 0
         for wi, i in enumerate(range(0, T, CFG.STRIDE)):
@@ -61,13 +62,38 @@ def main() -> None:
 
             window = signal[i : i + CFG.INPUT_LEN]
             windows.append(window)
-            co_imfs = decompose_service_signal(window.astype(np.float64), CFG)
+            decomposed = decompose_service_signal(window.astype(np.float64), CFG, return_vmd_modes=True)
+            if isinstance(decomposed, tuple):
+                co_imfs, vmd_modes = decomposed
+                for mode_k in range(vmd_modes.shape[0]):
+                    window_vmd_modes[mode_k].append(vmd_modes[mode_k].astype(np.float32))
+            else:
+                co_imfs = decomposed
             for k in range(CFG.N_CLUSTERS):
                 window_imfs[k].append(np.asarray(co_imfs[k], dtype=np.float32))
 
-        # Save each Co-IMF as a single (num_windows, INPUT_LEN) array per service.
         windows_arr = np.stack(windows, axis=0)
         stacked = []
+
+        # Save VMD modes as individual files per mode index
+        has_vmd_modes = any(len(lst) > 0 for lst in window_vmd_modes)
+        if has_vmd_modes:
+            for mode_k in range(CFG.VMD_K):
+                if len(window_vmd_modes[mode_k]) > 0:
+                    vmd_arr = np.stack(window_vmd_modes[mode_k], axis=0)
+                else:
+                    vmd_arr = np.zeros((n_windows, CFG.INPUT_LEN), dtype=np.float32)
+                vmd_path = os.path.join(out_dir, f"co_imf_0", f"vmd_mode_{mode_k}_service_{idx:05d}.npy")
+                for attempt in range(3):
+                    try:
+                        np.save(vmd_path, vmd_arr)
+                        break
+                    except OSError as e:
+                        if attempt == 2 or "Read-only" not in str(e):
+                            raise
+                        _time.sleep(5 * (attempt + 1))
+
+        # Save each Co-IMF
         for k in range(CFG.N_CLUSTERS):
             arr = np.stack(window_imfs[k], axis=0)
             stacked.append(arr)

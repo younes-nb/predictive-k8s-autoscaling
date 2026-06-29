@@ -8,15 +8,19 @@ import time
 import torch
 import torch.nn as nn
 from torch.amp import autocast, GradScaler
+
+
 class FastTensorDataLoader:
     def __init__(self, dataset, batch_size=32, shuffle=False, device=None):
         self.device = device
         if device is not None:
             self.X = dataset.X.to(device)
             self.y = dataset.y.to(device)
+            self.last = dataset.last.to(device)
         else:
             self.X = dataset.X
             self.y = dataset.y
+            self.last = dataset.last
         self.dataset_len = len(dataset)
         self.batch_size = batch_size
         self.shuffle = shuffle
@@ -34,14 +38,15 @@ class FastTensorDataLoader:
             raise StopIteration
         batch_indices = self.indices[self.idx : self.idx + self.batch_size]
         self.idx += self.batch_size
-        
+
         x = self.X[batch_indices]
         y = self.y[batch_indices]
-        last = self.X[batch_indices, -1, 0]
+        last = self.last[batch_indices]
         return x, y, last
 
     def __len__(self):
         return (self.dataset_len + self.batch_size - 1) // self.batch_size
+
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, "..", ".."))
@@ -49,12 +54,13 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from experiments.cvcbm.config import CFG
-from experiments.cvcbm.dataset import CoImfDataset
+from experiments.cvcbm.dataset import CvcbmDataset
 from experiments.cvcbm.model import CvcbmModel
 
-def setup_logging(out_dir: str, co_imf_index: int) -> str:
+
+def setup_logging(out_dir: str) -> str:
     os.makedirs(out_dir, exist_ok=True)
-    log_path = os.path.join(out_dir, f"train_co_imf_{co_imf_index}.log")
+    log_path = os.path.join(out_dir, "train_cvcbm.log")
     root = logging.getLogger()
     root.setLevel(logging.INFO)
     root.handlers.clear()
@@ -64,37 +70,56 @@ def setup_logging(out_dir: str, co_imf_index: int) -> str:
         h.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
     return log_path
 
-def train_one_co_imf(co_imf_index: int, args) -> None:
-    log_path = setup_logging(args.out_dir, co_imf_index)
+
+def main() -> None:
+    ap = argparse.ArgumentParser(
+        description="Train CVCBM model (all Co-IMFs stacked as channels)."
+    )
+    ap.add_argument("--preprocess_dir", default="/dataset/cvcbm_preprocess",
+                    help="Directory with Co-IMF numpy files (default: /dataset/cvcbm_preprocess)")
+    ap.add_argument("--out_dir", default="/proj/k8sautoscaledl-PG0/models/cvcbm",
+                    help="Directory for model checkpoint (default: /proj/k8sautoscaledl-PG0/models/cvcbm)")
+    ap.add_argument("--epochs", type=int, default=None,
+                    help="Override paper EPOCHS for smoke tests without editing config.py")
+    ap.add_argument("--cpu", action="store_true", help="Force CPU training")
+    args = ap.parse_args()
+
+    os.makedirs(args.out_dir, exist_ok=True)
+    log_path = setup_logging(args.out_dir)
+
     device = torch.device(
         "cuda" if torch.cuda.is_available() and not args.cpu else "cpu"
     )
     epochs = args.epochs if args.epochs is not None else CFG.EPOCHS
 
     logging.info("=" * 60)
-    logging.info("CVCBM — Training Co-IMF-%d on %s", co_imf_index, device)
+    logging.info("CVCBM — Unified Model Training on %s", device)
     logging.info("Log file: %s", log_path)
     logging.info("=" * 60)
 
-    train_ds = CoImfDataset(
-        args.preprocess_dir, co_imf_index, "train",
+    train_ds = CvcbmDataset(
+        args.preprocess_dir, "train",
         input_len=CFG.INPUT_LEN, pred_horizon=CFG.PRED_HORIZON,
         stride=CFG.STRIDE,
         train_frac=CFG.TRAIN_FRAC, val_frac=CFG.VAL_FRAC,
     )
-    val_ds = CoImfDataset(
-        args.preprocess_dir, co_imf_index, "val",
+    val_ds = CvcbmDataset(
+        args.preprocess_dir, "val",
         input_len=CFG.INPUT_LEN, pred_horizon=CFG.PRED_HORIZON,
         stride=CFG.STRIDE,
         train_frac=CFG.TRAIN_FRAC, val_frac=CFG.VAL_FRAC,
     )
 
     if len(train_ds) == 0:
-        logging.error("Empty training dataset for co_imf_%d. Aborting.", co_imf_index)
+        logging.error("Empty training dataset. Aborting.")
         return
 
     n_train = len(train_ds)
     n_val = len(val_ds)
+    total_channels = train_ds.total_channels
+
+    logging.info("Total input channels: %d", total_channels)
+
     train_loader = FastTensorDataLoader(
         train_ds, batch_size=CFG.BATCH_SIZE, shuffle=True, device=device,
     )
@@ -107,6 +132,7 @@ def train_one_co_imf(co_imf_index: int, args) -> None:
     scaler = GradScaler("cuda", enabled=(device.type == "cuda"))
 
     model = CvcbmModel(
+        in_channels=total_channels,
         input_len=CFG.INPUT_LEN,
         pred_horizon=CFG.PRED_HORIZON,
         kernel_sizes=CFG.KERNEL_SIZES,
@@ -123,14 +149,14 @@ def train_one_co_imf(co_imf_index: int, args) -> None:
     logging.info("Train windows: %d | Val windows: %d", n_train, n_val)
     logging.info("Epochs: %d", epochs)
 
-    ckpt_path = os.path.join(args.out_dir, f"cvcbm_co_imf_{co_imf_index}.pt")
+    ckpt_path = os.path.join(args.out_dir, "cvcbm.pt")
     best_val_loss = float("inf")
 
     for epoch in range(1, epochs + 1):
         t0 = time.time()
 
         model.train()
-        train_accum, n_train = 0.0, 0
+        train_accum, n_train_count = 0.0, 0
         for x, y, _ in train_loader:
             optimizer.zero_grad()
             with autocast("cuda", enabled=(device.type == "cuda")):
@@ -140,19 +166,19 @@ def train_one_co_imf(co_imf_index: int, args) -> None:
             scaler.step(optimizer)
             scaler.update()
             train_accum += loss.item() * x.size(0)
-            n_train += x.size(0)
-        avg_train = train_accum / max(n_train, 1)
+            n_train_count += x.size(0)
+        avg_train = train_accum / max(n_train_count, 1)
 
         model.eval()
-        val_accum, n_val = 0.0, 0
+        val_accum, n_val_count = 0.0, 0
         with torch.no_grad():
             for x, y, _ in val_loader:
                 with autocast("cuda", enabled=(device.type == "cuda")):
                     pred = model(x)
                     loss = criterion(pred, y)
                 val_accum += loss.item() * x.size(0)
-                n_val += x.size(0)
-        avg_val = val_accum / max(n_val, 1)
+                n_val_count += x.size(0)
+        avg_val = val_accum / max(n_val_count, 1)
 
         dt = time.time() - t0
         suffix = ""
@@ -161,9 +187,9 @@ def train_one_co_imf(co_imf_index: int, args) -> None:
             torch.save(
                 {
                     "model_state_dict": model.state_dict(),
-                    "co_imf_index": co_imf_index,
                     "epoch": epoch,
                     "best_val_loss": best_val_loss,
+                    "total_channels": total_channels,
                     "cfg": {
                         "input_len": CFG.INPUT_LEN,
                         "pred_horizon": CFG.PRED_HORIZON,
@@ -183,40 +209,10 @@ def train_one_co_imf(co_imf_index: int, args) -> None:
         )
 
     logging.info(
-        "=== Co-IMF-%d training complete. Best val loss: %.8f | Saved: %s ===",
-        co_imf_index, best_val_loss, ckpt_path,
+        "=== Unified CVCBM training complete. Best val loss: %.8f | Saved: %s ===",
+        best_val_loss, ckpt_path,
     )
 
-def main() -> None:
-    ap = argparse.ArgumentParser(
-        description="Train CVCBM models (one per Co-IMF component)."
-    )
-    ap.add_argument("--preprocess_dir", default="/dataset/cvcbm_preprocess",
-                    help="Directory with Co-IMF numpy files (default: /dataset/cvcbm_preprocess)")
-    ap.add_argument("--out_dir", default="/proj/k8sautoscaledl-PG0/models/cvcbm",
-                    help="Directory for model checkpoints (default: /proj/k8sautoscaledl-PG0/models/cvcbm)")
-    ap.add_argument(
-        "--co_imf_index", type=int, default=None,
-        help="Train a single Co-IMF model (0, 1, or 2). Omit to train all 3.",
-    )
-    ap.add_argument("--epochs", type=int, default=None,
-                    help="Override paper EPOCHS for smoke tests without editing config.py")
-    ap.add_argument("--cpu", action="store_true", help="Force CPU training")
-    args = ap.parse_args()
-
-    os.makedirs(args.out_dir, exist_ok=True)
-
-    indices = (
-        [args.co_imf_index]
-        if args.co_imf_index is not None
-        else list(range(CFG.N_CLUSTERS))
-    )
-    invalid = [idx for idx in indices if idx < 0 or idx >= CFG.N_CLUSTERS]
-    if invalid:
-        raise ValueError(f"Invalid Co-IMF index/indices: {invalid}")
-
-    for idx in indices:
-        train_one_co_imf(idx, args)
 
 if __name__ == "__main__":
     main()

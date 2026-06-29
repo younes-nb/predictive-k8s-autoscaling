@@ -182,19 +182,28 @@ def vmd_decompose(
 
     return np.asarray(u[:, :len(signal)], dtype=np.float64)
 
-def decompose_service_signal(signal: np.ndarray, cfg) -> List[np.ndarray]:
+def decompose_service_signal(
+    signal: np.ndarray,
+    cfg,
+    return_vmd_modes: bool = False,
+) -> tuple:
 
     signal = np.asarray(signal, dtype=np.float64)
 
-    # Guard against signals shorter than the window size (INPUT_LEN).
-    # Decomposition is done per sliding window, so individual windows must be at least INPUT_LEN.
     if len(signal) < cfg.INPUT_LEN:
         logger.warning(
             "Signal too short (%d < %d); returning trivial decomposition.",
             len(signal), cfg.INPUT_LEN,
         )
         zeros = np.zeros_like(signal)
-        return [signal.astype(np.float32), zeros.astype(np.float32), zeros.astype(np.float32)]
+        result = [
+            signal.astype(np.float32),
+            zeros.astype(np.float32),
+            zeros.astype(np.float32),
+        ]
+        if return_vmd_modes:
+            return result, np.array([signal.astype(np.float32)])
+        return result
 
     imfs, residue = ceemdan_decompose(signal, cfg.CEEMDAN_EPSILON, cfg.CEEMDAN_TRIALS)
     logger.debug("CEEMDAN produced %d IMFs.", imfs.shape[0])
@@ -208,8 +217,9 @@ def decompose_service_signal(signal: np.ndarray, cfg) -> List[np.ndarray]:
         n_clusters=cfg.N_CLUSTERS,
     )
 
+    vmd_modes_arr = None
     try:
-        vmd_modes = vmd_decompose(
+        vmd_modes_arr = vmd_decompose(
             co_imfs[0],
             K=cfg.VMD_K,
             alpha=cfg.VMD_ALPHA,
@@ -218,7 +228,7 @@ def decompose_service_signal(signal: np.ndarray, cfg) -> List[np.ndarray]:
             init=cfg.VMD_INIT,
             tol=cfg.VMD_TOL,
         )
-        co_imfs[0] = vmd_modes.sum(axis=0)
+        co_imfs[0] = vmd_modes_arr.sum(axis=0)
     except Exception as exc:
         logger.warning("VMD step skipped: %s", exc)
 
@@ -232,4 +242,9 @@ def decompose_service_signal(signal: np.ndarray, cfg) -> List[np.ndarray]:
     reconstruction_error = signal - np.sum(co_imfs, axis=0)
     co_imfs[-1] = co_imfs[-1] + reconstruction_error
 
-    return [np.asarray(arr, dtype=np.float32) for arr in co_imfs[:cfg.N_CLUSTERS]]
+    result = [np.asarray(arr, dtype=np.float32) for arr in co_imfs[:cfg.N_CLUSTERS]]
+
+    if return_vmd_modes and vmd_modes_arr is not None:
+        return result, vmd_modes_arr.astype(np.float32)
+
+    return result
