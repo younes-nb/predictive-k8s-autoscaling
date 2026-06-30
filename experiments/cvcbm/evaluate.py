@@ -3,10 +3,16 @@ import argparse
 import logging
 import os
 import sys
+from datetime import datetime
 
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
+
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    from backports.zoneinfo import ZoneInfo
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, "..", ".."))
@@ -19,17 +25,30 @@ from experiments.cvcbm.model import CvcbmModel
 from training.metrics import compute_metrics
 
 
+class _TehranFormatter(logging.Formatter):
+
+    def format(self, record: logging.LogRecord) -> str:
+        try:
+            tz = ZoneInfo("Asia/Tehran")
+        except Exception:
+            tz = None
+        ts = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
+        return f"{ts} [{record.levelname}] {record.getMessage()}"
+
+
 def setup_logging(out_dir: str) -> str:
     os.makedirs(out_dir, exist_ok=True)
     log_path = os.path.join(out_dir, "evaluate_cvcbm.log")
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(message)s",
-        handlers=[
-            logging.FileHandler(log_path, mode="w"),
-            logging.StreamHandler(sys.stdout),
-        ],
-    )
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    root.handlers.clear()
+    fmt = _TehranFormatter()
+    fh = logging.FileHandler(log_path, mode="w")
+    fh.setFormatter(fmt)
+    root.addHandler(fh)
+    sh = logging.StreamHandler(sys.stdout)
+    sh.setFormatter(fmt)
+    root.addHandler(sh)
     return log_path
 
 

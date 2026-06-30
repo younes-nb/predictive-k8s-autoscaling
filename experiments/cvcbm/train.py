@@ -4,10 +4,16 @@ import logging
 import os
 import sys
 import time
+from datetime import datetime
 
 import torch
 import torch.nn as nn
 from torch.amp import autocast, GradScaler
+
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    from backports.zoneinfo import ZoneInfo
 
 
 class FastTensorDataLoader:
@@ -58,16 +64,30 @@ from experiments.cvcbm.dataset import CvcbmDataset
 from experiments.cvcbm.model import CvcbmModel
 
 
+class _TehranFormatter(logging.Formatter):
+
+    def format(self, record: logging.LogRecord) -> str:
+        try:
+            tz = ZoneInfo("Asia/Tehran")
+        except Exception:
+            tz = None
+        ts = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
+        return f"{ts} [{record.levelname}] {record.getMessage()}"
+
+
 def setup_logging(out_dir: str) -> str:
     os.makedirs(out_dir, exist_ok=True)
     log_path = os.path.join(out_dir, "train_cvcbm.log")
     root = logging.getLogger()
     root.setLevel(logging.INFO)
     root.handlers.clear()
-    root.addHandler(logging.FileHandler(log_path, mode="a"))
-    root.addHandler(logging.StreamHandler(sys.stdout))
-    for h in root.handlers:
-        h.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+    fmt = _TehranFormatter()
+    fh = logging.FileHandler(log_path, mode="a")
+    fh.setFormatter(fmt)
+    root.addHandler(fh)
+    sh = logging.StreamHandler(sys.stdout)
+    sh.setFormatter(fmt)
+    root.addHandler(sh)
     return log_path
 
 
