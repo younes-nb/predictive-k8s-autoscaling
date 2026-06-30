@@ -138,35 +138,32 @@ class CvcbmDataset(Dataset):
         self.input_len = input_len
         self.pred_horizon = pred_horizon
 
-        co_imf_dirs = [
-            os.path.join(preprocess_dir, f"co_imf_{k}") for k in range(3)
-        ]
         original_dir = os.path.join(preprocess_dir, "original")
 
-        service_files = sorted(glob.glob(os.path.join(co_imf_dirs[0], "service_*.npy")))
+        # Detect mode: raw_imf dirs (no clustering) or co_imf dirs (clustering)
+        use_raw_imfs = any(os.path.isdir(os.path.join(preprocess_dir, f"raw_imf_{k}")) for k in range(20))
+        if use_raw_imfs:
+            imf_base_dirs = [
+                os.path.join(preprocess_dir, f"raw_imf_{k}") for k in range(20)
+            ]
+            service_files = sorted(glob.glob(os.path.join(imf_base_dirs[0], "service_*.npy")))
+            dir_label = "raw_imf_0"
+        else:
+            imf_base_dirs = [
+                os.path.join(preprocess_dir, f"co_imf_{k}") for k in range(3)
+            ]
+            service_files = sorted(glob.glob(os.path.join(imf_base_dirs[0], "service_*.npy")))
+            dir_label = "co_imf_0"
 
         if not service_files:
             raise FileNotFoundError(
-                f"No Co-IMF files found in {co_imf_dirs[0]}. "
+                f"No IMF files found in {dir_label} under {preprocess_dir}. "
                 "Run preprocess_services.py first."
             )
 
         all_X, all_y, all_last = [], [], []
 
         for sf in service_files:
-            try:
-                co_imf0_windows = np.load(sf).astype(np.float64)
-            except (EOFError, ValueError) as e:
-                logger.warning("Skipping corrupted file %s: %s", sf, e)
-                continue
-
-            num_windows = co_imf0_windows.shape[0]
-            idx_tr = int(num_windows * train_frac)
-            idx_val = int(num_windows * (train_frac + val_frac))
-
-            if idx_tr == 0 or idx_tr >= idx_val or idx_val >= num_windows:
-                continue
-
             base = os.path.basename(sf)
             svc_idx = int(base.replace("service_", "").replace(".npy", ""))
 
@@ -180,96 +177,116 @@ class CvcbmDataset(Dataset):
                 logger.warning("Skipping corrupted original %s: %s", orig_path, e)
                 continue
 
-            # Load Co-IMF 1 (Medium)
-            co_imf1_path = os.path.join(co_imf_dirs[1], base)
-            if not os.path.exists(co_imf1_path):
-                logger.warning("Co-IMF 1 not found for service %d: %s", svc_idx, co_imf1_path)
-                continue
-            try:
-                co_imf1_windows = np.load(co_imf1_path).astype(np.float64)
-            except (EOFError, ValueError) as e:
-                logger.warning("Skipping corrupted Co-IMF 1 %s: %s", co_imf1_path, e)
-                continue
-
-            # Load Co-IMF 2 (Low)
-            co_imf2_path = os.path.join(co_imf_dirs[2], base)
-            if not os.path.exists(co_imf2_path):
-                logger.warning("Co-IMF 2 not found for service %d: %s", svc_idx, co_imf2_path)
-                continue
-            try:
-                co_imf2_windows = np.load(co_imf2_path).astype(np.float64)
-            except (EOFError, ValueError) as e:
-                logger.warning("Skipping corrupted Co-IMF 2 %s: %s", co_imf2_path, e)
-                continue
-
-            # Load VMD modes from co_imf_0 directory
-            vmd_windows_list = []
-            vmd_mode_file = os.path.join(co_imf_dirs[0], f"vmd_mode_0_{base}")
-            if os.path.exists(vmd_mode_file):
-                mode_idx = 0
+            # Load all channels from disk
+            channel_arrays = []
+            if use_raw_imfs:
+                k = 0
                 while True:
-                    vmd_path = os.path.join(co_imf_dirs[0], f"vmd_mode_{mode_idx}_{base}")
-                    if not os.path.exists(vmd_path):
+                    imf_path = os.path.join(imf_base_dirs[k], base)
+                    if not os.path.exists(imf_path):
                         break
                     try:
-                        vmd_windows_list.append(np.load(vmd_path).astype(np.float64))
+                        channel_arrays.append(np.load(imf_path).astype(np.float64))
                     except (EOFError, ValueError) as e:
-                        logger.warning("Skipping corrupted VMD mode %s: %s", vmd_path, e)
-                    mode_idx += 1
+                        logger.warning("Skipping corrupted raw IMF %s: %s", imf_path, e)
+                    k += 1
+                if not channel_arrays:
+                    logger.warning("No raw IMF channels found for service %d: %s", svc_idx, base)
+                    continue
             else:
-                # Fall back to summed co_imf_0 as single channel
-                vmd_windows_list = [co_imf0_windows]
+                try:
+                    co_imf0_windows = np.load(sf).astype(np.float64)
+                except (EOFError, ValueError) as e:
+                    logger.warning("Skipping corrupted file %s: %s", sf, e)
+                    continue
+
+                co_imf1_path = os.path.join(imf_base_dirs[1], base)
+                if not os.path.exists(co_imf1_path):
+                    logger.warning("Co-IMF 1 not found for service %d: %s", svc_idx, co_imf1_path)
+                    continue
+                try:
+                    co_imf1_windows = np.load(co_imf1_path).astype(np.float64)
+                except (EOFError, ValueError) as e:
+                    logger.warning("Skipping corrupted Co-IMF 1 %s: %s", co_imf1_path, e)
+                    continue
+
+                co_imf2_path = os.path.join(imf_base_dirs[2], base)
+                if not os.path.exists(co_imf2_path):
+                    logger.warning("Co-IMF 2 not found for service %d: %s", svc_idx, co_imf2_path)
+                    continue
+                try:
+                    co_imf2_windows = np.load(co_imf2_path).astype(np.float64)
+                except (EOFError, ValueError) as e:
+                    logger.warning("Skipping corrupted Co-IMF 2 %s: %s", co_imf2_path, e)
+                    continue
+
+                vmd_windows_list = []
+                vmd_mode_file = os.path.join(imf_base_dirs[0], f"vmd_mode_0_{base}")
+                if os.path.exists(vmd_mode_file):
+                    mode_idx = 0
+                    while True:
+                        vmd_path = os.path.join(imf_base_dirs[0], f"vmd_mode_{mode_idx}_{base}")
+                        if not os.path.exists(vmd_path):
+                            break
+                        try:
+                            vmd_windows_list.append(np.load(vmd_path).astype(np.float64))
+                        except (EOFError, ValueError) as e:
+                            logger.warning("Skipping corrupted VMD mode %s: %s", vmd_path, e)
+                        mode_idx += 1
+                else:
+                    vmd_windows_list = [co_imf0_windows]
+
+                channel_arrays = vmd_windows_list + [co_imf1_windows, co_imf2_windows]
+
+            ref_shape = channel_arrays[0].shape
+            num_windows = ref_shape[0]
+            idx_tr = int(num_windows * train_frac)
+            idx_val = int(num_windows * (train_frac + val_frac))
+
+            if idx_tr == 0 or idx_tr >= idx_val or idx_val >= num_windows:
+                continue
 
             # Validate window count consistency
-            ref_shape = co_imf0_windows.shape
-            for arr_name, arr in [
-                ("co_imf1", co_imf1_windows),
-                ("co_imf2", co_imf2_windows),
-            ]:
+            all_match = True
+            for arr in channel_arrays:
                 if arr.shape[0] != ref_shape[0]:
-                    logger.warning(
-                        "Service %d: %s has %d windows, expected %d. Skipping.",
-                        svc_idx, arr_name, arr.shape[0], ref_shape[0],
-                    )
+                    logger.warning("Service %d: window count mismatch. Skipping.", svc_idx)
+                    all_match = False
                     break
+            if not all_match:
+                continue
+
+            if split == "train":
+                w_start, w_end = 0, idx_tr
+            elif split == "val":
+                w_start, w_end = idx_tr, idx_val
             else:
-                for vm in vmd_windows_list:
-                    if vm.shape[0] != ref_shape[0]:
-                        logger.warning(
-                            "Service %d: VMD window count mismatch. Skipping.", svc_idx,
-                        )
-                        break
-                else:
-                    if split == "train":
-                        w_start, w_end = 0, idx_tr
-                    elif split == "val":
-                        w_start, w_end = idx_tr, idx_val
-                    else:
-                        w_start, w_end = idx_val, num_windows
+                w_start, w_end = idx_val, num_windows
 
-                    if w_start >= w_end:
-                        continue
+            if w_start >= w_end:
+                continue
 
-                    channel_arrays = vmd_windows_list + [co_imf1_windows, co_imf2_windows]
-                    total_channels_svc = len(channel_arrays)
+            total_channels_svc = len(channel_arrays)
 
-                    for j in range(w_start, w_end):
-                        pos = j * stride
-                        if pos + input_len + pred_horizon > len(original):
-                            continue
+            for j in range(w_start, w_end):
+                pos = j * stride
+                if pos + input_len + pred_horizon > len(original):
+                    continue
 
-                        # Build multi-channel input: (input_len, total_channels)
-                        X = np.stack(
-                            [ch[j] for ch in channel_arrays],
-                            axis=1,
-                        ).astype(np.float32)
+                X = np.stack(
+                    [ch[j] for ch in channel_arrays],
+                    axis=1,
+                ).astype(np.float32)
 
-                        y = original[pos + input_len : pos + input_len + pred_horizon].astype(np.float32)
-                        last_val = original[pos + input_len - 1].astype(np.float32)
+                y = original[pos + input_len : pos + input_len + pred_horizon].astype(np.float32)
+                last_val = original[pos + input_len - 1].astype(np.float32)
 
-                        all_X.append(X)
-                        all_y.append(y)
-                        all_last.append(last_val)
+                if np.isnan(X).any() or np.isinf(X).any() or np.isnan(y).any() or np.isinf(y).any():
+                    continue
+
+                all_X.append(X)
+                all_y.append(y)
+                all_last.append(last_val)
 
         if not all_X:
             logger.warning(
