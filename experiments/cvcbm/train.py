@@ -93,7 +93,7 @@ def main() -> None:
     epochs = args.epochs if args.epochs is not None else CFG.EPOCHS
 
     logging.info("=" * 60)
-    logging.info("CVCBM — Unified Model Training on %s", device)
+    logging.info("CVCBM — Model Training on %s", device)
     logging.info("Log file: %s", log_path)
     logging.info("=" * 60)
 
@@ -162,7 +162,12 @@ def main() -> None:
             with autocast("cuda", enabled=(device.type == "cuda")):
                 pred = model(x)
                 loss = criterion(pred, y)
+            if torch.isnan(loss) or torch.isinf(loss):
+                logging.warning("NaN/Inf loss detected; skipping batch.")
+                continue
             scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             scaler.step(optimizer)
             scaler.update()
             train_accum += loss.item() * x.size(0)
@@ -209,7 +214,7 @@ def main() -> None:
         )
 
     logging.info(
-        "=== Unified CVCBM training complete. Best val loss: %.8f | Saved: %s ===",
+        "=== CVCBM training complete. Best val loss: %.8f | Saved: %s ===",
         best_val_loss, ckpt_path,
     )
 
