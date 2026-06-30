@@ -76,7 +76,7 @@ class CvcbmModel(nn.Module):
 if __name__ == "__main__":
     from experiments.cvcbm.config import CFG
 
-    total_channels = CFG.VMD_K + 2
+    total_channels = CFG.VMD_K + (CFG.N_CLUSTERS - 1) if not CFG.NO_CLUSTERING else 9
     model = CvcbmModel(
         in_channels=total_channels,
         input_len=CFG.INPUT_LEN,

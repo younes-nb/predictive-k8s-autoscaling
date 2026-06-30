@@ -10,6 +10,8 @@ from torch.utils.data import Dataset
 
 logger = logging.getLogger(__name__)
 
+MAX_IMFS = 15
+
 class CoImfDataset(Dataset):
 
     def __init__(
@@ -141,10 +143,10 @@ class CvcbmDataset(Dataset):
         original_dir = os.path.join(preprocess_dir, "original")
 
         # Detect mode: raw_imf dirs (no clustering) or co_imf dirs (clustering)
-        use_raw_imfs = any(os.path.isdir(os.path.join(preprocess_dir, f"raw_imf_{k}")) for k in range(20))
+        use_raw_imfs = any(os.path.isdir(os.path.join(preprocess_dir, f"raw_imf_{k}")) for k in range(MAX_IMFS))
         if use_raw_imfs:
             imf_base_dirs = [
-                os.path.join(preprocess_dir, f"raw_imf_{k}") for k in range(20)
+                os.path.join(preprocess_dir, f"raw_imf_{k}") for k in range(MAX_IMFS)
             ]
             service_files = sorted(glob.glob(os.path.join(imf_base_dirs[0], "service_*.npy")))
             dir_label = "raw_imf_0"
@@ -180,8 +182,7 @@ class CvcbmDataset(Dataset):
             # Load all channels from disk
             channel_arrays = []
             if use_raw_imfs:
-                k = 0
-                while True:
+                for k in range(MAX_IMFS):
                     imf_path = os.path.join(imf_base_dirs[k], base)
                     if not os.path.exists(imf_path):
                         break
@@ -189,7 +190,6 @@ class CvcbmDataset(Dataset):
                         channel_arrays.append(np.load(imf_path).astype(np.float64))
                     except (EOFError, ValueError) as e:
                         logger.warning("Skipping corrupted raw IMF %s: %s", imf_path, e)
-                    k += 1
                 if not channel_arrays:
                     logger.warning("No raw IMF channels found for service %d: %s", svc_idx, base)
                     continue

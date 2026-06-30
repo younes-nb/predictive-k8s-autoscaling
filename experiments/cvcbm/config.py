@@ -26,6 +26,7 @@ class CvcbmConfig:
     SE_MAX_SAMPLES: int = 1000
 
     N_CLUSTERS: int = 3
+    NO_CLUSTERING: bool = False
 
     VMD_K: int = 5
     VMD_ALPHA: int = 2000

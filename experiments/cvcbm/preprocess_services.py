@@ -21,6 +21,7 @@ if REPO_ROOT not in sys.path:
 
 from shared.config_paths import PATHS
 from experiments.cvcbm.config import CFG
+from experiments.cvcbm._decompose_worker import MAX_IMFS
 
 class _TehranFormatter(logging.Formatter):
 
@@ -76,6 +77,8 @@ def main() -> None:
                     help="Fraction of CPU cores to use (default: 0.9)")
     ap.add_argument("--batch_size", type=int, default=512,
                     help="Services per batch (default: 512). Load this many from parquet at once.")
+    ap.add_argument("--no_clustering", action="store_true",
+                    help="Skip Sample Entropy, K-Means, and VMD; use raw IMFs only.")
     args = ap.parse_args()
 
     # Compute worker count as a fraction of available CPU cores (default 90%).
@@ -83,8 +86,12 @@ def main() -> None:
     num_workers = max(1, int(n_cpus * args.num_workers))
 
     setup_logging(args.out_dir)
-    for k in range(CFG.N_CLUSTERS):
-        os.makedirs(os.path.join(args.out_dir, f"co_imf_{k}"), exist_ok=True)
+    if args.no_clustering:
+        for k in range(MAX_IMFS):
+            os.makedirs(os.path.join(args.out_dir, f"raw_imf_{k}"), exist_ok=True)
+    else:
+        for k in range(CFG.N_CLUSTERS):
+            os.makedirs(os.path.join(args.out_dir, f"co_imf_{k}"), exist_ok=True)
     os.makedirs(os.path.join(args.out_dir, "original"), exist_ok=True)
 
     # --- Service list ---
@@ -211,11 +218,16 @@ def main() -> None:
     pre_done = 0
     for i in range(total):
         dm = os.path.join(args.out_dir, f"service_{i:05d}.done")
-        if os.path.exists(dm) and all(
-            os.path.exists(os.path.join(args.out_dir, f"co_imf_{k}", f"service_{i:05d}.npy"))
-            for k in range(CFG.N_CLUSTERS)
-        ):
-            pre_done += 1
+        if os.path.exists(dm):
+            if args.no_clustering:
+                if os.path.exists(os.path.join(args.out_dir, "raw_imf_0", f"service_{i:05d}.npy")):
+                    pre_done += 1
+            else:
+                if all(
+                    os.path.exists(os.path.join(args.out_dir, f"co_imf_{k}", f"service_{i:05d}.npy"))
+                    for k in range(CFG.N_CLUSTERS)
+                ):
+                    pre_done += 1
     if pre_done:
         logging.info("Pre-existing completed services: %d", pre_done)
 
@@ -242,11 +254,14 @@ def main() -> None:
                 np.save(out_path, sig)
             done_marker = os.path.join(args.out_dir, f"service_{idx:05d}.done")
             if os.path.exists(done_marker):
-                co_imf_files_exist = all(
-                    os.path.exists(os.path.join(args.out_dir, f"co_imf_{k}", f"service_{idx:05d}.npy"))
-                    for k in range(CFG.N_CLUSTERS)
-                )
-                if co_imf_files_exist:
+                if args.no_clustering:
+                    files_exist = os.path.exists(os.path.join(args.out_dir, "raw_imf_0", f"service_{idx:05d}.npy"))
+                else:
+                    files_exist = all(
+                        os.path.exists(os.path.join(args.out_dir, f"co_imf_{k}", f"service_{idx:05d}.npy"))
+                        for k in range(CFG.N_CLUSTERS)
+                    )
+                if files_exist:
                     continue
                 os.remove(done_marker)
             worker_args.append((ms_name, idx))
@@ -258,12 +273,17 @@ def main() -> None:
                     dm = os.path.join(args.out_dir, f"service_{idx:05d}.done")
                     if not os.path.exists(dm):
                         skipped += 1
-                    elif not all(
-                        os.path.exists(os.path.join(args.out_dir, f"co_imf_{k}", f"service_{idx:05d}.npy"))
-                        for k in range(CFG.N_CLUSTERS)
-                    ):
-                        os.remove(dm)
-                        skipped += 1
+                    else:
+                        if args.no_clustering:
+                            files_exist = os.path.exists(os.path.join(args.out_dir, "raw_imf_0", f"service_{idx:05d}.npy"))
+                        else:
+                            files_exist = all(
+                                os.path.exists(os.path.join(args.out_dir, f"co_imf_{k}", f"service_{idx:05d}.npy"))
+                                for k in range(CFG.N_CLUSTERS)
+                            )
+                        if not files_exist:
+                            os.remove(dm)
+                            skipped += 1
 
         if not worker_args:
             logging.info("  Batch %d/%d: no valid services.", batch_idx + 1, n_batches)
@@ -283,7 +303,7 @@ def main() -> None:
             worker_env["LOKY_MAX_CPU_COUNT"] = "1"
             worker_env["JOBLIB_NUM_THREADS"] = "1"
             proc = subprocess.Popen(
-                [sys.executable, worker_script, ms_name, str(idx), args.out_dir],
+                [sys.executable, worker_script, ms_name, str(idx), args.out_dir, "1" if args.no_clustering else "0"],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 env=worker_env,
             )
@@ -338,12 +358,13 @@ def main() -> None:
                 else:
                     skipped += 1
                     batch_done += 1
-                    err_msg_short = err_msg.strip()[:200] if err_msg else ""
+                    err_msg_short = ""
+                    for line in r_msg_lines:
+                        if line.startswith("RESULT:False:ERROR:"):
+                            err_msg_short = line.split(":", 2)[-1].strip()[:200]
+                            break
                     if not err_msg_short:
-                        for line in r_msg_lines:
-                            if line.startswith("RESULT:False:ERROR:"):
-                                err_msg_short = line.split(":", 2)[-1].strip()[:200]
-                                break
+                        err_msg_short = err_msg.strip()[:200] if err_msg else ""
                     if not err_msg_short:
                         err_msg_short = "unknown"
                     logging.error(

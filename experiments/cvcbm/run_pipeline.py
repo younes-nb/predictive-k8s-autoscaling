@@ -30,20 +30,23 @@ def main() -> None:
     ap.add_argument("--skip_preprocess", action="store_true")
     ap.add_argument("--skip_train", action="store_true")
     ap.add_argument("--skip_eval", action="store_true")
+    ap.add_argument("--no_clustering", action="store_true",
+                    help="Skip Sample Entropy, K-Means, and VMD; use raw IMFs only.")
     ap.add_argument("--cpu", action="store_true")
     args = ap.parse_args()
 
     py = [sys.executable]
 
     if not args.skip_preprocess:
-        run_step(
-            py + [
-                os.path.join(THIS_DIR, "preprocess_services.py"),
-                "--out_dir", args.preprocess_dir,
-                "--max_services", str(args.max_services),
-            ],
-            "Step 1 — CEEMDAN + VMD Decomposition",
-        )
+        preprocess_cmd = [
+            os.path.join(THIS_DIR, "preprocess_services.py"),
+            "--out_dir", args.preprocess_dir,
+            "--max_services", str(args.max_services),
+        ]
+        if args.no_clustering:
+            preprocess_cmd.append("--no_clustering")
+        label = "Step 1 — CEEMDAN Decomposition" + (" (no clustering)" if args.no_clustering else " + VMD")
+        run_step(py + preprocess_cmd, label)
 
     if not args.skip_train:
         train_cmd = py + [
