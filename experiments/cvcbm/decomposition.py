@@ -185,28 +185,52 @@ def vmd_decompose(
 def decompose_service_signal(
     signal: np.ndarray,
     cfg,
-    return_vmd_modes: bool = False,
-) -> tuple:
+    return_raw_imfs: bool = False,
+):
 
     signal = np.asarray(signal, dtype=np.float64)
+    n = len(signal)
 
-    if len(signal) < cfg.INPUT_LEN:
+    if n < cfg.INPUT_LEN:
         logger.warning(
             "Signal too short (%d < %d); returning trivial decomposition.",
-            len(signal), cfg.INPUT_LEN,
+            n, cfg.INPUT_LEN,
         )
         zeros = np.zeros_like(signal)
-        result = [
+        if return_raw_imfs:
+            return [signal.astype(np.float32)]
+        return [
             signal.astype(np.float32),
             zeros.astype(np.float32),
             zeros.astype(np.float32),
         ]
-        if return_vmd_modes:
-            return result, np.array([signal.astype(np.float32)])
-        return result
+
+    if np.std(signal) < 1e-12:
+        logger.warning(
+            "Constant signal (std=%.2e); returning trivial decomposition.",
+            float(np.std(signal)),
+        )
+        zeros = np.zeros_like(signal)
+        if return_raw_imfs:
+            return [signal.astype(np.float32)]
+        return [
+            signal.astype(np.float32),
+            zeros.astype(np.float32),
+            zeros.astype(np.float32),
+        ]
 
     imfs, residue = ceemdan_decompose(signal, cfg.CEEMDAN_EPSILON, cfg.CEEMDAN_TRIALS)
     logger.debug("CEEMDAN produced %d IMFs.", imfs.shape[0])
+
+    if return_raw_imfs:
+        raw_imfs = []
+        for i in range(imfs.shape[0]):
+            arr = np.asarray(imfs[i], dtype=np.float64)
+            if len(arr) != n:
+                arr = arr[:n] if len(arr) > n else np.pad(arr, (0, n - len(arr)))
+            raw_imfs.append(arr.astype(np.float32))
+        raw_imfs.append(residue.astype(np.float32))
+        return raw_imfs
 
     co_imfs = cluster_imfs(
         imfs,
@@ -232,7 +256,6 @@ def decompose_service_signal(
     except Exception as exc:
         logger.warning("VMD step skipped: %s", exc)
 
-    n = len(signal)
     for k in range(len(co_imfs)):
         arr = np.asarray(co_imfs[k], dtype=np.float64)
         if len(arr) != n:
@@ -243,8 +266,4 @@ def decompose_service_signal(
     co_imfs[-1] = co_imfs[-1] + reconstruction_error
 
     result = [np.asarray(arr, dtype=np.float32) for arr in co_imfs[:cfg.N_CLUSTERS]]
-
-    if return_vmd_modes and vmd_modes_arr is not None:
-        return result, vmd_modes_arr.astype(np.float32)
-
-    return result
+    return result, vmd_modes_arr.astype(np.float32) if vmd_modes_arr is not None else None
