@@ -1,10 +1,13 @@
 import os
 import sys
 import argparse
+import multiprocessing as mp
 from datetime import datetime
+from typing import Dict, Any
 
 import duckdb
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -64,6 +67,50 @@ def plot_histogram(bin_edges, counts, title, xlabel, out_path, color="steelblue"
     plt.close()
 
 
+def _compute_avg_instances_chunk(chunk_msnames: list, parquet_pattern: str) -> Dict[str, float]:
+    """Worker: compute avg instances per timestamp for a chunk of msnames."""
+    import time as _time
+
+    con = duckdb.connect()
+    con.execute("SET threads TO 4")
+    con.execute("SET memory_limit = '4GB'")
+    con.execute("SET preserve_insertion_order = false")
+
+    result = {}
+    BATCH_SIZE = 256
+    n_batches = (len(chunk_msnames) + BATCH_SIZE - 1) // BATCH_SIZE
+
+    for i in range(0, len(chunk_msnames), BATCH_SIZE):
+        batch = chunk_msnames[i:i + BATCH_SIZE]
+        batch_num = i // BATCH_SIZE + 1
+        t_start = _time.time()
+
+        in_clause = ", ".join([f"'{m}'" for m in batch])
+        rows = con.execute(f"""
+            WITH per_timestamp AS (
+                SELECT msname, timestamp,
+                       COUNT(DISTINCT msinstanceid) AS num_instances
+                FROM read_parquet('{parquet_pattern}')
+                WHERE msname IN ({in_clause})
+                  AND cpu_utilization BETWEEN 0.0 AND 1.0
+                  AND memory_utilization BETWEEN 0.0 AND 1.0
+                GROUP BY msname, timestamp
+            )
+            SELECT msname, AVG(num_instances) AS avg_instances_per_ts
+            FROM per_timestamp
+            GROUP BY msname
+        """).fetchall()
+
+        elapsed = _time.time() - t_start
+        log(f"  Inst batch {batch_num}/{n_batches}: {len(batch)} msnames, {elapsed:.1f}s elapsed")
+
+        for msname, avg_val in rows:
+            result[msname] = avg_val
+
+    con.close()
+    return result
+
+
 def main():
     args = parse_args()
     parquet_pattern = os.path.join(args.parquet_dir, "*.parquet")
@@ -72,65 +119,101 @@ def main():
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     con = duckdb.connect()
-    con.execute("SET threads TO 8")
-    con.execute("SET memory_limit = '20GB'")
-    con.execute("SET temp_directory = '/tmp'")
+    con.execute("SET threads TO 2")
+    con.execute("SET memory_limit = '12GB'")
+    con.execute("SET preserve_insertion_order = false")
+    os.makedirs("/dataset/temp", exist_ok=True)
+    con.execute("SET temp_directory = '/dataset/temp'")
 
-    log("Computing per-timestamp averages (across instances) for each microservice...")
-    con.execute(f"""
-        CREATE TEMP TABLE per_ts AS
-        SELECT
-            msname,
-            timestamp,
-            AVG(cpu_utilization) AS cpu,
-            AVG(memory_utilization) AS mem,
-            COUNT(DISTINCT msinstanceid) AS num_instances
-        FROM read_parquet('{parquet_pattern}')
-        WHERE cpu_utilization BETWEEN 0.0 AND 1.0
-          AND memory_utilization BETWEEN 0.0 AND 1.0
-        GROUP BY msname, timestamp
-    """)
+    log("Scan 1/4: Computing CPU/memory histograms and global averages...")
+    cpu_bins, cpu_cnts, mem_bins, mem_cnts, global_avg_cpu, global_avg_mem = \
+        con.execute(f"""
+            WITH per_timestamp AS (
+                SELECT msname, timestamp,
+                       AVG(cpu_utilization) AS cpu,
+                       AVG(memory_utilization) AS mem
+                FROM read_parquet('{parquet_pattern}')
+                WHERE cpu_utilization BETWEEN 0.0 AND 1.0
+                  AND memory_utilization BETWEEN 0.0 AND 1.0
+                GROUP BY msname, timestamp
+            ),
+            cpu_hist AS (
+                SELECT CAST(LEAST(FLOOR(cpu * {n_bins}), {n_bins - 1}) AS INTEGER) AS bin_idx,
+                       COUNT(*) AS cnt
+                FROM per_timestamp
+                GROUP BY bin_idx
+            ),
+            mem_hist AS (
+                SELECT CAST(LEAST(FLOOR(mem * {n_bins}), {n_bins - 1}) AS INTEGER) AS bin_idx,
+                       COUNT(*) AS cnt
+                FROM per_timestamp
+                GROUP BY bin_idx
+            ),
+            globals AS (
+                SELECT AVG(cpu) AS avg_cpu, AVG(mem) AS avg_mem
+                FROM per_timestamp
+            )
+            SELECT (SELECT LIST(bin_idx ORDER BY bin_idx) FROM cpu_hist),
+                   (SELECT LIST(cnt  ORDER BY bin_idx) FROM cpu_hist),
+                   (SELECT LIST(bin_idx ORDER BY bin_idx) FROM mem_hist),
+                   (SELECT LIST(cnt  ORDER BY bin_idx) FROM mem_hist),
+                   avg_cpu, avg_mem
+            FROM globals
+        """).fetchone()
+    cpu_hist_rows = list(zip(cpu_bins, cpu_cnts))
+    mem_hist_rows = list(zip(mem_bins, mem_cnts))
 
-    cpu_hist_rows = con.execute(f"""
-        SELECT CAST(LEAST(FLOOR(cpu * {n_bins}), {n_bins - 1}) AS INTEGER) AS bin_idx,
-               COUNT(*) AS cnt
-        FROM per_ts
-        GROUP BY bin_idx
-        ORDER BY bin_idx
-    """).fetchall()
-
-    mem_hist_rows = con.execute(f"""
-        SELECT CAST(LEAST(FLOOR(mem * {n_bins}), {n_bins - 1}) AS INTEGER) AS bin_idx,
-               COUNT(*) AS cnt
-        FROM per_ts
-        GROUP BY bin_idx
-        ORDER BY bin_idx
-    """).fetchall()
-
-    global_avg_cpu, global_avg_mem = con.execute("""
-        SELECT AVG(cpu), AVG(mem) FROM per_ts
-    """).fetchone()
-
-    max_min_df = con.execute("""
+    log("Scan 2/4: Computing per-microservice max/min...")
+    max_min_df = con.execute(f"""
+        WITH per_timestamp AS (
+            SELECT msname, timestamp,
+                   AVG(cpu_utilization) AS cpu,
+                   AVG(memory_utilization) AS mem
+            FROM read_parquet('{parquet_pattern}')
+            WHERE cpu_utilization BETWEEN 0.0 AND 1.0
+              AND memory_utilization BETWEEN 0.0 AND 1.0
+            GROUP BY msname, timestamp
+        )
         SELECT msname,
                MAX(cpu) AS max_cpu,
                MIN(cpu) AS min_cpu,
                MAX(mem) AS max_mem,
                MIN(mem) AS min_mem
-        FROM per_ts
+        FROM per_timestamp
         GROUP BY msname
         ORDER BY msname
-    """).df()
-
-    avg_inst_df = con.execute("""
-        SELECT msname, AVG(num_instances) AS avg_instances_per_ts
-        FROM per_ts
-        GROUP BY msname
     """).df()
     n_ms = len(max_min_df)
     log(f"Found {n_ms} unique microservices.")
 
-    log("Computing total unique instances per microservice across entire timeline...")
+    log("Scan 3/4: Computing avg instances per timestamp per microservice (parallel)...")
+    msnames = max_min_df["msname"].tolist()
+    BATCH_INST = 256
+    nw = min(8, len(msnames))
+    chunks = np.array_split(msnames, nw)
+    log(f"Spawning {nw} workers...")
+
+    import time as _time
+    t_scan3_start = _time.time()
+
+    with mp.Pool(nw) as pool:
+        results = pool.starmap(
+            _compute_avg_instances_chunk,
+            [(chunk.tolist(), parquet_pattern) for chunk in chunks],
+        )
+
+    avg_inst_dict = {}
+    for r in results:
+        avg_inst_dict.update(r)
+    t_scan3_end = _time.time()
+    log(f"Scan 3/4 done: {len(avg_inst_dict)} msnames processed in {t_scan3_end - t_scan3_start:.1f}s")
+    avg_inst_df = pd.DataFrame(
+        list(avg_inst_dict.items()),
+        columns=["msname", "avg_instances_per_ts"],
+    )
+    max_min_df = max_min_df.merge(avg_inst_df, on="msname", how="left")
+
+    log("Scan 4/4: Computing total unique instances per microservice...")
     total_inst_df = con.execute(f"""
         SELECT msname, COUNT(DISTINCT msinstanceid) AS total_instances
         FROM read_parquet('{parquet_pattern}')
@@ -153,9 +236,9 @@ def main():
     avg_max_mem = float(max_min_df["max_mem"].mean())
     avg_min_mem = float(max_min_df["min_mem"].mean())
 
-    avg_inst_per_ms = float(avg_inst_df["avg_instances_per_ts"].mean())
-    max_avg_inst = float(avg_inst_df["avg_instances_per_ts"].max())
-    min_avg_inst = float(avg_inst_df["avg_instances_per_ts"].min())
+    avg_inst_per_ms = float(max_min_df["avg_instances_per_ts"].mean())
+    max_avg_inst = float(max_min_df["avg_instances_per_ts"].max())
+    min_avg_inst = float(max_min_df["avg_instances_per_ts"].min())
 
     avg_total_inst = float(total_inst_df["total_instances"].mean())
     max_total_inst = int(total_inst_df["total_instances"].max())
@@ -207,7 +290,7 @@ def main():
         color="forestgreen",
     )
 
-    inst_counts = avg_inst_df["avg_instances_per_ts"].to_numpy()
+    inst_counts = max_min_df["avg_instances_per_ts"].to_numpy()
     inst_hist, inst_edges = np.histogram(inst_counts, bins=n_bins)
     plot_histogram(
         inst_edges, inst_hist,
