@@ -20,7 +20,7 @@ if REPO_ROOT not in sys.path:
 
 from experiments.sdtnet.config import CFG
 from experiments.sdtnet.dataset import SdtnetDataset, N_CHANNELS
-from experiments.sdtnet.model import DLinearForecaster
+from experiments.sdtnet.model import ChannelIndependentTCNForecaster
 from training.metrics import compute_metrics
 
 
@@ -55,14 +55,18 @@ def setup_logging(log_dir: str) -> str:
     return log_path
 
 
-def load_sdtnet_model(ckpt_path: str, device: torch.device) -> DLinearForecaster:
+def load_sdtnet_model(ckpt_path: str, device: torch.device) -> ChannelIndependentTCNForecaster:
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
     saved_cfg = ckpt.get("cfg", {})
-    model = DLinearForecaster(
+    model = ChannelIndependentTCNForecaster(
         total_channels=saved_cfg.get("total_channels", N_CHANNELS),
         input_len=saved_cfg.get("input_len", CFG.INPUT_LEN),
         pred_horizon=saved_cfg.get("pred_horizon", CFG.PRED_HORIZON),
-        moving_avg_kernel=saved_cfg.get("moving_avg_kernel", CFG.DLINEAR_MOVING_AVG_KERNEL),
+        num_filters=saved_cfg.get("tcn_num_filters", CFG.TCN_NUM_FILTERS),
+        kernel_size=saved_cfg.get("tcn_kernel_size", CFG.TCN_KERNEL_SIZE),
+        dilations=saved_cfg.get("tcn_dilations", CFG.TCN_DILATIONS),
+        dropout=saved_cfg.get("tcn_dropout", CFG.TCN_DROPOUT),
+        residual_prediction=saved_cfg.get("residual_prediction", CFG.RESIDUAL_PREDICTION),
     ).to(device)
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
@@ -70,7 +74,7 @@ def load_sdtnet_model(ckpt_path: str, device: torch.device) -> DLinearForecaster
 
 
 def predict(
-    model: DLinearForecaster,
+    model: ChannelIndependentTCNForecaster,
     dataset: SdtnetDataset,
     device: torch.device,
     batch_size: int = 512,
@@ -94,7 +98,7 @@ def predict(
 
 def main() -> None:
     ap = argparse.ArgumentParser(
-        description="Evaluate SDT-Net model (SVMD-DE-DLinear)."
+        description="Evaluate SDT-Net model (SVMD-DE-TCN)."
     )
     ap.add_argument("--preprocess_dir", default="/dataset/sdtnet_preprocess")
     ap.add_argument("--model_dir", default="/proj/k8sautoscaledl-PG0/models/sdtnet")

@@ -35,8 +35,19 @@ class SdtnetConfig:
     # Fixed channel contract
     TOTAL_CHANNELS: int = 6
 
-    # --- DLinear ---
-    DLINEAR_MOVING_AVG_KERNEL: int = 25
+    # --- TCN ---
+    TCN_NUM_FILTERS: int = 64
+    TCN_KERNEL_SIZE: int = 3
+    TCN_DILATIONS: tuple = (1, 2, 4, 8)
+    TCN_DROPOUT: float = 0.1
+    RESIDUAL_PREDICTION: bool = True
+
+    # --- Loss ---
+    DELTA_LOSS_WEIGHT: float = 0.2
+    DIRECTION_LOSS_WEIGHT: float = 0.01
+
+    # --- LR Schedule ---
+    USE_LR_SCHEDULER: bool = True
 
     # --- Training ---
     LEARNING_RATE: float = 0.0005
