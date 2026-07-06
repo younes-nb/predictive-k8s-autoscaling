@@ -77,7 +77,7 @@ if REPO_ROOT not in sys.path:
 
 from experiments.sdtnet.config import CFG
 from experiments.sdtnet.dataset import SdtnetDataset, N_CHANNELS
-from experiments.sdtnet.model import ChannelIndependentTCNForecaster
+from experiments.sdtnet.model import SdtnetCNNBiLSTM
 
 
 class _TehranFormatter(logging.Formatter):
@@ -113,7 +113,7 @@ def setup_logging(log_dir: str) -> str:
 
 def main() -> None:
     ap = argparse.ArgumentParser(
-        description="Train SDT-Net model (SVMD-DE-TCN)."
+        description="Train SDT-Net model (SVMD-DE-CNNBiLSTM)."
     )
     ap.add_argument("--preprocess_dir", default="/dataset/sdtnet_preprocess")
     ap.add_argument("--out_dir", default="/proj/k8sautoscaledl-PG0/models/sdtnet")
@@ -121,8 +121,6 @@ def main() -> None:
                     help="Directory for training logs (default: /proj/k8sautoscaledl-PG0/logs/sdtnet)")
     ap.add_argument("--epochs", type=int, default=None,
                     help="Override CFG.EPOCHS for smoke tests without editing config.py")
-    ap.add_argument("--lr_schedule", type=lambda x: x.lower() == "true", default=None,
-                    help="Override CFG.USE_LR_SCHEDULER")
     ap.add_argument("--cpu", action="store_true", help="Force CPU training")
     args = ap.parse_args()
 
@@ -170,27 +168,18 @@ def main() -> None:
 
     scaler = GradScaler("cuda", enabled=(device.type == "cuda"))
 
-    model = ChannelIndependentTCNForecaster(
-        total_channels=N_CHANNELS,
+    model = SdtnetCNNBiLSTM(
+        in_channels=N_CHANNELS,
         input_len=CFG.INPUT_LEN,
         pred_horizon=CFG.PRED_HORIZON,
-        num_filters=CFG.TCN_NUM_FILTERS,
-        kernel_size=CFG.TCN_KERNEL_SIZE,
-        dilations=CFG.TCN_DILATIONS,
-        dropout=CFG.TCN_DROPOUT,
-        residual_prediction=CFG.RESIDUAL_PREDICTION,
+        kernel_sizes=CFG.KERNEL_SIZES,
+        conv1_out_ch=CFG.CONV1_OUT_CH,
+        conv2_out_ch=CFG.CONV2_OUT_CH,
+        bilstm_hidden=CFG.BILSTM_HIDDEN,
     ).to(device)
 
-    optimizer = torch.optim.AdamW(
-        model.parameters(), lr=CFG.LEARNING_RATE, weight_decay=CFG.WEIGHT_DECAY,
-    )
+    optimizer = torch.optim.Adam(model.parameters(), lr=CFG.LEARNING_RATE)
     criterion = nn.MSELoss()
-
-    use_scheduler = args.lr_schedule if args.lr_schedule is not None else CFG.USE_LR_SCHEDULER
-    scheduler = (
-        torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
-        if use_scheduler else None
-    )
 
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logging.info("Model parameters: %d", n_params)
@@ -205,23 +194,11 @@ def main() -> None:
 
         model.train()
         train_accum, n_train_count = 0.0, 0
-        for x, y, last_val in train_loader:
+        for x, y, _ in train_loader:
             optimizer.zero_grad()
             with autocast("cuda", enabled=(device.type == "cuda")):
                 pred = model(x)
-                mse_loss = criterion(pred, y)
-                delta_loss = criterion(
-                    pred - last_val.unsqueeze(1),
-                    y - last_val.unsqueeze(1),
-                )
-                loss = mse_loss + CFG.DELTA_LOSS_WEIGHT * delta_loss
-
-                if CFG.DIRECTION_LOSS_WEIGHT > 0:
-                    y_dir = torch.sign(y[:, -1] - last_val)
-                    pred_dir = torch.sign(pred[:, -1] - last_val)
-                    direction_loss = torch.relu(-y_dir * pred_dir).mean()
-                    loss += CFG.DIRECTION_LOSS_WEIGHT * direction_loss
-
+                loss = criterion(pred, y)
             if torch.isnan(loss) or torch.isinf(loss):
                 logging.warning("NaN/Inf loss detected; skipping batch.")
                 continue
@@ -233,9 +210,6 @@ def main() -> None:
             train_accum += loss.item() * x.size(0)
             n_train_count += x.size(0)
         avg_train = train_accum / max(n_train_count, 1)
-
-        if scheduler is not None:
-            scheduler.step()
 
         model.eval()
         val_accum, n_val_count = 0.0, 0
@@ -262,13 +236,10 @@ def main() -> None:
                         "pred_horizon": CFG.PRED_HORIZON,
                         "stride": CFG.STRIDE,
                         "total_channels": CFG.TOTAL_CHANNELS,
-                        "tcn_num_filters": CFG.TCN_NUM_FILTERS,
-                        "tcn_kernel_size": CFG.TCN_KERNEL_SIZE,
-                        "tcn_dilations": CFG.TCN_DILATIONS,
-                        "tcn_dropout": CFG.TCN_DROPOUT,
-                        "residual_prediction": CFG.RESIDUAL_PREDICTION,
-                        "delta_loss_weight": CFG.DELTA_LOSS_WEIGHT,
-                        "direction_loss_weight": CFG.DIRECTION_LOSS_WEIGHT,
+                        "kernel_sizes": CFG.KERNEL_SIZES,
+                        "conv1_out_ch": CFG.CONV1_OUT_CH,
+                        "conv2_out_ch": CFG.CONV2_OUT_CH,
+                        "bilstm_hidden": CFG.BILSTM_HIDDEN,
                         "learning_rate": CFG.LEARNING_RATE,
                         "batch_size": CFG.BATCH_SIZE,
                         "weight_decay": CFG.WEIGHT_DECAY,

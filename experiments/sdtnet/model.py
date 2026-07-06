@@ -1,8 +1,11 @@
 import os
 import sys
+import warnings
 
 import torch
 import torch.nn as nn
+
+warnings.filterwarnings("ignore", "Using padding='same' with even kernel lengths")
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, "..", ".."))
@@ -10,80 +13,80 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 
-class ChannelIndependentTCNForecaster(nn.Module):
+class SdtnetCNNBiLSTM(nn.Module):
     def __init__(
         self,
-        total_channels: int = 6,
+        in_channels: int = 6,
         input_len: int = 60,
         pred_horizon: int = 5,
-        num_filters: int = 64,
-        kernel_size: int = 3,
-        dilations: tuple = (1, 2, 4, 8),
-        dropout: float = 0.1,
-        residual_prediction: bool = True,
+        kernel_sizes: tuple = (2, 4, 8),
+        conv1_out_ch: int = 32,
+        conv2_out_ch: int = 64,
+        bilstm_hidden: tuple = (32, 64, 128),
     ):
         super().__init__()
-        self.total_channels = total_channels
-        self.input_len = input_len
-        self.pred_horizon = pred_horizon
-        self.residual_prediction = residual_prediction
+        del input_len
+        K = len(kernel_sizes)
 
-        layers = []
-        in_ch = 1
-        for d in dilations:
-            layers.extend([
-                nn.Conv1d(in_ch, num_filters, kernel_size,
-                          padding=d * (kernel_size - 1) // 2,
-                          dilation=d),
-                nn.BatchNorm1d(num_filters),
+        self.conv_set1 = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv1d(in_channels, conv1_out_ch, ks, padding="same"),
                 nn.ReLU(),
-                nn.Dropout(dropout),
-            ])
-            in_ch = num_filters
+            )
+            for ks in kernel_sizes
+        ])
 
-        self.backbone = nn.Sequential(*layers)
-        self.head = nn.Sequential(
-            nn.AdaptiveAvgPool1d(1),
-            nn.Flatten(),
-            nn.Linear(num_filters, pred_horizon),
-        )
+        in_ch2 = K * conv1_out_ch
+        self.conv_set2 = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv1d(in_ch2, conv2_out_ch, ks, padding="same"),
+                nn.ReLU(),
+            )
+            for ks in kernel_sizes
+        ])
+
+        lstm_in = K * conv2_out_ch
+        h = bilstm_hidden
+        self.bilstm1 = nn.LSTM(lstm_in, h[0], batch_first=True, bidirectional=True)
+        self.bilstm2 = nn.LSTM(h[0] * 2, h[1], batch_first=True, bidirectional=True)
+        self.bilstm3 = nn.LSTM(h[1] * 2, h[2], batch_first=True, bidirectional=True)
+
+        self.fc = nn.Linear(h[2] * 2, pred_horizon)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        batch = x.size(0)
-        x_flat = x.permute(0, 2, 1).reshape(
-            batch * self.total_channels, 1, self.input_len
-        )
-        features = self.backbone(x_flat)
-        delta = self.head(features)
-        delta = delta.reshape(batch, self.total_channels, self.pred_horizon)
+        if x.dim() == 2:
+            x = x.unsqueeze(-1)
 
-        if self.residual_prediction:
-            last_obs = x[:, -1:, :]
-            last_obs = last_obs.permute(0, 2, 1)
-            pred = last_obs + delta
-        else:
-            pred = delta
+        xc = x.permute(0, 2, 1)
 
-        return pred.sum(dim=1)
+        out1 = torch.cat([conv(xc) for conv in self.conv_set1], dim=1)
+        out2 = torch.cat([conv(out1) for conv in self.conv_set2], dim=1)
+
+        seq = out2.permute(0, 2, 1)
+
+        o1, _ = self.bilstm1(seq)
+        o2, _ = self.bilstm2(o1)
+        o3, _ = self.bilstm3(o2)
+
+        last = o3[:, -1, :]
+        return self.fc(last)
 
 
 if __name__ == "__main__":
     from experiments.sdtnet.config import CFG
 
-    model = ChannelIndependentTCNForecaster(
-        total_channels=CFG.TOTAL_CHANNELS,
+    model = SdtnetCNNBiLSTM(
+        in_channels=CFG.TOTAL_CHANNELS,
         input_len=CFG.INPUT_LEN,
         pred_horizon=CFG.PRED_HORIZON,
-        num_filters=CFG.TCN_NUM_FILTERS,
-        kernel_size=CFG.TCN_KERNEL_SIZE,
-        dilations=CFG.TCN_DILATIONS,
-        dropout=CFG.TCN_DROPOUT,
-        residual_prediction=CFG.RESIDUAL_PREDICTION,
+        kernel_sizes=CFG.KERNEL_SIZES,
+        conv1_out_ch=CFG.CONV1_OUT_CH,
+        conv2_out_ch=CFG.CONV2_OUT_CH,
+        bilstm_hidden=CFG.BILSTM_HIDDEN,
     )
     x = torch.randn(4, CFG.INPUT_LEN, CFG.TOTAL_CHANNELS)
     out = model(x)
     assert out.shape == (4, CFG.PRED_HORIZON), f"Expected (4, {CFG.PRED_HORIZON}), got {out.shape}"
-    total_params = sum(p.numel() for p in model.parameters())
     print(f"Output shape: {tuple(out.shape)}")
-    print(f"Model parameters: {total_params}")
-    print("ChannelIndependentTCNForecaster smoke test passed")
+    print(f"Parameters: {sum(p.numel() for p in model.parameters()):,}")
+    print("SdtnetCNNBiLSTM smoke test passed")

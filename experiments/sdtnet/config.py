@@ -35,25 +35,17 @@ class SdtnetConfig:
     # Fixed channel contract
     TOTAL_CHANNELS: int = 6
 
-    # --- TCN ---
-    TCN_NUM_FILTERS: int = 64
-    TCN_KERNEL_SIZE: int = 3
-    TCN_DILATIONS: tuple = (1, 2, 4, 8)
-    TCN_DROPOUT: float = 0.1
-    RESIDUAL_PREDICTION: bool = True
-
-    # --- Loss ---
-    DELTA_LOSS_WEIGHT: float = 0.2
-    DIRECTION_LOSS_WEIGHT: float = 0.01
-
-    # --- LR Schedule ---
-    USE_LR_SCHEDULER: bool = True
+    # --- CNN+BiLSTM ---
+    KERNEL_SIZES: tuple = (2, 4, 8)
+    CONV1_OUT_CH: int = 32
+    CONV2_OUT_CH: int = 64
+    BILSTM_HIDDEN: tuple = (32, 64, 128)
 
     # --- Training ---
-    LEARNING_RATE: float = 0.0005
-    BATCH_SIZE: int = 4096  # can raise toward 8192 if no CUDA OOM
+    LEARNING_RATE: float = 0.001
+    BATCH_SIZE: int = 4096
     EPOCHS: int = 100
-    WEIGHT_DECAY: float = 1e-4
+    WEIGHT_DECAY: float = 0.0
     GRAD_CLIP_NORM: float = 1.0
 
 
