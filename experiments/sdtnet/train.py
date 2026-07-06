@@ -23,14 +23,15 @@ class FastTensorDataLoader:
         self.dataset_len = len(dataset)
         self._cpu_fallback = False
 
+        self._cpu_fallback = False
         if device is not None:
             try:
                 self.X = dataset.X.to(device)
                 self.y = dataset.y.to(device)
                 self.last = dataset.last.to(device)
-            except torch.cuda.OutOfMemoryError:
+            except Exception:
                 logging.warning(
-                    "CUDA OOM moving dataset to GPU; falling back to CPU storage "
+                    "Failed to move dataset to GPU; falling back to CPU storage "
                     "with per-batch transfer."
                 )
                 self._cpu_fallback = True
@@ -43,16 +44,10 @@ class FastTensorDataLoader:
             self.last = dataset.last
 
     def __iter__(self):
-        if self._cpu_fallback:
-            self.X = self.X.to(self.device)
-            self.y = self.y.to(self.device)
-            self.last = self.last.to(self.device)
-            self._cpu_fallback = False
-
         if self.shuffle:
-            self.indices = torch.randperm(self.dataset_len, device=self.device)
+            self.indices = torch.randperm(self.dataset_len)
         else:
-            self.indices = torch.arange(self.dataset_len, device=self.device)
+            self.indices = torch.arange(self.dataset_len)
         self.idx = 0
         return self
 
@@ -61,9 +56,14 @@ class FastTensorDataLoader:
             raise StopIteration
         batch_indices = self.indices[self.idx: self.idx + self.batch_size]
         self.idx += self.batch_size
-        x = self.X[batch_indices]
-        y = self.y[batch_indices]
-        last = self.last[batch_indices]
+        if self._cpu_fallback:
+            x = self.X[batch_indices].to(self.device, non_blocking=True)
+            y = self.y[batch_indices].to(self.device, non_blocking=True)
+            last = self.last[batch_indices].to(self.device, non_blocking=True)
+        else:
+            x = self.X[batch_indices]
+            y = self.y[batch_indices]
+            last = self.last[batch_indices]
         return x, y, last
 
     def __len__(self):
@@ -154,18 +154,6 @@ def main() -> None:
         logging.error("Empty training dataset. Aborting.")
         return
 
-    n_train = len(train_ds)
-    n_val = len(val_ds)
-
-    train_loader = FastTensorDataLoader(
-        train_ds, batch_size=CFG.BATCH_SIZE, shuffle=True, device=device,
-    )
-    val_loader = FastTensorDataLoader(
-        val_ds, batch_size=CFG.BATCH_SIZE * 2, shuffle=False, device=device,
-    )
-
-    del train_ds, val_ds
-
     scaler = GradScaler("cuda", enabled=(device.type == "cuda"))
 
     model = SdtnetCNNBiLSTM(
@@ -176,15 +164,33 @@ def main() -> None:
         conv1_out_ch=CFG.CONV1_OUT_CH,
         conv2_out_ch=CFG.CONV2_OUT_CH,
         bilstm_hidden=CFG.BILSTM_HIDDEN,
+        dropout=CFG.DROPOUT,
     ).to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=CFG.LEARNING_RATE)
     criterion = nn.MSELoss()
 
+    n_train = len(train_ds)
+    n_val = len(val_ds)
+
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logging.info("Model parameters: %d", n_params)
     logging.info("Train windows: %d | Val windows: %d", n_train, n_val)
     logging.info("Epochs: %d", epochs)
+
+    train_loader = FastTensorDataLoader(
+        train_ds, batch_size=CFG.BATCH_SIZE, shuffle=True, device=device,
+    )
+    val_loader = FastTensorDataLoader(
+        val_ds, batch_size=CFG.BATCH_SIZE * 2, shuffle=False, device=device,
+    )
+    if not val_loader._cpu_fallback:
+        logging.info("Moving val data to CPU fallback to free GPU memory.")
+        val_loader.X = val_loader.X.cpu()
+        val_loader.y = val_loader.y.cpu()
+        val_loader.last = val_loader.last.cpu()
+        val_loader._cpu_fallback = True
+    del train_ds, val_ds
 
     ckpt_path = os.path.join(args.out_dir, "sdtnet.pt")
     best_val_loss = float("inf")
@@ -240,6 +246,7 @@ def main() -> None:
                         "conv1_out_ch": CFG.CONV1_OUT_CH,
                         "conv2_out_ch": CFG.CONV2_OUT_CH,
                         "bilstm_hidden": CFG.BILSTM_HIDDEN,
+                        "dropout": CFG.DROPOUT,
                         "learning_rate": CFG.LEARNING_RATE,
                         "batch_size": CFG.BATCH_SIZE,
                         "weight_decay": CFG.WEIGHT_DECAY,

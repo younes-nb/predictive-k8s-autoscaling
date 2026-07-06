@@ -66,6 +66,7 @@ def load_sdtnet_model(ckpt_path: str, device: torch.device) -> SdtnetCNNBiLSTM:
         conv1_out_ch=saved_cfg.get("conv1_out_ch", CFG.CONV1_OUT_CH),
         conv2_out_ch=saved_cfg.get("conv2_out_ch", CFG.CONV2_OUT_CH),
         bilstm_hidden=saved_cfg.get("bilstm_hidden", CFG.BILSTM_HIDDEN),
+        dropout=saved_cfg.get("dropout", 0.0),
     ).to(device)
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()

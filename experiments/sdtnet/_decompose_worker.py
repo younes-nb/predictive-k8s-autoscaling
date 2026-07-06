@@ -17,7 +17,7 @@ def _log(msg: str) -> None:
     print(msg, file=sys.stderr, flush=True)
 
 
-CHANNEL_DIRS = [f"mode_{i}" for i in range(CFG.SVMD2_MAX_MODES)] + ["lowfreq_0"]
+CHANNEL_DIRS = [f"mode_{i}" for i in range(CFG.SVMD2_MAX_MODES)] + ["lowfreq_0", "residual_0"]
 N_CHANNELS = len(CHANNEL_DIRS)
 
 
