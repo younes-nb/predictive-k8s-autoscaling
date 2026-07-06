@@ -34,9 +34,14 @@ class _TehranFormatter(logging.Formatter):
         return f"{ts} [{record.levelname}] {record.getMessage()}"
 
 
-def setup_logging(out_dir: str) -> str:
-    os.makedirs(out_dir, exist_ok=True)
-    log_path = os.path.join(out_dir, "evaluate_sdtnet.log")
+def setup_logging(log_dir: str) -> str:
+    os.makedirs(log_dir, exist_ok=True)
+    try:
+        tz = ZoneInfo("Asia/Tehran")
+    except Exception:
+        tz = None
+    ts = datetime.now(tz).strftime("%Y%m%d_%H%M%S")
+    log_path = os.path.join(log_dir, f"evaluate_{ts}.log")
     root = logging.getLogger()
     root.setLevel(logging.INFO)
     root.handlers.clear()
@@ -93,11 +98,13 @@ def main() -> None:
     )
     ap.add_argument("--preprocess_dir", default="/dataset/sdtnet_preprocess")
     ap.add_argument("--model_dir", default="/proj/k8sautoscaledl-PG0/models/sdtnet")
+    ap.add_argument("--log_dir", default="/proj/k8sautoscaledl-PG0/logs/sdtnet",
+                    help="Directory for evaluation logs (default: /proj/k8sautoscaledl-PG0/logs/sdtnet)")
     ap.add_argument("--cpu", action="store_true")
     ap.add_argument("--batch_size", type=int, default=512)
     args = ap.parse_args()
 
-    log_path = setup_logging(args.model_dir)
+    log_path = setup_logging(args.log_dir)
     device = torch.device(
         "cuda" if torch.cuda.is_available() and not args.cpu else "cpu"
     )
