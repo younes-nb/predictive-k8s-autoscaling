@@ -7,9 +7,11 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
+from experiments.sdtnet.config import CFG as SDT_CFG
+
 logger = logging.getLogger(__name__)
 
-CHANNEL_DIRS = ["mode_0", "mode_1", "mode_2", "mode_3", "mode_4", "lowfreq_0"]
+CHANNEL_DIRS = [f"mode_{i}" for i in range(SDT_CFG.SVMD2_MAX_MODES)] + ["lowfreq_0", "residual_0"]
 N_CHANNELS = len(CHANNEL_DIRS)
 
 

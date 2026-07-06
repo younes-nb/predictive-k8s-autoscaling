@@ -11,7 +11,7 @@ class SdtnetConfig:
     VAL_FRAC: float = 0.10
 
     # --- SVMD (primary decomposition) ---
-    SVMD_MAX_MODES: int = 8
+    SVMD_MAX_MODES: int = 10
     SVMD_ENERGY_RATIO_TOL: float = 0.005
     SVMD_ALPHA: int = 2000
     SVMD_TAU: float = 0.0
@@ -26,14 +26,14 @@ class SdtnetConfig:
     DE_HIGH_QUANTILE: float = 0.60
 
     # --- SVMD (secondary decomposition) ---
-    SVMD2_MAX_MODES: int = 5
+    SVMD2_MAX_MODES: int = 6
     SVMD2_ENERGY_RATIO_TOL: float = 0.01
     SVMD2_ALPHA: int = 2000
     SVMD2_TAU: float = 0.0
     SVMD2_TOL: float = 1e-7
 
-    # Fixed channel contract
-    TOTAL_CHANNELS: int = 6
+    # Fixed channel contract (SVMD2_MAX_MODES + lowfreq + residual)
+    TOTAL_CHANNELS: int = 8
 
     # --- CNN+BiLSTM ---
     KERNEL_SIZES: tuple = (2, 4, 8)

@@ -216,10 +216,10 @@ def decompose_window(window: np.ndarray, cfg) -> np.ndarray:
 
     recon = sum(padded_secondary) + low_freq_signal
     recon_error = window - recon
-    low_freq_signal = low_freq_signal + recon_error
 
     channels = [m.astype(np.float32) for m in padded_secondary]
     channels.append(low_freq_signal.astype(np.float32))
+    channels.append(recon_error.astype(np.float32))
 
     result = np.stack(channels, axis=0)
     assert result.shape == (cfg.TOTAL_CHANNELS, cfg.INPUT_LEN), (

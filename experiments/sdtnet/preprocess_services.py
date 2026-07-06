@@ -21,7 +21,7 @@ if REPO_ROOT not in sys.path:
 from shared.config_paths import PATHS
 from experiments.sdtnet.config import CFG
 
-CHANNEL_DIRS = [f"mode_{i}" for i in range(CFG.SVMD2_MAX_MODES)] + ["lowfreq_0"]
+CHANNEL_DIRS = [f"mode_{i}" for i in range(CFG.SVMD2_MAX_MODES)] + ["lowfreq_0", "residual_0"]
 
 
 class _TehranFormatter(logging.Formatter):
