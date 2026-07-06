@@ -53,7 +53,7 @@ def main() -> None:
             train_cmd.append("--cpu")
         if args.epochs_override is not None:
             train_cmd.extend(["--epochs", str(args.epochs_override)])
-        run_step(train_cmd, "Step 2 — Train SDT-Net Model (TimesNet)")
+        run_step(train_cmd, "Step 2 — Train SDT-Net Model (DLinear)")
 
     if not args.skip_eval:
         eval_cmd = py + [

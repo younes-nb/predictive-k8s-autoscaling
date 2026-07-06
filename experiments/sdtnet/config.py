@@ -35,13 +35,8 @@ class SdtnetConfig:
     # Fixed channel contract
     TOTAL_CHANNELS: int = 6
 
-    # --- TimesNet ---
-    TIMESNET_TOP_K_PERIODS: int = 3
-    TIMESNET_D_MODEL: int = 32
-    TIMESNET_D_FF: int = 64
-    TIMESNET_NUM_KERNELS: int = 4
-    TIMESNET_NUM_BLOCKS: int = 2
-    TIMESNET_DROPOUT: float = 0.1
+    # --- DLinear ---
+    DLINEAR_MOVING_AVG_KERNEL: int = 25
 
     # --- Training ---
     LEARNING_RATE: float = 0.0005

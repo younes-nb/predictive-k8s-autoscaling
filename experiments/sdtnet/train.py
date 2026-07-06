@@ -77,7 +77,7 @@ if REPO_ROOT not in sys.path:
 
 from experiments.sdtnet.config import CFG
 from experiments.sdtnet.dataset import SdtnetDataset, N_CHANNELS
-from experiments.sdtnet.model import TimesNetForecaster
+from experiments.sdtnet.model import DLinearForecaster
 
 
 class _TehranFormatter(logging.Formatter):
@@ -108,7 +108,7 @@ def setup_logging(out_dir: str) -> str:
 
 def main() -> None:
     ap = argparse.ArgumentParser(
-        description="Train SDT-Net model (SVMD-DE-TimesNet)."
+        description="Train SDT-Net model (SVMD-DE-DLinear)."
     )
     ap.add_argument("--preprocess_dir", default="/dataset/sdtnet_preprocess")
     ap.add_argument("--out_dir", default="/proj/k8sautoscaledl-PG0/models/sdtnet")
@@ -161,16 +161,11 @@ def main() -> None:
 
     scaler = GradScaler("cuda", enabled=(device.type == "cuda"))
 
-    model = TimesNetForecaster(
+    model = DLinearForecaster(
         total_channels=N_CHANNELS,
         input_len=CFG.INPUT_LEN,
         pred_horizon=CFG.PRED_HORIZON,
-        top_k_periods=CFG.TIMESNET_TOP_K_PERIODS,
-        d_model=CFG.TIMESNET_D_MODEL,
-        d_ff=CFG.TIMESNET_D_FF,
-        num_kernels=CFG.TIMESNET_NUM_KERNELS,
-        num_blocks=CFG.TIMESNET_NUM_BLOCKS,
-        dropout=CFG.TIMESNET_DROPOUT,
+        moving_avg_kernel=CFG.DLINEAR_MOVING_AVG_KERNEL,
     ).to(device)
 
     optimizer = torch.optim.Adam(
@@ -233,12 +228,7 @@ def main() -> None:
                         "pred_horizon": CFG.PRED_HORIZON,
                         "stride": CFG.STRIDE,
                         "total_channels": CFG.TOTAL_CHANNELS,
-                        "top_k_periods": CFG.TIMESNET_TOP_K_PERIODS,
-                        "d_model": CFG.TIMESNET_D_MODEL,
-                        "d_ff": CFG.TIMESNET_D_FF,
-                        "num_kernels": CFG.TIMESNET_NUM_KERNELS,
-                        "num_blocks": CFG.TIMESNET_NUM_BLOCKS,
-                        "dropout": CFG.TIMESNET_DROPOUT,
+                        "moving_avg_kernel": CFG.DLINEAR_MOVING_AVG_KERNEL,
                         "learning_rate": CFG.LEARNING_RATE,
                         "batch_size": CFG.BATCH_SIZE,
                         "weight_decay": CFG.WEIGHT_DECAY,

@@ -20,7 +20,7 @@ if REPO_ROOT not in sys.path:
 
 from experiments.sdtnet.config import CFG
 from experiments.sdtnet.dataset import SdtnetDataset, N_CHANNELS
-from experiments.sdtnet.model import TimesNetForecaster
+from experiments.sdtnet.model import DLinearForecaster
 from training.metrics import compute_metrics
 
 
@@ -50,19 +50,14 @@ def setup_logging(out_dir: str) -> str:
     return log_path
 
 
-def load_sdtnet_model(ckpt_path: str, device: torch.device) -> TimesNetForecaster:
+def load_sdtnet_model(ckpt_path: str, device: torch.device) -> DLinearForecaster:
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
     saved_cfg = ckpt.get("cfg", {})
-    model = TimesNetForecaster(
+    model = DLinearForecaster(
         total_channels=saved_cfg.get("total_channels", N_CHANNELS),
         input_len=saved_cfg.get("input_len", CFG.INPUT_LEN),
         pred_horizon=saved_cfg.get("pred_horizon", CFG.PRED_HORIZON),
-        top_k_periods=saved_cfg.get("top_k_periods", CFG.TIMESNET_TOP_K_PERIODS),
-        d_model=saved_cfg.get("d_model", CFG.TIMESNET_D_MODEL),
-        d_ff=saved_cfg.get("d_ff", CFG.TIMESNET_D_FF),
-        num_kernels=saved_cfg.get("num_kernels", CFG.TIMESNET_NUM_KERNELS),
-        num_blocks=saved_cfg.get("num_blocks", CFG.TIMESNET_NUM_BLOCKS),
-        dropout=saved_cfg.get("dropout", CFG.TIMESNET_DROPOUT),
+        moving_avg_kernel=saved_cfg.get("moving_avg_kernel", CFG.DLINEAR_MOVING_AVG_KERNEL),
     ).to(device)
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
@@ -70,7 +65,7 @@ def load_sdtnet_model(ckpt_path: str, device: torch.device) -> TimesNetForecaste
 
 
 def predict(
-    model: TimesNetForecaster,
+    model: DLinearForecaster,
     dataset: SdtnetDataset,
     device: torch.device,
     batch_size: int = 512,
@@ -94,7 +89,7 @@ def predict(
 
 def main() -> None:
     ap = argparse.ArgumentParser(
-        description="Evaluate SDT-Net model (SVMD-DE-TimesNet)."
+        description="Evaluate SDT-Net model (SVMD-DE-DLinear)."
     )
     ap.add_argument("--preprocess_dir", default="/dataset/sdtnet_preprocess")
     ap.add_argument("--model_dir", default="/proj/k8sautoscaledl-PG0/models/sdtnet")
