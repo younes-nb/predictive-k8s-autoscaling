@@ -11,7 +11,7 @@ class TsdpConfig:
     VAL_FRAC: float = 0.10
 
     # --- SVMD (adaptive decomposition with center-frequency progression) ---
-    SVMD_ALPHA: int = 2000
+    SVMD_ALPHA: int = 500
     SVMD_TAU: float = 0.0
     SVMD_TOL: float = 1e-7
 

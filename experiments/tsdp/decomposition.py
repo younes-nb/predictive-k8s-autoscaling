@@ -252,11 +252,16 @@ def decompose_window(window: np.ndarray, cfg) -> np.ndarray:
 
     pad_len = 64 - len(high_composite)
     if pad_len > 0:
-        high_padded = np.pad(high_composite, (0, pad_len), mode='reflect')
+        # Pad on the left side (past) using 'edge' to prevent false spikes
+        high_padded = np.pad(high_composite, (pad_len, 0), mode='edge')
     else:
         high_padded = high_composite
     mra_coeffs = pywt.mra(high_padded, 'sym4', level=3, transform='swt')
-    mra_coeffs = [c[:len(high_composite)] for c in mra_coeffs]
+    # Trim the left padding off, keeping the most recent steps
+    if pad_len > 0:
+        mra_coeffs = [c[pad_len:] for c in mra_coeffs]
+    else:
+        mra_coeffs = [c for c in mra_coeffs]
 
     channels = [
         mra_coeffs[0].astype(np.float32),
