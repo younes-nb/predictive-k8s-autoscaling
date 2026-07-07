@@ -3,3 +3,4 @@ AGENTS.md
 .venv
 /local_data
 *.pyc
+__pycache__/

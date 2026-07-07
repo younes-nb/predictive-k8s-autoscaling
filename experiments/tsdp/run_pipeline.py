@@ -6,6 +6,12 @@ import time
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 
+ARCH_MAP = {
+    "patchtst": "patchtst",
+    "cnn_bilstm": "cnn_bilstm",
+    "tcn_bigru": "tcn_bigru",
+}
+
 
 def run_step(cmd: list, label: str) -> None:
     print(f"\n{'=' * 60}")
@@ -19,9 +25,12 @@ def run_step(cmd: list, label: str) -> None:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="SDT-Net end-to-end pipeline")
-    ap.add_argument("--preprocess_dir", default="/dataset/sdtnet_preprocess")
-    ap.add_argument("--model_dir", default="/proj/k8sautoscaledl-PG0/models/sdtnet")
+    ap = argparse.ArgumentParser(description="TSDP end-to-end pipeline")
+    ap.add_argument("--arch", choices=list(ARCH_MAP.keys()), default="patchtst",
+                    help="Architecture: patchtst | cnn_bilstm | tcn_bigru")
+    ap.add_argument("--preprocess_dir", default="/dataset/tsdp_preprocess")
+    ap.add_argument("--model_dir", default="/proj/k8sautoscaledl-PG0/models/tsdp")
+    ap.add_argument("--log_dir", default="/proj/k8sautoscaledl-PG0/logs/tsdp")
     ap.add_argument("--max_services", type=int, default=0,
                     help="Maximum services to process (default: 0 = all)")
     ap.add_argument("--epochs_override", type=int, default=None,
@@ -32,6 +41,7 @@ def main() -> None:
     ap.add_argument("--cpu", action="store_true")
     args = ap.parse_args()
 
+    arch_dir = os.path.join(THIS_DIR, ARCH_MAP[args.arch])
     py = [sys.executable]
 
     if not args.skip_preprocess:
@@ -40,33 +50,35 @@ def main() -> None:
             "--out_dir", args.preprocess_dir,
             "--max_services", str(args.max_services),
         ]
-        label = "Step 1 — SVMD-DE-Quantile-SVMD Decomposition"
+        label = "Step 1 — SVMD-DE-Otsu-MODWT Decomposition"
         run_step(py + preprocess_cmd, label)
 
     if not args.skip_train:
         train_cmd = py + [
-            os.path.join(THIS_DIR, "train.py"),
+            os.path.join(arch_dir, "train.py"),
             "--preprocess_dir", args.preprocess_dir,
             "--out_dir", args.model_dir,
+            "--log_dir", args.log_dir,
         ]
         if args.cpu:
             train_cmd.append("--cpu")
         if args.epochs_override is not None:
             train_cmd.extend(["--epochs", str(args.epochs_override)])
-        run_step(train_cmd, "Step 2 — Train SDT-Net Model (CNN+BiLSTM)")
+        run_step(train_cmd, f"Step 2 — Train TSDP ({args.arch})")
 
     if not args.skip_eval:
         eval_cmd = py + [
-            os.path.join(THIS_DIR, "evaluate.py"),
+            os.path.join(arch_dir, "evaluate.py"),
             "--preprocess_dir", args.preprocess_dir,
             "--model_dir", args.model_dir,
+            "--log_dir", args.log_dir,
         ]
         if args.cpu:
             eval_cmd.append("--cpu")
-        run_step(eval_cmd, "Step 3 — Evaluate SDT-Net")
+        run_step(eval_cmd, f"Step 3 — Evaluate TSDP ({args.arch})")
 
     print("\n" + "=" * 60)
-    print("=== SDT-Net Pipeline Complete ===")
+    print(f"=== TSDP Pipeline ({args.arch}) Complete ===")
     print("=" * 60)
 
 

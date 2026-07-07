@@ -23,7 +23,6 @@ class FastTensorDataLoader:
         self.dataset_len = len(dataset)
         self._cpu_fallback = False
 
-        self._cpu_fallback = False
         if device is not None:
             try:
                 self.X = dataset.X.to(device)
@@ -71,13 +70,16 @@ class FastTensorDataLoader:
 
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, "..", ".."))
+REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, "..", "..", ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from experiments.sdtnet.config import CFG
-from experiments.sdtnet.dataset import SdtnetDataset, N_CHANNELS
-from experiments.sdtnet.model import SdtnetCNNBiLSTM
+from experiments.tsdp.config import CFG as GLOBAL_CFG
+from experiments.tsdp.patchtst.config import CFG as ARCH_CFG
+from experiments.tsdp.dataset import TsdpDataset, N_CHANNELS
+from experiments.tsdp.patchtst.model import PatchTST
+
+ARCH_NAME = "PatchTST"
 
 
 class _TehranFormatter(logging.Formatter):
@@ -113,15 +115,13 @@ def setup_logging(log_dir: str) -> str:
 
 def main() -> None:
     ap = argparse.ArgumentParser(
-        description="Train SDT-Net model (SVMD-DE-CNNBiLSTM)."
+        description=f"Train TSDP model ({ARCH_NAME})."
     )
-    ap.add_argument("--preprocess_dir", default="/dataset/sdtnet_preprocess")
-    ap.add_argument("--out_dir", default="/proj/k8sautoscaledl-PG0/models/sdtnet")
-    ap.add_argument("--log_dir", default="/proj/k8sautoscaledl-PG0/logs/sdtnet",
-                    help="Directory for training logs (default: /proj/k8sautoscaledl-PG0/logs/sdtnet)")
-    ap.add_argument("--epochs", type=int, default=None,
-                    help="Override CFG.EPOCHS for smoke tests without editing config.py")
-    ap.add_argument("--cpu", action="store_true", help="Force CPU training")
+    ap.add_argument("--preprocess_dir", default="/dataset/tsdp_preprocess")
+    ap.add_argument("--out_dir", default="/proj/k8sautoscaledl-PG0/models/tsdp")
+    ap.add_argument("--log_dir", default="/proj/k8sautoscaledl-PG0/logs/tsdp")
+    ap.add_argument("--epochs", type=int, default=None)
+    ap.add_argument("--cpu", action="store_true")
     args = ap.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
@@ -130,24 +130,25 @@ def main() -> None:
     device = torch.device(
         "cuda" if torch.cuda.is_available() and not args.cpu else "cpu"
     )
-    epochs = args.epochs if args.epochs is not None else CFG.EPOCHS
+    epochs = args.epochs if args.epochs is not None else GLOBAL_CFG.EPOCHS
 
     logging.info("=" * 60)
-    logging.info("SDT-Net — Model Training on %s", device)
+    logging.info("TSDP — %s — Training on %s", ARCH_NAME, device)
+    logging.info("Architecture config: %s", ARCH_CFG)
     logging.info("Log file: %s", log_path)
     logging.info("=" * 60)
 
-    train_ds = SdtnetDataset(
+    train_ds = TsdpDataset(
         args.preprocess_dir, "train",
-        input_len=CFG.INPUT_LEN, pred_horizon=CFG.PRED_HORIZON,
-        stride=CFG.STRIDE,
-        train_frac=CFG.TRAIN_FRAC, val_frac=CFG.VAL_FRAC,
+        input_len=GLOBAL_CFG.INPUT_LEN, pred_horizon=GLOBAL_CFG.PRED_HORIZON,
+        stride=GLOBAL_CFG.STRIDE,
+        train_frac=GLOBAL_CFG.TRAIN_FRAC, val_frac=GLOBAL_CFG.VAL_FRAC,
     )
-    val_ds = SdtnetDataset(
+    val_ds = TsdpDataset(
         args.preprocess_dir, "val",
-        input_len=CFG.INPUT_LEN, pred_horizon=CFG.PRED_HORIZON,
-        stride=CFG.STRIDE,
-        train_frac=CFG.TRAIN_FRAC, val_frac=CFG.VAL_FRAC,
+        input_len=GLOBAL_CFG.INPUT_LEN, pred_horizon=GLOBAL_CFG.PRED_HORIZON,
+        stride=GLOBAL_CFG.STRIDE,
+        train_frac=GLOBAL_CFG.TRAIN_FRAC, val_frac=GLOBAL_CFG.VAL_FRAC,
     )
 
     if len(train_ds) == 0:
@@ -156,18 +157,20 @@ def main() -> None:
 
     scaler = GradScaler("cuda", enabled=(device.type == "cuda"))
 
-    model = SdtnetCNNBiLSTM(
-        in_channels=N_CHANNELS,
-        input_len=CFG.INPUT_LEN,
-        pred_horizon=CFG.PRED_HORIZON,
-        kernel_sizes=CFG.KERNEL_SIZES,
-        conv1_out_ch=CFG.CONV1_OUT_CH,
-        conv2_out_ch=CFG.CONV2_OUT_CH,
-        bilstm_hidden=CFG.BILSTM_HIDDEN,
-        dropout=CFG.DROPOUT,
+    model = PatchTST(
+        input_len=GLOBAL_CFG.INPUT_LEN,
+        pred_horizon=GLOBAL_CFG.PRED_HORIZON,
+        n_channels=N_CHANNELS,
+        patch_len=ARCH_CFG.PATCH_LEN,
+        stride=ARCH_CFG.PATCH_STRIDE,
+        d_model=ARCH_CFG.D_MODEL,
+        n_heads=ARCH_CFG.N_HEADS,
+        n_layers=ARCH_CFG.N_LAYERS,
+        d_ff=ARCH_CFG.D_FF,
+        dropout=ARCH_CFG.DROPOUT,
     ).to(device)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=CFG.LEARNING_RATE)
+    optimizer = torch.optim.Adam(model.parameters(), lr=GLOBAL_CFG.LEARNING_RATE)
     criterion = nn.MSELoss()
 
     n_train = len(train_ds)
@@ -179,10 +182,10 @@ def main() -> None:
     logging.info("Epochs: %d", epochs)
 
     train_loader = FastTensorDataLoader(
-        train_ds, batch_size=CFG.BATCH_SIZE, shuffle=True, device=device,
+        train_ds, batch_size=GLOBAL_CFG.BATCH_SIZE, shuffle=True, device=device,
     )
     val_loader = FastTensorDataLoader(
-        val_ds, batch_size=CFG.BATCH_SIZE * 2, shuffle=False, device=device,
+        val_ds, batch_size=GLOBAL_CFG.BATCH_SIZE * 2, shuffle=False, device=device,
     )
     if not val_loader._cpu_fallback:
         logging.info("Moving val data to CPU fallback to free GPU memory.")
@@ -192,7 +195,7 @@ def main() -> None:
         val_loader._cpu_fallback = True
     del train_ds, val_ds
 
-    ckpt_path = os.path.join(args.out_dir, "sdtnet.pt")
+    ckpt_path = os.path.join(args.out_dir, "tsdp.pt")
     best_val_loss = float("inf")
 
     for epoch in range(1, epochs + 1):
@@ -210,7 +213,7 @@ def main() -> None:
                 continue
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=CFG.GRAD_CLIP_NORM)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=GLOBAL_CFG.GRAD_CLIP_NORM)
             scaler.step(optimizer)
             scaler.update()
             train_accum += loss.item() * x.size(0)
@@ -237,20 +240,18 @@ def main() -> None:
                     "model_state_dict": model.state_dict(),
                     "epoch": epoch,
                     "best_val_loss": best_val_loss,
+                    "arch": ARCH_NAME,
                     "cfg": {
-                        "input_len": CFG.INPUT_LEN,
-                        "pred_horizon": CFG.PRED_HORIZON,
-                        "stride": CFG.STRIDE,
-                        "total_channels": CFG.TOTAL_CHANNELS,
-                        "kernel_sizes": CFG.KERNEL_SIZES,
-                        "conv1_out_ch": CFG.CONV1_OUT_CH,
-                        "conv2_out_ch": CFG.CONV2_OUT_CH,
-                        "bilstm_hidden": CFG.BILSTM_HIDDEN,
-                        "dropout": CFG.DROPOUT,
-                        "learning_rate": CFG.LEARNING_RATE,
-                        "batch_size": CFG.BATCH_SIZE,
-                        "weight_decay": CFG.WEIGHT_DECAY,
-                        "grad_clip_norm": CFG.GRAD_CLIP_NORM,
+                        "input_len": GLOBAL_CFG.INPUT_LEN,
+                        "pred_horizon": GLOBAL_CFG.PRED_HORIZON,
+                        "n_channels": GLOBAL_CFG.TOTAL_CHANNELS,
+                        "patch_len": ARCH_CFG.PATCH_LEN,
+                        "patch_stride": ARCH_CFG.PATCH_STRIDE,
+                        "d_model": ARCH_CFG.D_MODEL,
+                        "n_heads": ARCH_CFG.N_HEADS,
+                        "n_layers": ARCH_CFG.N_LAYERS,
+                        "d_ff": ARCH_CFG.D_FF,
+                        "dropout": ARCH_CFG.DROPOUT,
                     },
                 },
                 ckpt_path,
@@ -263,8 +264,8 @@ def main() -> None:
         )
 
     logging.info(
-        "=== SDT-Net training complete. Best val loss: %.8f | Saved: %s ===",
-        best_val_loss, ckpt_path,
+        "=== TSDP [%s] training complete. Best val loss: %.8f | Saved: %s ===",
+        ARCH_NAME, best_val_loss, ckpt_path,
     )
 
 

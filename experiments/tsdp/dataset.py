@@ -7,15 +7,15 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from experiments.sdtnet.config import CFG as SDT_CFG
+from experiments.tsdp.config import CFG as TSDP_CFG
 
 logger = logging.getLogger(__name__)
 
-CHANNEL_DIRS = [f"mode_{i}" for i in range(SDT_CFG.SVMD2_MAX_MODES)] + ["lowfreq_0", "residual_0"]
+CHANNEL_DIRS = ["D1", "D2", "D3", "A3", "low_freq"]
 N_CHANNELS = len(CHANNEL_DIRS)
 
 
-class SdtnetDataset(Dataset):
+class TsdpDataset(Dataset):
     def __init__(
         self,
         preprocess_dir: str,
@@ -125,7 +125,7 @@ class SdtnetDataset(Dataset):
 
         if not all_X:
             logger.warning(
-                "SdtnetDataset[%s]: no valid windows found in %s",
+                "TsdpDataset[%s]: no valid windows found in %s",
                 split, preprocess_dir,
             )
             self.X = torch.empty((0, input_len, N_CHANNELS), dtype=torch.float32)
@@ -137,7 +137,7 @@ class SdtnetDataset(Dataset):
             self.last = torch.from_numpy(np.stack(all_last, axis=0))
 
         logger.info(
-            "SdtnetDataset[%s]: %d windows from %d service files",
+            "TsdpDataset[%s]: %d windows from %d service files",
             split, len(self.X), len(service_files),
         )
 
@@ -149,9 +149,9 @@ class SdtnetDataset(Dataset):
 
 
 def _smoke_check(preprocess_dir: str, split: str) -> None:
-    from experiments.sdtnet.config import CFG
+    from experiments.tsdp.config import CFG
 
-    ds = SdtnetDataset(
+    ds = TsdpDataset(
         preprocess_dir,
         split,
         input_len=CFG.INPUT_LEN,
@@ -170,11 +170,11 @@ def _smoke_check(preprocess_dir: str, split: str) -> None:
     assert last.dim() == 0, f"Bad last shape: {tuple(last.shape)}"
     print(f"Dataset windows: {len(ds)}")
     print(f"x={tuple(x.shape)} y={tuple(y.shape)} last_dim={last.dim()}")
-    print("SdtnetDataset smoke test passed")
+    print("TsdpDataset smoke test passed")
 
 
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser(description="Smoke-check SdtnetDataset shapes.")
+    ap = argparse.ArgumentParser(description="Smoke-check TsdpDataset shapes.")
     ap.add_argument("--preprocess_dir", required=True)
     ap.add_argument("--split", choices=("train", "val", "test"), default="train")
     args = ap.parse_args()

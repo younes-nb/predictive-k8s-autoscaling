@@ -9,15 +9,15 @@ REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, "..", ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from experiments.sdtnet.config import CFG
-from experiments.sdtnet.decomposition import decompose_window
+from experiments.tsdp.config import CFG
+from experiments.tsdp.decomposition import decompose_window
 
 
 def _log(msg: str) -> None:
     print(msg, file=sys.stderr, flush=True)
 
 
-CHANNEL_DIRS = [f"mode_{i}" for i in range(CFG.SVMD2_MAX_MODES)] + ["lowfreq_0", "residual_0"]
+CHANNEL_DIRS = ["D1", "D2", "D3", "A3", "low_freq"]
 N_CHANNELS = len(CHANNEL_DIRS)
 
 
@@ -27,7 +27,7 @@ def main() -> None:
     out_dir = sys.argv[3]
     _t0 = _time.time()
 
-    done_marker = os.path.join(out_dir, "mode_0", f"service_{idx:05d}.done")
+    done_marker = os.path.join(out_dir, "D1", f"service_{idx:05d}.done")
     if os.path.exists(done_marker):
         all_exist = all(
             os.path.exists(os.path.join(out_dir, d, f"service_{idx:05d}.npy"))

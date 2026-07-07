@@ -14,14 +14,17 @@ except ImportError:
     from backports.zoneinfo import ZoneInfo
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, "..", ".."))
+REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, "..", "..", ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from experiments.sdtnet.config import CFG
-from experiments.sdtnet.dataset import SdtnetDataset, N_CHANNELS
-from experiments.sdtnet.model import SdtnetCNNBiLSTM
+from experiments.tsdp.config import CFG as GLOBAL_CFG
+from experiments.tsdp.patchtst.config import CFG as ARCH_CFG
+from experiments.tsdp.dataset import TsdpDataset, N_CHANNELS
+from experiments.tsdp.patchtst.model import PatchTST
 from training.metrics import compute_metrics
+
+ARCH_NAME = "PatchTST"
 
 
 class _TehranFormatter(logging.Formatter):
@@ -55,17 +58,19 @@ def setup_logging(log_dir: str) -> str:
     return log_path
 
 
-def load_sdtnet_model(ckpt_path: str, device: torch.device) -> SdtnetCNNBiLSTM:
+def load_model(ckpt_path: str, device: torch.device) -> PatchTST:
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
     saved_cfg = ckpt.get("cfg", {})
-    model = SdtnetCNNBiLSTM(
-        in_channels=saved_cfg.get("total_channels", N_CHANNELS),
-        input_len=saved_cfg.get("input_len", CFG.INPUT_LEN),
-        pred_horizon=saved_cfg.get("pred_horizon", CFG.PRED_HORIZON),
-        kernel_sizes=saved_cfg.get("kernel_sizes", CFG.KERNEL_SIZES),
-        conv1_out_ch=saved_cfg.get("conv1_out_ch", CFG.CONV1_OUT_CH),
-        conv2_out_ch=saved_cfg.get("conv2_out_ch", CFG.CONV2_OUT_CH),
-        bilstm_hidden=saved_cfg.get("bilstm_hidden", CFG.BILSTM_HIDDEN),
+    model = PatchTST(
+        input_len=saved_cfg.get("input_len", GLOBAL_CFG.INPUT_LEN),
+        pred_horizon=saved_cfg.get("pred_horizon", GLOBAL_CFG.PRED_HORIZON),
+        n_channels=saved_cfg.get("n_channels", N_CHANNELS),
+        patch_len=saved_cfg.get("patch_len", ARCH_CFG.PATCH_LEN),
+        stride=saved_cfg.get("patch_stride", ARCH_CFG.PATCH_STRIDE),
+        d_model=saved_cfg.get("d_model", ARCH_CFG.D_MODEL),
+        n_heads=saved_cfg.get("n_heads", ARCH_CFG.N_HEADS),
+        n_layers=saved_cfg.get("n_layers", ARCH_CFG.N_LAYERS),
+        d_ff=saved_cfg.get("d_ff", ARCH_CFG.D_FF),
         dropout=saved_cfg.get("dropout", 0.0),
     ).to(device)
     model.load_state_dict(ckpt["model_state_dict"])
@@ -74,8 +79,8 @@ def load_sdtnet_model(ckpt_path: str, device: torch.device) -> SdtnetCNNBiLSTM:
 
 
 def predict(
-    model: SdtnetCNNBiLSTM,
-    dataset: SdtnetDataset,
+    model: PatchTST,
+    dataset: TsdpDataset,
     device: torch.device,
     batch_size: int = 512,
 ):
@@ -98,12 +103,11 @@ def predict(
 
 def main() -> None:
     ap = argparse.ArgumentParser(
-        description="Evaluate SDT-Net model (SVMD-DE-CNNBiLSTM)."
+        description=f"Evaluate TSDP model ({ARCH_NAME})."
     )
-    ap.add_argument("--preprocess_dir", default="/dataset/sdtnet_preprocess")
-    ap.add_argument("--model_dir", default="/proj/k8sautoscaledl-PG0/models/sdtnet")
-    ap.add_argument("--log_dir", default="/proj/k8sautoscaledl-PG0/logs/sdtnet",
-                    help="Directory for evaluation logs (default: /proj/k8sautoscaledl-PG0/logs/sdtnet)")
+    ap.add_argument("--preprocess_dir", default="/dataset/tsdp_preprocess")
+    ap.add_argument("--model_dir", default="/proj/k8sautoscaledl-PG0/models/tsdp")
+    ap.add_argument("--log_dir", default="/proj/k8sautoscaledl-PG0/logs/tsdp")
     ap.add_argument("--cpu", action="store_true")
     ap.add_argument("--batch_size", type=int, default=512)
     args = ap.parse_args()
@@ -112,21 +116,21 @@ def main() -> None:
     device = torch.device(
         "cuda" if torch.cuda.is_available() and not args.cpu else "cpu"
     )
-    logging.info("Evaluating SDT-Net on %s", device)
+    logging.info("Evaluating TSDP [%s] on %s", ARCH_NAME, device)
 
-    ckpt = os.path.join(args.model_dir, "sdtnet.pt")
+    ckpt = os.path.join(args.model_dir, "tsdp.pt")
     if not os.path.exists(ckpt):
         logging.error("Checkpoint not found: %s — train the model first.", ckpt)
         sys.exit(1)
 
-    model = load_sdtnet_model(ckpt, device)
-    logging.info("Loaded SDT-Net model from %s", ckpt)
+    model = load_model(ckpt, device)
+    logging.info("Loaded TSDP [%s] model from %s", ARCH_NAME, ckpt)
 
-    test_ds = SdtnetDataset(
+    test_ds = TsdpDataset(
         args.preprocess_dir, "test",
-        input_len=CFG.INPUT_LEN, pred_horizon=CFG.PRED_HORIZON,
-        stride=CFG.STRIDE,
-        train_frac=CFG.TRAIN_FRAC, val_frac=CFG.VAL_FRAC,
+        input_len=GLOBAL_CFG.INPUT_LEN, pred_horizon=GLOBAL_CFG.PRED_HORIZON,
+        stride=GLOBAL_CFG.STRIDE,
+        train_frac=GLOBAL_CFG.TRAIN_FRAC, val_frac=GLOBAL_CFG.VAL_FRAC,
     )
     if len(test_ds) == 0:
         logging.error("Empty test dataset. Cannot evaluate.")
@@ -141,22 +145,22 @@ def main() -> None:
 
     logging.info("")
     logging.info("=" * 60)
-    logging.info("SDT-Net — Test Results  (n=%d samples)", n)
+    logging.info("TSDP [%s] — Test Results  (n=%d samples)", ARCH_NAME, n)
     logging.info("=" * 60)
     logging.info("Paper Metrics:")
     logging.info("  MAE : %.8f", mae)
     logging.info("  MSE : %.8f", mse)
     logging.info("-" * 60)
 
-    y_pred_2d = preds.reshape(-1, CFG.PRED_HORIZON)
-    y_true_2d = trues.reshape(-1, CFG.PRED_HORIZON)
+    y_pred_2d = preds.reshape(-1, GLOBAL_CFG.PRED_HORIZON)
+    y_true_2d = trues.reshape(-1, GLOBAL_CFG.PRED_HORIZON)
 
     logging.info("Shadowing Diagnostics (via training.metrics.compute_metrics):")
     compute_metrics(
         y_pred=y_pred_2d,
         y_true=y_true_2d,
         y_last=lasts,
-        horizon=CFG.PRED_HORIZON,
+        horizon=GLOBAL_CFG.PRED_HORIZON,
         total_samples=n,
         log_info=logging.info,
     )
