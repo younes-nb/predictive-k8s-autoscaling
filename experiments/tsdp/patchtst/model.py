@@ -6,6 +6,7 @@ import warnings
 import torch
 import torch.nn as nn
 from torch.nn import TransformerEncoder, TransformerEncoderLayer
+from torch.nn.attention import SDPBackend, sdpa_kernel
 
 warnings.filterwarnings("ignore", "Using padding='same' with even kernel lengths")
 
@@ -88,7 +89,8 @@ class PatchTST(nn.Module):
         emb = self.patch_proj(patches)
         emb = self.pos_encoder(emb)
 
-        out = self.transformer_encoder(emb)
+        with sdpa_kernel(SDPBackend.MATH):
+            out = self.transformer_encoder(emb)
 
         pooled = out.mean(dim=1)
         pred = self.head(pooled)

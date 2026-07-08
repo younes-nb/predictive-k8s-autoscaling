@@ -1,9 +1,13 @@
 import argparse
 import logging
 import os
+import random
 import sys
 import time
+from collections import deque
 from datetime import datetime, timedelta
+
+import numpy as np
 
 import torch
 import torch.nn as nn
@@ -72,7 +76,15 @@ def main() -> None:
     ap.add_argument("--cpu", action="store_true")
     ap.add_argument("--num_workers", type=int, default=0)
     ap.add_argument("--dataset_workers", type=int, default=max(1, int(os.cpu_count() * 0.7)))
+    ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()
+
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    torch.cuda.manual_seed_all(args.seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
     os.makedirs(args.out_dir, exist_ok=True)
 
@@ -156,8 +168,7 @@ def main() -> None:
 
     ckpt_path = os.path.join(args.out_dir, "tsdp.pt")
     best_val_loss = float("inf")
-    prev_train_loss = None
-    no_improve_count = 0
+    train_loss_window = deque(maxlen=GLOBAL_CFG.NO_CHANGE_EPOCHS_LIMIT)
 
     for epoch in range(1, epochs + 1):
         t0 = time.time()
@@ -229,21 +240,18 @@ def main() -> None:
             epoch, epochs, avg_train, avg_val, dt, suffix,
         )
 
-        if prev_train_loss is not None:
-            delta = abs(avg_train - prev_train_loss)
-            if delta < GLOBAL_CFG.EARLY_STOP_DELTA:
-                no_improve_count += 1
-            else:
-                no_improve_count = 0
-
-            if no_improve_count >= GLOBAL_CFG.EARLY_STOP_PATIENCE:
+        train_loss_window.append(avg_train)
+        if len(train_loss_window) == GLOBAL_CFG.NO_CHANGE_EPOCHS_LIMIT:
+            cumulative_delta = abs(train_loss_window[-1] - train_loss_window[0])
+            if cumulative_delta < GLOBAL_CFG.LOSS_CHANGE_THRESHOLD:
                 log_info(
-                    "Early stopping: train loss unchanged (Δ<%.7f) for %d consecutive epochs at epoch %d.",
-                    GLOBAL_CFG.EARLY_STOP_DELTA, GLOBAL_CFG.EARLY_STOP_PATIENCE, epoch,
+                    "\n=== Early Stopping ===\n"
+                    f"Train loss has not changed by at least {GLOBAL_CFG.LOSS_CHANGE_THRESHOLD} "
+                    f"over the last {GLOBAL_CFG.NO_CHANGE_EPOCHS_LIMIT} epochs "
+                    f"(%.8f -> %.8f, Δ=%.8f).",
+                    train_loss_window[0], train_loss_window[-1], cumulative_delta,
                 )
                 break
-
-        prev_train_loss = avg_train
 
     log_info(
         "=== TSDP [%s] training complete. Best val loss: %.8f | Saved: %s ===",

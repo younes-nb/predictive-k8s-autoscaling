@@ -29,8 +29,8 @@ class TsdpConfig:
     EPOCHS: int = 1000
     WEIGHT_DECAY: float = 0.0
     GRAD_CLIP_NORM: float = 1.0
-    EARLY_STOP_PATIENCE: int = 50
-    EARLY_STOP_DELTA: float = 0.00001
+    LOSS_CHANGE_THRESHOLD: float = 1e-5
+    NO_CHANGE_EPOCHS_LIMIT: int = 50
 
 
 CFG = TsdpConfig()
