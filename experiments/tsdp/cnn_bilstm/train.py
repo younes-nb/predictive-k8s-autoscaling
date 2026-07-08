@@ -156,6 +156,8 @@ def main() -> None:
 
     ckpt_path = os.path.join(args.out_dir, "tsdp.pt")
     best_val_loss = float("inf")
+    prev_train_loss = None
+    no_improve_count = 0
 
     for epoch in range(1, epochs + 1):
         t0 = time.time()
@@ -226,6 +228,22 @@ def main() -> None:
             "Epoch %d/%d | train=%.8f | val=%.8f | %.1fs%s",
             epoch, epochs, avg_train, avg_val, dt, suffix,
         )
+
+        if prev_train_loss is not None:
+            delta = abs(avg_train - prev_train_loss)
+            if delta < GLOBAL_CFG.EARLY_STOP_DELTA:
+                no_improve_count += 1
+            else:
+                no_improve_count = 0
+
+            if no_improve_count >= GLOBAL_CFG.EARLY_STOP_PATIENCE:
+                log_info(
+                    "Early stopping: train loss unchanged (Δ<%.7f) for %d consecutive epochs at epoch %d.",
+                    GLOBAL_CFG.EARLY_STOP_DELTA, GLOBAL_CFG.EARLY_STOP_PATIENCE, epoch,
+                )
+                break
+
+        prev_train_loss = avg_train
 
     log_info(
         "=== TSDP [%s] training complete. Best val loss: %.8f | Saved: %s ===",

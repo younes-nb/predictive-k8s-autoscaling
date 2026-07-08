@@ -26,9 +26,11 @@ class TsdpConfig:
     # --- Shared Training ---
     LEARNING_RATE: float = 0.001
     BATCH_SIZE: int = 16384
-    EPOCHS: int = 100
+    EPOCHS: int = 1000
     WEIGHT_DECAY: float = 0.0
     GRAD_CLIP_NORM: float = 1.0
+    EARLY_STOP_PATIENCE: int = 50
+    EARLY_STOP_DELTA: float = 0.00001
 
 
 CFG = TsdpConfig()
