@@ -2,16 +2,19 @@ import argparse
 import logging
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
+from accelerate import Accelerator, InitProcessGroupKwargs
+
 try:
     from zoneinfo import ZoneInfo
 except ImportError:
     from backports.zoneinfo import ZoneInfo
+
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, "..", "..", ".."))
@@ -44,12 +47,12 @@ def setup_logging(log_dir: str) -> str:
     except Exception:
         tz = None
     ts = datetime.now(tz).strftime("%Y%m%d_%H%M%S")
-    log_path = os.path.join(log_dir, f"evaluate_{ts}.log")
+    log_path = os.path.join(log_dir, f"eval_{ts}.log")
     root = logging.getLogger()
     root.setLevel(logging.INFO)
     root.handlers.clear()
     fmt = _TehranFormatter()
-    fh = logging.FileHandler(log_path, mode="w")
+    fh = logging.FileHandler(log_path, mode="a")
     fh.setFormatter(fmt)
     root.addHandler(fh)
     sh = logging.StreamHandler(sys.stdout)
@@ -58,7 +61,7 @@ def setup_logging(log_dir: str) -> str:
     return log_path
 
 
-def load_model(ckpt_path: str, device: torch.device) -> PatchTST:
+def load_model(ckpt_path: str, device: torch.device, is_main: bool = False) -> PatchTST:
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
     saved_cfg = ckpt.get("cfg", {})
     model = PatchTST(
@@ -75,30 +78,9 @@ def load_model(ckpt_path: str, device: torch.device) -> PatchTST:
     ).to(device)
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
+    if is_main:
+        logging.info("Loaded %s model from %s", ARCH_NAME, ckpt_path)
     return model
-
-
-def predict(
-    model: PatchTST,
-    dataset: TsdpDataset,
-    device: torch.device,
-    batch_size: int = 512,
-):
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
-    preds_list, true_list, last_list = [], [], []
-
-    with torch.no_grad():
-        for x, y, last in loader:
-            pred = model(x.to(device)).cpu().numpy()
-            preds_list.append(pred)
-            true_list.append(y.numpy())
-            last_list.append(last.numpy().ravel())
-
-    return (
-        np.concatenate(preds_list, axis=0),
-        np.concatenate(true_list, axis=0),
-        np.concatenate(last_list),
-    )
 
 
 def main() -> None:
@@ -110,52 +92,89 @@ def main() -> None:
     ap.add_argument("--log_dir", default="/proj/k8sautoscaledl-PG0/logs/tsdp")
     ap.add_argument("--cpu", action="store_true")
     ap.add_argument("--batch_size", type=int, default=512)
+    ap.add_argument("--dataset_workers", type=int, default=max(1, int(os.cpu_count() * 0.7)))
     args = ap.parse_args()
 
-    log_path = setup_logging(args.log_dir)
-    device = torch.device(
-        "cuda" if torch.cuda.is_available() and not args.cpu else "cpu"
+    timeout_kwargs = InitProcessGroupKwargs(timeout=timedelta(seconds=14400))
+    mixed_precision = "fp16" if not args.cpu and torch.cuda.is_available() else "no"
+    accelerator = Accelerator(cpu=args.cpu, mixed_precision=mixed_precision, kwargs_handlers=[timeout_kwargs])
+    device = accelerator.device
+
+    log_info = lambda msg, *a: (
+        logging.info(msg, *a) if accelerator.is_local_main_process else None
     )
-    logging.info("Evaluating TSDP [%s] on %s", ARCH_NAME, device)
+
+    if accelerator.is_local_main_process:
+        log_path = setup_logging(args.log_dir)
+    else:
+        log_path = None
+
+    log_info("Evaluating TSDP [%s] on %s", ARCH_NAME, device)
+    log_info("Distributed Processes: %d", accelerator.num_processes)
 
     ckpt = os.path.join(args.model_dir, "tsdp.pt")
     if not os.path.exists(ckpt):
         logging.error("Checkpoint not found: %s — train the model first.", ckpt)
         sys.exit(1)
 
-    model = load_model(ckpt, device)
-    logging.info("Loaded TSDP [%s] model from %s", ARCH_NAME, ckpt)
+    model = load_model(ckpt, device, is_main=accelerator.is_local_main_process)
+    log_info("Loaded TSDP [%s] model from %s", ARCH_NAME, ckpt)
 
     test_ds = TsdpDataset(
         args.preprocess_dir, "test",
         input_len=GLOBAL_CFG.INPUT_LEN, pred_horizon=GLOBAL_CFG.PRED_HORIZON,
         stride=GLOBAL_CFG.STRIDE,
         train_frac=GLOBAL_CFG.TRAIN_FRAC, val_frac=GLOBAL_CFG.VAL_FRAC,
+        num_workers=args.dataset_workers,
     )
     if len(test_ds) == 0:
         logging.error("Empty test dataset. Cannot evaluate.")
         sys.exit(1)
 
-    preds, trues, lasts = predict(model, test_ds, device, args.batch_size)
+    batch_size = args.batch_size
+    pin_memory = device.type != "cpu"
+    loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=pin_memory)
+
+    model, loader = accelerator.prepare(model, loader)
+
+    preds_list, true_list, last_list = [], [], []
+
+    with torch.no_grad():
+        for x, y, last_val in loader:
+            pred = model(x)
+            gathered_pred, gathered_y, gathered_last = accelerator.gather_for_metrics((pred, y, last_val))
+
+            if accelerator.is_local_main_process:
+                preds_list.append(gathered_pred.cpu().numpy())
+                true_list.append(gathered_y.cpu().numpy())
+                last_list.append(gathered_last.cpu().numpy())
+
+    if not accelerator.is_local_main_process:
+        return
+
+    preds = np.concatenate(preds_list, axis=0)
+    trues = np.concatenate(true_list, axis=0)
+    lasts = np.concatenate(last_list)
+
     n = len(preds)
-    logging.info("Test windows: %d", n)
+    log_info("Test windows: %d", n)
 
     mae = float(np.mean(np.abs(preds - trues)))
     mse = float(np.mean((preds - trues) ** 2))
 
-    logging.info("")
-    logging.info("=" * 60)
-    logging.info("TSDP [%s] — Test Results  (n=%d samples)", ARCH_NAME, n)
-    logging.info("=" * 60)
-    logging.info("Paper Metrics:")
-    logging.info("  MAE : %.8f", mae)
-    logging.info("  MSE : %.8f", mse)
-    logging.info("-" * 60)
+    log_info("")
+    log_info("=" * 60)
+    log_info("TSDP [%s] — Test Results  (n=%d samples)", ARCH_NAME, n)
+    log_info("=" * 60)
+    log_info("Paper Metrics:")
+    log_info("  MAE : %.8f", mae)
+    log_info("  MSE : %.8f", mse)
+    log_info("-" * 60)
 
     y_pred_2d = preds.reshape(-1, GLOBAL_CFG.PRED_HORIZON)
     y_true_2d = trues.reshape(-1, GLOBAL_CFG.PRED_HORIZON)
 
-    logging.info("Shadowing Diagnostics (via training.metrics.compute_metrics):")
+    log_info("Shadowing Diagnostics (via training.metrics.compute_metrics):")
     compute_metrics(
         y_pred=y_pred_2d,
         y_true=y_true_2d,
@@ -165,9 +184,12 @@ def main() -> None:
         log_info=logging.info,
     )
 
-    logging.info("")
-    logging.info("=" * 60)
-    logging.info("Full log saved to: %s", log_path)
+    log_info("")
+    log_info("=" * 60)
+    if log_path:
+        log_info("Full log saved to: %s", log_path)
+
+    accelerator.end_training()
 
 
 if __name__ == "__main__":

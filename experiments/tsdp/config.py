@@ -25,7 +25,7 @@ class TsdpConfig:
 
     # --- Shared Training ---
     LEARNING_RATE: float = 0.001
-    BATCH_SIZE: int = 2048
+    BATCH_SIZE: int = 16384
     EPOCHS: int = 100
     WEIGHT_DECAY: float = 0.0
     GRAD_CLIP_NORM: float = 1.0

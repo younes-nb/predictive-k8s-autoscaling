@@ -4,6 +4,8 @@ import subprocess
 import sys
 import time
 
+import torch
+
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 
 ARCH_MAP = {
@@ -39,10 +41,22 @@ def main() -> None:
     ap.add_argument("--skip_train", action="store_true")
     ap.add_argument("--skip_eval", action="store_true")
     ap.add_argument("--cpu", action="store_true")
+    ap.add_argument("--dataset_workers", type=int, default=max(1, int(os.cpu_count() * 0.7)),
+                    help="Workers for parallel dataset loading (0 = sequential)")
     args = ap.parse_args()
 
     arch_dir = os.path.join(THIS_DIR, ARCH_MAP[args.arch])
-    py = [sys.executable]
+
+    gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 0
+    if args.cpu or gpu_count <= 1:
+        launcher_cmd = [sys.executable]
+        if gpu_count == 1 and not args.cpu:
+            print("[INFO] 1 GPU detected. Running with standard python invocation.")
+        elif gpu_count == 0 or args.cpu:
+            print("[INFO] Running strictly on CPU.")
+    else:
+        launcher_cmd = ["accelerate", "launch"]
+        print(f"[INFO] {gpu_count} GPUs detected! Using accelerate launch (DDP).")
 
     if not args.skip_preprocess:
         preprocess_cmd = [
@@ -54,7 +68,7 @@ def main() -> None:
         run_step(py + preprocess_cmd, label)
 
     if not args.skip_train:
-        train_cmd = py + [
+        train_cmd = launcher_cmd + [
             os.path.join(arch_dir, "train.py"),
             "--preprocess_dir", args.preprocess_dir,
             "--out_dir", args.model_dir,
@@ -64,10 +78,12 @@ def main() -> None:
             train_cmd.append("--cpu")
         if args.epochs_override is not None:
             train_cmd.extend(["--epochs", str(args.epochs_override)])
+        if args.dataset_workers > 0:
+            train_cmd.extend(["--dataset_workers", str(args.dataset_workers)])
         run_step(train_cmd, f"Step 2 — Train TSDP ({args.arch})")
 
     if not args.skip_eval:
-        eval_cmd = py + [
+        eval_cmd = launcher_cmd + [
             os.path.join(arch_dir, "evaluate.py"),
             "--preprocess_dir", args.preprocess_dir,
             "--model_dir", args.model_dir,

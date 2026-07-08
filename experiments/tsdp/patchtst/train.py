@@ -3,70 +3,18 @@ import logging
 import os
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import torch
 import torch.nn as nn
-from torch.amp import autocast, GradScaler
+from torch.utils.data import DataLoader
+
+from accelerate import Accelerator, InitProcessGroupKwargs
 
 try:
     from zoneinfo import ZoneInfo
 except ImportError:
     from backports.zoneinfo import ZoneInfo
-
-
-class FastTensorDataLoader:
-    def __init__(self, dataset, batch_size=64, shuffle=False, device=None):
-        self.device = device
-        self.batch_size = batch_size
-        self.shuffle = shuffle
-        self.dataset_len = len(dataset)
-        self._cpu_fallback = False
-
-        if device is not None:
-            try:
-                self.X = dataset.X.to(device)
-                self.y = dataset.y.to(device)
-                self.last = dataset.last.to(device)
-            except Exception:
-                logging.warning(
-                    "Failed to move dataset to GPU; falling back to CPU storage "
-                    "with per-batch transfer."
-                )
-                self._cpu_fallback = True
-                self.X = dataset.X
-                self.y = dataset.y
-                self.last = dataset.last
-        else:
-            self.X = dataset.X
-            self.y = dataset.y
-            self.last = dataset.last
-
-    def __iter__(self):
-        if self.shuffle:
-            self.indices = torch.randperm(self.dataset_len)
-        else:
-            self.indices = torch.arange(self.dataset_len)
-        self.idx = 0
-        return self
-
-    def __next__(self):
-        if self.idx >= self.dataset_len:
-            raise StopIteration
-        batch_indices = self.indices[self.idx: self.idx + self.batch_size]
-        self.idx += self.batch_size
-        if self._cpu_fallback:
-            x = self.X[batch_indices].to(self.device, non_blocking=True)
-            y = self.y[batch_indices].to(self.device, non_blocking=True)
-            last = self.last[batch_indices].to(self.device, non_blocking=True)
-        else:
-            x = self.X[batch_indices]
-            y = self.y[batch_indices]
-            last = self.last[batch_indices]
-        return x, y, last
-
-    def __len__(self):
-        return (self.dataset_len + self.batch_size - 1) // self.batch_size
 
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -122,40 +70,56 @@ def main() -> None:
     ap.add_argument("--log_dir", default="/proj/k8sautoscaledl-PG0/logs/tsdp")
     ap.add_argument("--epochs", type=int, default=None)
     ap.add_argument("--cpu", action="store_true")
+    ap.add_argument("--num_workers", type=int, default=0)
+    ap.add_argument("--dataset_workers", type=int, default=max(1, int(os.cpu_count() * 0.7)))
     args = ap.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
-    log_path = setup_logging(args.log_dir)
 
-    device = torch.device(
-        "cuda" if torch.cuda.is_available() and not args.cpu else "cpu"
+    timeout_kwargs = InitProcessGroupKwargs(timeout=timedelta(seconds=14400))
+    mixed_precision = "fp16" if not args.cpu and torch.cuda.is_available() else "no"
+    accelerator = Accelerator(cpu=args.cpu, mixed_precision=mixed_precision, kwargs_handlers=[timeout_kwargs])
+    device = accelerator.device
+
+    log_info = lambda msg, *a: (
+        logging.info(msg, *a) if accelerator.is_local_main_process else None
     )
+
+    if accelerator.is_local_main_process:
+        log_path = setup_logging(args.log_dir)
+    else:
+        log_path = None
+
     epochs = args.epochs if args.epochs is not None else GLOBAL_CFG.EPOCHS
 
-    logging.info("=" * 60)
-    logging.info("TSDP — %s — Training on %s", ARCH_NAME, device)
-    logging.info("Architecture config: %s", ARCH_CFG)
-    logging.info("Log file: %s", log_path)
-    logging.info("=" * 60)
+    log_info("=" * 60)
+    log_info("TSDP — %s — Training on %s", ARCH_NAME, device)
+    log_info("Architecture config: %s", ARCH_CFG)
+    if log_path:
+        log_info("Log file: %s", log_path)
+    log_info("=" * 60)
 
     train_ds = TsdpDataset(
         args.preprocess_dir, "train",
         input_len=GLOBAL_CFG.INPUT_LEN, pred_horizon=GLOBAL_CFG.PRED_HORIZON,
         stride=GLOBAL_CFG.STRIDE,
         train_frac=GLOBAL_CFG.TRAIN_FRAC, val_frac=GLOBAL_CFG.VAL_FRAC,
+        num_workers=args.dataset_workers,
     )
     val_ds = TsdpDataset(
         args.preprocess_dir, "val",
         input_len=GLOBAL_CFG.INPUT_LEN, pred_horizon=GLOBAL_CFG.PRED_HORIZON,
         stride=GLOBAL_CFG.STRIDE,
         train_frac=GLOBAL_CFG.TRAIN_FRAC, val_frac=GLOBAL_CFG.VAL_FRAC,
+        num_workers=args.dataset_workers,
     )
 
     if len(train_ds) == 0:
         logging.error("Empty training dataset. Aborting.")
         return
 
-    scaler = GradScaler("cuda", enabled=(device.type == "cuda"))
+    n_train = len(train_ds)
+    n_val = len(val_ds)
 
     model = PatchTST(
         input_len=GLOBAL_CFG.INPUT_LEN,
@@ -170,30 +134,28 @@ def main() -> None:
         dropout=ARCH_CFG.DROPOUT,
     ).to(device)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=GLOBAL_CFG.LEARNING_RATE)
+    optimizer = torch.optim.Adam(model.parameters(), lr=GLOBAL_CFG.LEARNING_RATE, weight_decay=GLOBAL_CFG.WEIGHT_DECAY)
     criterion = nn.MSELoss()
 
-    n_train = len(train_ds)
-    n_val = len(val_ds)
-
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    logging.info("Model parameters: %d", n_params)
-    logging.info("Train windows: %d | Val windows: %d", n_train, n_val)
-    logging.info("Epochs: %d", epochs)
+    log_info("Model parameters: %d", n_params)
+    log_info("Train windows: %d | Val windows: %d", n_train, n_val)
+    log_info("Epochs: %d", epochs)
 
-    train_loader = FastTensorDataLoader(
-        train_ds, batch_size=GLOBAL_CFG.BATCH_SIZE, shuffle=True, device=device,
+    pin_memory = device.type != "cpu"
+    train_loader = DataLoader(
+        train_ds, batch_size=GLOBAL_CFG.BATCH_SIZE, shuffle=True,
+        num_workers=args.num_workers, pin_memory=pin_memory,
     )
-    val_loader = FastTensorDataLoader(
-        val_ds, batch_size=GLOBAL_CFG.BATCH_SIZE * 2, shuffle=False, device=device,
+    val_loader = DataLoader(
+        val_ds, batch_size=GLOBAL_CFG.BATCH_SIZE * 2, shuffle=False,
+        num_workers=args.num_workers, pin_memory=pin_memory,
     )
-    if not val_loader._cpu_fallback:
-        logging.info("Moving val data to CPU fallback to free GPU memory.")
-        val_loader.X = val_loader.X.cpu()
-        val_loader.y = val_loader.y.cpu()
-        val_loader.last = val_loader.last.cpu()
-        val_loader._cpu_fallback = True
     del train_ds, val_ds
+
+    model, optimizer, train_loader, val_loader = accelerator.prepare(
+        model, optimizer, train_loader, val_loader
+    )
 
     ckpt_path = os.path.join(args.out_dir, "tsdp.pt")
     best_val_loss = float("inf")
@@ -205,68 +167,78 @@ def main() -> None:
         train_accum, n_train_count = 0.0, 0
         for x, y, _ in train_loader:
             optimizer.zero_grad()
-            with autocast("cuda", enabled=(device.type == "cuda")):
+            with accelerator.autocast():
                 pred = model(x)
                 loss = criterion(pred, y)
             if torch.isnan(loss) or torch.isinf(loss):
-                logging.warning("NaN/Inf loss detected; skipping batch.")
+                if accelerator.is_local_main_process:
+                    logging.warning("NaN/Inf loss detected; skipping batch.")
                 continue
-            scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=GLOBAL_CFG.GRAD_CLIP_NORM)
-            scaler.step(optimizer)
-            scaler.update()
+            accelerator.backward(loss)
+            accelerator.clip_grad_norm_(model.parameters(), max_norm=GLOBAL_CFG.GRAD_CLIP_NORM)
+            optimizer.step()
             train_accum += loss.item() * x.size(0)
             n_train_count += x.size(0)
-        avg_train = train_accum / max(n_train_count, 1)
+
+        local_avg_train = train_accum / max(n_train_count, 1)
+        sync_train_tensor = torch.tensor(local_avg_train, device=device)
+        avg_train = accelerator.reduce(sync_train_tensor, reduction="mean").item()
 
         model.eval()
         val_accum, n_val_count = 0.0, 0
         with torch.no_grad():
             for x, y, _ in val_loader:
-                with autocast("cuda", enabled=(device.type == "cuda")):
+                with accelerator.autocast():
                     pred = model(x)
                     loss = criterion(pred, y)
                 val_accum += loss.item() * x.size(0)
                 n_val_count += x.size(0)
-        avg_val = val_accum / max(n_val_count, 1)
+
+        local_avg_val = val_accum / max(n_val_count, 1)
+        sync_val_tensor = torch.tensor(local_avg_val, device=device)
+        avg_val = accelerator.reduce(sync_val_tensor, reduction="mean").item()
 
         dt = time.time() - t0
         suffix = ""
         if avg_val < best_val_loss:
             best_val_loss = avg_val
-            torch.save(
-                {
-                    "model_state_dict": model.state_dict(),
-                    "epoch": epoch,
-                    "best_val_loss": best_val_loss,
-                    "arch": ARCH_NAME,
-                    "cfg": {
-                        "input_len": GLOBAL_CFG.INPUT_LEN,
-                        "pred_horizon": GLOBAL_CFG.PRED_HORIZON,
-                        "n_channels": GLOBAL_CFG.TOTAL_CHANNELS,
-                        "patch_len": ARCH_CFG.PATCH_LEN,
-                        "patch_stride": ARCH_CFG.PATCH_STRIDE,
-                        "d_model": ARCH_CFG.D_MODEL,
-                        "n_heads": ARCH_CFG.N_HEADS,
-                        "n_layers": ARCH_CFG.N_LAYERS,
-                        "d_ff": ARCH_CFG.D_FF,
-                        "dropout": ARCH_CFG.DROPOUT,
+            accelerator.wait_for_everyone()
+            if accelerator.is_local_main_process:
+                unwrapped = accelerator.unwrap_model(model)
+                torch.save(
+                    {
+                        "model_state_dict": unwrapped.state_dict(),
+                        "epoch": epoch,
+                        "best_val_loss": best_val_loss,
+                        "arch": ARCH_NAME,
+                        "cfg": {
+                            "input_len": GLOBAL_CFG.INPUT_LEN,
+                            "pred_horizon": GLOBAL_CFG.PRED_HORIZON,
+                            "n_channels": GLOBAL_CFG.TOTAL_CHANNELS,
+                            "patch_len": ARCH_CFG.PATCH_LEN,
+                            "patch_stride": ARCH_CFG.PATCH_STRIDE,
+                            "d_model": ARCH_CFG.D_MODEL,
+                            "n_heads": ARCH_CFG.N_HEADS,
+                            "n_layers": ARCH_CFG.N_LAYERS,
+                            "d_ff": ARCH_CFG.D_FF,
+                            "dropout": ARCH_CFG.DROPOUT,
+                        },
                     },
-                },
-                ckpt_path,
-            )
+                    ckpt_path,
+                )
             suffix = " [Checkpoint Saved]"
 
-        logging.info(
+        log_info(
             "Epoch %d/%d | train=%.8f | val=%.8f | %.1fs%s",
             epoch, epochs, avg_train, avg_val, dt, suffix,
         )
 
-    logging.info(
+    log_info(
         "=== TSDP [%s] training complete. Best val loss: %.8f | Saved: %s ===",
         ARCH_NAME, best_val_loss, ckpt_path,
     )
+
+    accelerator.end_training()
 
 
 if __name__ == "__main__":
