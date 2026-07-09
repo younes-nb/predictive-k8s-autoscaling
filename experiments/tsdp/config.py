@@ -10,18 +10,17 @@ class TsdpConfig:
     TRAIN_FRAC: float = 0.70
     VAL_FRAC: float = 0.10
 
-    # --- SVMD (adaptive decomposition with center-frequency progression) ---
-    SVMD_ALPHA: int = 500
-    SVMD_TAU: float = 0.0
-    SVMD_TOL: float = 1e-7
+    # --- VMD (applied to D1 after MODWT) ---
+    VMD_K: int = 10
+    VMD_ALPHA: int = 2000
+    VMD_TAU: float = 0.0
+    VMD_DC: int = 0
+    VMD_INIT: int = 1
+    VMD_TOL: float = 1e-7
 
-    # --- Dispersion Entropy ---
-    DE_CLASSES: int = 6
-    DE_EMBED_DIM: int = 2
-    DE_TIME_DELAY: int = 1
-
-    # MODWT (sym4, level=3) = 4 channels + low composite = 5 total
-    TOTAL_CHANNELS: int = 5
+    # MODWT (sym4, level=3) on signal: [D1, D2, D3, A3],
+    # then VMD(K=10) on D1 → 10 VMD modes, total = 10 + 3 = 13
+    TOTAL_CHANNELS: int = 13
 
     # --- Shared Training ---
     LEARNING_RATE: float = 0.001

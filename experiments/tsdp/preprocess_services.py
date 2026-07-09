@@ -21,7 +21,7 @@ if REPO_ROOT not in sys.path:
 from shared.config_paths import PATHS
 from experiments.tsdp.config import CFG
 
-CHANNEL_DIRS = ["D1", "D2", "D3", "A3", "low_freq"]
+CHANNEL_DIRS = [f"vmd_mode_{k}" for k in range(10)] + ["D2", "D3", "A3"]
 
 
 class _TehranFormatter(logging.Formatter):
@@ -71,7 +71,7 @@ def _load_batch_signals(
 
 def main() -> None:
     ap = argparse.ArgumentParser(
-        description="Decompose MSResource CPU signals into 6 SDTNet channels."
+        description="Decompose MSResource CPU signals via MODWT + VMD into 13 channels."
     )
     ap.add_argument("--msresource_dir", default=PATHS.PARQUET_MSRESOURCE)
     ap.add_argument("--out_dir", default="/dataset/tsdp_preprocess")
@@ -205,7 +205,7 @@ def main() -> None:
 
     pre_done = 0
     for i in range(total):
-        dm = os.path.join(args.out_dir, "D1", f"service_{i:05d}.done")
+        dm = os.path.join(args.out_dir, CHANNEL_DIRS[0], f"service_{i:05d}.done")
         if os.path.exists(dm):
             if all(
                 os.path.exists(os.path.join(args.out_dir, d, f"service_{i:05d}.npy"))
@@ -236,7 +236,7 @@ def main() -> None:
             out_path = os.path.join(args.out_dir, "original", f"service_{idx:05d}.npy")
             if not os.path.exists(out_path):
                 np.save(out_path, sig)
-            done_marker = os.path.join(args.out_dir, "D1", f"service_{idx:05d}.done")
+            done_marker = os.path.join(args.out_dir, CHANNEL_DIRS[0], f"service_{idx:05d}.done")
             if os.path.exists(done_marker):
                 files_exist = all(
                     os.path.exists(os.path.join(args.out_dir, d, f"service_{idx:05d}.npy"))
@@ -251,7 +251,7 @@ def main() -> None:
             if ms_name not in signals:
                 idx = svc_to_idx.get(ms_name, -1)
                 if idx >= 0:
-                    dm = os.path.join(args.out_dir, "D1", f"service_{idx:05d}.done")
+                    dm = os.path.join(args.out_dir, CHANNEL_DIRS[0], f"service_{idx:05d}.done")
                     if not os.path.exists(dm):
                         skipped += 1
                     else:

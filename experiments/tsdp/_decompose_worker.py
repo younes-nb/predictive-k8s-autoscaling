@@ -17,7 +17,7 @@ def _log(msg: str) -> None:
     print(msg, file=sys.stderr, flush=True)
 
 
-CHANNEL_DIRS = ["D1", "D2", "D3", "A3", "low_freq"]
+CHANNEL_DIRS = [f"vmd_mode_{k}" for k in range(10)] + ["D2", "D3", "A3"]
 N_CHANNELS = len(CHANNEL_DIRS)
 
 
@@ -27,7 +27,7 @@ def main() -> None:
     out_dir = sys.argv[3]
     _t0 = _time.time()
 
-    done_marker = os.path.join(out_dir, "D1", f"service_{idx:05d}.done")
+    done_marker = os.path.join(out_dir, CHANNEL_DIRS[0], f"service_{idx:05d}.done")
     if os.path.exists(done_marker):
         all_exist = all(
             os.path.exists(os.path.join(out_dir, d, f"service_{idx:05d}.npy"))
