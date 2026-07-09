@@ -20,7 +20,7 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from shared.config_paths import PATHS
-from experiments.cvcbm.config import CFG
+from experiments.cvcbm.config import CFG, set_seed
 from experiments.cvcbm._decompose_worker import MAX_IMFS
 
 class _TehranFormatter(logging.Formatter):
@@ -80,6 +80,8 @@ def main() -> None:
     ap.add_argument("--no_clustering", action="store_true",
                     help="Skip Sample Entropy, K-Means, and VMD; use raw IMFs only.")
     args = ap.parse_args()
+
+    set_seed(CFG.SEED)
 
     # Compute worker count as a fraction of available CPU cores (default 90%).
     n_cpus = os.cpu_count() or 1

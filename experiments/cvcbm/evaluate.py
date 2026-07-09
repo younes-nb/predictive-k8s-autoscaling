@@ -19,7 +19,7 @@ REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, "..", ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from experiments.cvcbm.config import CFG
+from experiments.cvcbm.config import CFG, set_seed
 from experiments.cvcbm.dataset import CvcbmDataset
 from experiments.cvcbm.model import CvcbmModel
 from training.metrics import compute_metrics
@@ -111,6 +111,8 @@ def main() -> None:
     ap.add_argument("--cpu", action="store_true")
     ap.add_argument("--batch_size", type=int, default=512)
     args = ap.parse_args()
+
+    set_seed(CFG.SEED)
 
     log_path = setup_logging(args.log_dir)
     device = torch.device(

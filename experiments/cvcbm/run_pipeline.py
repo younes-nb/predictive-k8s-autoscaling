@@ -6,6 +6,12 @@ import sys
 import time
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, "..", ".."))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+
+from experiments.cvcbm.config import set_seed
+
 
 def run_step(cmd: list, label: str) -> None:
     print(f"\n{'=' * 60}")
@@ -34,6 +40,8 @@ def main() -> None:
                     help="Skip Sample Entropy, K-Means, and VMD; use raw IMFs only.")
     ap.add_argument("--cpu", action="store_true")
     args = ap.parse_args()
+
+    set_seed(42)
 
     py = [sys.executable]
 

@@ -10,7 +10,7 @@ REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, "..", ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from experiments.cvcbm.config import CFG
+from experiments.cvcbm.config import CFG, set_seed
 from experiments.cvcbm.decomposition import decompose_service_signal
 
 def _log(msg: str) -> None:
@@ -19,6 +19,7 @@ def _log(msg: str) -> None:
 MAX_IMFS = 15
 
 def main() -> None:
+    set_seed(CFG.SEED)
     ms_name = sys.argv[1]
     idx = int(sys.argv[2])
     out_dir = sys.argv[3]

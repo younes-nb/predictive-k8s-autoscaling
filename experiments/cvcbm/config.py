@@ -1,15 +1,32 @@
 
+import random
+
+import numpy as np
+import torch
 from dataclasses import dataclass
+
+
+def set_seed(seed: int = 42) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
 
 @dataclass(frozen=True)
 
 class CvcbmConfig:
 
+    SEED: int = 42
+
     INPUT_LEN: int = 60
     PRED_HORIZON: int = 5
 
     LEARNING_RATE: float = 0.001
-    BATCH_SIZE: int = 2048
+    BATCH_SIZE: int = 16384
     EPOCHS: int = 100
 
     KERNEL_SIZES: tuple = (2, 4, 8)
@@ -18,7 +35,7 @@ class CvcbmConfig:
 
     BILSTM_HIDDEN: tuple = (32, 64, 128)
 
-    CEEMDAN_TRIALS: int = 30
+    CEEMDAN_TRIALS: int = 100
     CEEMDAN_EPSILON: float = 0.005
 
     SE_M: int = 2
@@ -28,7 +45,7 @@ class CvcbmConfig:
     N_CLUSTERS: int = 3
     NO_CLUSTERING: bool = False
 
-    VMD_K: int = 5
+    VMD_K: int = 10
     VMD_ALPHA: int = 2000
     VMD_TAU: float = 0.0
     VMD_DC: int = 0
