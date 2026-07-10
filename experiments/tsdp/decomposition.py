@@ -74,10 +74,12 @@ def decompose_window(window: np.ndarray, cfg) -> np.ndarray:
     if pad_len > 0:
         mra_coeffs = [c[pad_len:] for c in mra_coeffs]
 
-    D1, D2, D3, A3 = mra_coeffs
+    # pywt.mra returns [A3, D3, D2, D1] (approximation first,
+    # details from coarsest to finest).
+    A3_ts, D3_ts, D2_ts, D1_ts = mra_coeffs
 
     vmd_modes = vmd_decompose(
-        D1, K=cfg.VMD_K, alpha=cfg.VMD_ALPHA,
+        D1_ts, K=cfg.VMD_K, alpha=cfg.VMD_ALPHA,
         tau=cfg.VMD_TAU, DC=cfg.VMD_DC,
         init=cfg.VMD_INIT, tol=cfg.VMD_TOL,
     )
@@ -85,9 +87,9 @@ def decompose_window(window: np.ndarray, cfg) -> np.ndarray:
     channels = []
     for k in range(vmd_modes.shape[0]):
         channels.append(vmd_modes[k].astype(np.float32))
-    channels.append(D2.astype(np.float32))
-    channels.append(D3.astype(np.float32))
-    channels.append(A3.astype(np.float32))
+    channels.append(D2_ts.astype(np.float32))
+    channels.append(D3_ts.astype(np.float32))
+    channels.append(A3_ts.astype(np.float32))
 
     result = np.stack(channels, axis=0)
     assert result.shape == (cfg.TOTAL_CHANNELS, cfg.INPUT_LEN), (

@@ -64,8 +64,8 @@ def main() -> None:
             "--out_dir", args.preprocess_dir,
             "--max_services", str(args.max_services),
         ]
-        label = "Step 1 — SVMD-DE-Otsu-MODWT Decomposition"
-        run_step(py + preprocess_cmd, label)
+        label = "Step 1 — MODWT-VMD Decomposition"
+        run_step([sys.executable] + preprocess_cmd, label)
 
     if not args.skip_train:
         train_cmd = launcher_cmd + [
