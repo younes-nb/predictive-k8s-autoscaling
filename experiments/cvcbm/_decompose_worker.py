@@ -16,7 +16,7 @@ from experiments.cvcbm.decomposition import decompose_service_signal
 def _log(msg: str) -> None:
     print(msg, file=sys.stderr, flush=True)
 
-MAX_IMFS = 15
+MAX_IMFS = 3
 
 def main() -> None:
     set_seed(CFG.SEED)

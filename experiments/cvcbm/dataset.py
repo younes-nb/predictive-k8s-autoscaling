@@ -10,7 +10,7 @@ from torch.utils.data import Dataset
 
 logger = logging.getLogger(__name__)
 
-MAX_IMFS = 15
+MAX_IMFS = 3
 
 class CoImfDataset(Dataset):
 
