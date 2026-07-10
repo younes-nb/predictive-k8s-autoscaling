@@ -82,8 +82,8 @@ def main() -> None:
     accelerator = Accelerator(cpu=args.cpu, mixed_precision=mixed_precision, kwargs_handlers=[timeout_kwargs])
     device = accelerator.device
 
-    log_info = lambda msg: (
-        logging.info(msg) if accelerator.is_local_main_process else None
+    log_info = lambda msg, *args: (
+        logging.info(msg, *args) if accelerator.is_local_main_process else None
     )
 
     os.makedirs(args.out_dir, exist_ok=True)
@@ -193,6 +193,8 @@ def main() -> None:
             n_train_count += x.size(0)
 
         gathered_train = accelerator.gather(torch.tensor([train_accum, n_train_count], device=device))
+        if gathered_train.dim() == 1:
+            gathered_train = gathered_train.unsqueeze(0)
         train_accum = gathered_train[:, 0].sum().item()
         n_train_count = int(gathered_train[:, 1].sum().item())
         avg_train = train_accum / max(n_train_count, 1)
@@ -207,6 +209,8 @@ def main() -> None:
                 n_val_count += x.size(0)
 
         gathered_val = accelerator.gather(torch.tensor([val_accum, n_val_count], device=device))
+        if gathered_val.dim() == 1:
+            gathered_val = gathered_val.unsqueeze(0)
         val_accum = gathered_val[:, 0].sum().item()
         n_val_count = int(gathered_val[:, 1].sum().item())
         avg_val = val_accum / max(n_val_count, 1)
