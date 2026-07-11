@@ -64,7 +64,7 @@ def main() -> None:
             "--out_dir", args.preprocess_dir,
             "--max_services", str(args.max_services),
         ]
-        label = "Step 1 — MODWT-VMD Decomposition"
+        label = "Step 1 — SWT-VMD Decomposition"
         run_step([sys.executable] + preprocess_cmd, label)
 
     if not args.skip_train:

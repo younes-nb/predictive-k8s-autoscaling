@@ -10,7 +10,6 @@ class TsdpConfig:
     TRAIN_FRAC: float = 0.70
     VAL_FRAC: float = 0.10
 
-    # --- VMD (applied to D1 after MODWT) ---
     VMD_K: int = 10
     VMD_ALPHA: int = 2000
     VMD_TAU: float = 0.0
@@ -18,11 +17,7 @@ class TsdpConfig:
     VMD_INIT: int = 1
     VMD_TOL: float = 1e-7
 
-    # MODWT (sym4, level=3) on signal: [A3, D3, D2, D1],
-    # then VMD(K=10) on D1 → 10 VMD modes, total = 10 + 3 = 13
     TOTAL_CHANNELS: int = 13
-
-    # --- Shared Training ---
     LEARNING_RATE: float = 0.001
     BATCH_SIZE: int = 8192
     EPOCHS: int = 1000

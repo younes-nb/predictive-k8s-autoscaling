@@ -70,13 +70,11 @@ def decompose_window(window: np.ndarray, cfg) -> np.ndarray:
         padded = np.pad(window, (pad_len, 0), mode='edge')
     else:
         padded = window
-    mra_coeffs = pywt.mra(padded, 'sym4', level=3, transform='swt')
+    swt_coeffs = pywt.swt(padded, 'sym4', level=3, norm=True, trim_approx=True)
     if pad_len > 0:
-        mra_coeffs = [c[pad_len:] for c in mra_coeffs]
+        swt_coeffs = [c[pad_len:] for c in swt_coeffs]
 
-    # pywt.mra returns [A3, D3, D2, D1] (approximation first,
-    # details from coarsest to finest).
-    A3_ts, D3_ts, D2_ts, D1_ts = mra_coeffs
+    A3_ts, D3_ts, D2_ts, D1_ts = swt_coeffs
 
     vmd_modes = vmd_decompose(
         D1_ts, K=cfg.VMD_K, alpha=cfg.VMD_ALPHA,
@@ -103,7 +101,7 @@ if __name__ == "__main__":
     from experiments.tsdp.config import CFG as CFG
 
     print("=" * 60)
-    print("Scenario A — MODWT-VMD Decomposition smoke test")
+    print("Scenario A — SWT-VMD Decomposition smoke test")
     print("=" * 60)
 
     rng = np.random.default_rng(42)

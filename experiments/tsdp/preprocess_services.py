@@ -71,7 +71,7 @@ def _load_batch_signals(
 
 def main() -> None:
     ap = argparse.ArgumentParser(
-        description="Decompose MSResource CPU signals via MODWT + VMD into 13 channels."
+        description="Decompose MSResource CPU signals via SWT + VMD into 13 channels."
     )
     ap.add_argument("--msresource_dir", default=PATHS.PARQUET_MSRESOURCE)
     ap.add_argument("--out_dir", default="/dataset/tsdp_preprocess")
