@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 import argparse
 import multiprocessing as mp
 from datetime import datetime
@@ -18,10 +19,55 @@ if REPO_ROOT not in sys.path:
 from config.defaults import Paths
 
 DEFAULT_BINS = 128
+CACHE_DIR = "/dataset/analysis_cache"
 
 
 def log(msg: str) -> None:
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}", flush=True)
+
+
+def _fmt_duration(seconds: float) -> str:
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    m, s = divmod(seconds, 60)
+    return f"{int(m)}m {s:.0f}s"
+
+
+def _cache_path(tag: str) -> str:
+    return os.path.join(CACHE_DIR, f"{tag}.parquet")
+
+
+def _cache_path_np(tag: str) -> str:
+    return os.path.join(CACHE_DIR, f"{tag}.npz")
+
+
+def _load_cache(tag: str):
+    pc = _cache_path(tag)
+    nc = _cache_path_np(tag)
+    if os.path.exists(pc):
+        log(f"  Cache hit for '{tag}' ({pc})")
+        return ("parquet", pd.read_parquet(pc))
+    if os.path.exists(nc):
+        log(f"  Cache hit for '{tag}' ({nc})")
+        data = np.load(nc, allow_pickle=True)
+        return ("npz", data)
+    return None
+
+
+def _save_cache(tag: str, obj):
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    if isinstance(obj, pd.DataFrame):
+        path = _cache_path(tag)
+        obj.to_parquet(path, index=False)
+        log(f"  Cached '{tag}' -> {path}")
+    elif isinstance(obj, dict):
+        path = _cache_path_np(tag)
+        np.savez(path, **{k: v for k, v in obj.items()})
+        log(f"  Cached '{tag}' -> {path}")
+    elif isinstance(obj, tuple):
+        path = _cache_path_np(tag)
+        np.savez(path, *obj)
+        log(f"  Cached '{tag}' -> {path}")
 
 
 def parse_args():
@@ -46,6 +92,30 @@ def parse_args():
         default=Paths.LOGS_DIR,
         help="Directory to save plots.",
     )
+    parser.add_argument(
+        "--use_cache",
+        action="store_true",
+        default=True,
+        help="Use cached scan results if available (default: True).",
+    )
+    parser.add_argument(
+        "--no_cache",
+        action="store_true",
+        default=False,
+        help="Disable cache and re-compute all scans.",
+    )
+    parser.add_argument(
+        "--num_workers",
+        type=int,
+        default=8,
+        help="Number of parallel workers for scan 3 (default: 8).",
+    )
+    parser.add_argument(
+        "--clear_cache",
+        action="store_true",
+        default=False,
+        help="Delete all cached scan results before running.",
+    )
     return parser.parse_args()
 
 
@@ -67,10 +137,13 @@ def plot_histogram(bin_edges, counts, title, xlabel, out_path, color="steelblue"
     plt.close()
 
 
-def _compute_avg_instances_chunk(chunk_msnames: list, parquet_pattern: str) -> Dict[str, float]:
+def _compute_avg_instances_chunk(
+    worker_id: int,
+    chunk_msnames: list,
+    parquet_pattern: str,
+) -> Dict[str, float]:
     """Worker: compute avg instances per timestamp for a chunk of msnames."""
-    import time as _time
-
+    t_worker_start = time.time()
     con = duckdb.connect()
     con.execute("SET threads TO 4")
     con.execute("SET memory_limit = '4GB'")
@@ -78,12 +151,14 @@ def _compute_avg_instances_chunk(chunk_msnames: list, parquet_pattern: str) -> D
 
     result = {}
     BATCH_SIZE = 256
-    n_batches = (len(chunk_msnames) + BATCH_SIZE - 1) // BATCH_SIZE
+    total = len(chunk_msnames)
+    n_batches = (total + BATCH_SIZE - 1) // BATCH_SIZE
+    log(f"  [W{worker_id}] Starting: {total} msnames in {n_batches} batches")
 
-    for i in range(0, len(chunk_msnames), BATCH_SIZE):
-        batch = chunk_msnames[i:i + BATCH_SIZE]
+    for i in range(0, total, BATCH_SIZE):
+        batch = chunk_msnames[i : i + BATCH_SIZE]
         batch_num = i // BATCH_SIZE + 1
-        t_start = _time.time()
+        t_batch = time.time()
 
         in_clause = ", ".join([f"'{m}'" for m in batch])
         rows = con.execute(f"""
@@ -101,33 +176,142 @@ def _compute_avg_instances_chunk(chunk_msnames: list, parquet_pattern: str) -> D
             GROUP BY msname
         """).fetchall()
 
-        elapsed = _time.time() - t_start
-        log(f"  Inst batch {batch_num}/{n_batches}: {len(batch)} msnames, {elapsed:.1f}s elapsed")
+        elapsed = time.time() - t_batch
+        pct = (batch_num / n_batches) * 100
+        log(
+            f"  [W{worker_id}] Batch {batch_num}/{n_batches} "
+            f"({pct:.0f}%): {len(batch)} msnames, {len(rows)} results, {_fmt_duration(elapsed)}"
+        )
 
         for msname, avg_val in rows:
             result[msname] = avg_val
 
     con.close()
+    total_elapsed = time.time() - t_worker_start
+    log(f"  [W{worker_id}] Finished: {len(result)}/{total} msnames, {_fmt_duration(total_elapsed)}")
     return result
 
 
 def main():
+    t_total_start = time.time()
     args = parse_args()
     parquet_pattern = os.path.join(args.parquet_dir, "*.parquet")
     n_bins = args.bins
     os.makedirs(args.out_dir, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    con = duckdb.connect()
-    con.execute("SET threads TO 2")
-    con.execute("SET memory_limit = '12GB'")
-    con.execute("SET preserve_insertion_order = false")
-    os.makedirs("/dataset/temp", exist_ok=True)
-    con.execute("SET temp_directory = '/dataset/temp'")
+    if args.clear_cache:
+        import shutil
+        if os.path.exists(CACHE_DIR):
+            shutil.rmtree(CACHE_DIR)
+            log(f"Cleared cache: {CACHE_DIR}")
+        else:
+            log("No cache to clear.")
 
-    log("Scan 1/4: Computing CPU/memory histograms and global averages...")
-    cpu_bins, cpu_cnts, mem_bins, mem_cnts, global_avg_cpu, global_avg_mem = \
-        con.execute(f"""
+    use_cache = args.use_cache and not args.no_cache
+    log(f"Parquet pattern: {parquet_pattern}")
+    log(f"Bins: {n_bins}, Workers: {args.num_workers}, Cache: {'ON' if use_cache else 'OFF'}")
+
+    # ---- Scan 1/4: Histograms + globals ----
+    log("=" * 60)
+    log("Scan 1/4: CPU/memory histograms and global averages...")
+    t_scan = time.time()
+
+    cached = _load_cache("scan1") if use_cache else None
+    if cached is not None:
+        kind, data = cached
+        if kind == "npz":
+            cpu_bins = data["cpu_bins"].tolist()
+            cpu_cnts = data["cpu_cnts"].tolist()
+            mem_bins = data["mem_bins"].tolist()
+            mem_cnts = data["mem_cnts"].tolist()
+            global_avg_cpu = float(data["global_avg_cpu"])
+            global_avg_mem = float(data["global_avg_mem"])
+        else:
+            row = data.iloc[0]
+            cpu_bins = row["cpu_bins"]
+            cpu_cnts = row["cpu_cnts"]
+            mem_bins = row["mem_bins"]
+            mem_cnts = row["mem_cnts"]
+            global_avg_cpu = float(row["global_avg_cpu"])
+            global_avg_mem = float(row["global_avg_mem"])
+    else:
+        con = duckdb.connect()
+        con.execute("SET threads TO 2")
+        con.execute("SET memory_limit = '12GB'")
+        con.execute("SET preserve_insertion_order = false")
+        os.makedirs("/dataset/temp", exist_ok=True)
+        con.execute("SET temp_directory = '/dataset/temp'")
+
+        log("  Querying histograms + globals...")
+        cpu_bins, cpu_cnts, mem_bins, mem_cnts, global_avg_cpu, global_avg_mem = \
+            con.execute(f"""
+                WITH per_timestamp AS (
+                    SELECT msname, timestamp,
+                           AVG(cpu_utilization) AS cpu,
+                           AVG(memory_utilization) AS mem
+                    FROM read_parquet('{parquet_pattern}')
+                    WHERE cpu_utilization BETWEEN 0.0 AND 1.0
+                      AND memory_utilization BETWEEN 0.0 AND 1.0
+                    GROUP BY msname, timestamp
+                ),
+                cpu_hist AS (
+                    SELECT CAST(LEAST(FLOOR(cpu * {n_bins}), {n_bins - 1}) AS INTEGER) AS bin_idx,
+                           COUNT(*) AS cnt
+                    FROM per_timestamp
+                    GROUP BY bin_idx
+                ),
+                mem_hist AS (
+                    SELECT CAST(LEAST(FLOOR(mem * {n_bins}), {n_bins - 1}) AS INTEGER) AS bin_idx,
+                           COUNT(*) AS cnt
+                    FROM per_timestamp
+                    GROUP BY bin_idx
+                ),
+                globals AS (
+                    SELECT AVG(cpu) AS avg_cpu, AVG(mem) AS avg_mem
+                    FROM per_timestamp
+                )
+                SELECT (SELECT LIST(bin_idx ORDER BY bin_idx) FROM cpu_hist),
+                       (SELECT LIST(cnt  ORDER BY bin_idx) FROM cpu_hist),
+                       (SELECT LIST(bin_idx ORDER BY bin_idx) FROM mem_hist),
+                       (SELECT LIST(cnt  ORDER BY bin_idx) FROM mem_hist),
+                       avg_cpu, avg_mem
+                FROM globals
+            """).fetchone()
+        con.close()
+
+        _save_cache("scan1", {
+            "cpu_bins": cpu_bins,
+            "cpu_cnts": cpu_cnts,
+            "mem_bins": mem_bins,
+            "mem_cnts": mem_cnts,
+            "global_avg_cpu": global_avg_cpu,
+            "global_avg_mem": global_avg_mem,
+        })
+
+    cpu_hist_rows = list(zip(cpu_bins, cpu_cnts))
+    mem_hist_rows = list(zip(mem_bins, mem_cnts))
+    t_elapsed = time.time() - t_scan
+    log(f"Scan 1/4 done in {_fmt_duration(t_elapsed)}")
+
+    # ---- Scan 2/4: Per-MS max/min ----
+    log("=" * 60)
+    log("Scan 2/4: Per-microservice max/min...")
+    t_scan = time.time()
+
+    cached = _load_cache("scan2") if use_cache else None
+    if cached is not None:
+        kind, data = cached
+        max_min_df = data
+    else:
+        con = duckdb.connect()
+        con.execute("SET threads TO 2")
+        con.execute("SET memory_limit = '12GB'")
+        con.execute("SET preserve_insertion_order = false")
+        con.execute("SET temp_directory = '/dataset/temp'")
+
+        log("  Querying per-MS max/min...")
+        max_min_df = con.execute(f"""
             WITH per_timestamp AS (
                 SELECT msname, timestamp,
                        AVG(cpu_utilization) AS cpu,
@@ -136,92 +320,95 @@ def main():
                 WHERE cpu_utilization BETWEEN 0.0 AND 1.0
                   AND memory_utilization BETWEEN 0.0 AND 1.0
                 GROUP BY msname, timestamp
-            ),
-            cpu_hist AS (
-                SELECT CAST(LEAST(FLOOR(cpu * {n_bins}), {n_bins - 1}) AS INTEGER) AS bin_idx,
-                       COUNT(*) AS cnt
-                FROM per_timestamp
-                GROUP BY bin_idx
-            ),
-            mem_hist AS (
-                SELECT CAST(LEAST(FLOOR(mem * {n_bins}), {n_bins - 1}) AS INTEGER) AS bin_idx,
-                       COUNT(*) AS cnt
-                FROM per_timestamp
-                GROUP BY bin_idx
-            ),
-            globals AS (
-                SELECT AVG(cpu) AS avg_cpu, AVG(mem) AS avg_mem
-                FROM per_timestamp
             )
-            SELECT (SELECT LIST(bin_idx ORDER BY bin_idx) FROM cpu_hist),
-                   (SELECT LIST(cnt  ORDER BY bin_idx) FROM cpu_hist),
-                   (SELECT LIST(bin_idx ORDER BY bin_idx) FROM mem_hist),
-                   (SELECT LIST(cnt  ORDER BY bin_idx) FROM mem_hist),
-                   avg_cpu, avg_mem
-            FROM globals
-        """).fetchone()
-    cpu_hist_rows = list(zip(cpu_bins, cpu_cnts))
-    mem_hist_rows = list(zip(mem_bins, mem_cnts))
+            SELECT msname,
+                   MAX(cpu) AS max_cpu,
+                   MIN(cpu) AS min_cpu,
+                   MAX(mem) AS max_mem,
+                   MIN(mem) AS min_mem
+            FROM per_timestamp
+            GROUP BY msname
+            ORDER BY msname
+        """).df()
+        con.close()
+        _save_cache("scan2", max_min_df)
 
-    log("Scan 2/4: Computing per-microservice max/min...")
-    max_min_df = con.execute(f"""
-        WITH per_timestamp AS (
-            SELECT msname, timestamp,
-                   AVG(cpu_utilization) AS cpu,
-                   AVG(memory_utilization) AS mem
-            FROM read_parquet('{parquet_pattern}')
-            WHERE cpu_utilization BETWEEN 0.0 AND 1.0
-              AND memory_utilization BETWEEN 0.0 AND 1.0
-            GROUP BY msname, timestamp
-        )
-        SELECT msname,
-               MAX(cpu) AS max_cpu,
-               MIN(cpu) AS min_cpu,
-               MAX(mem) AS max_mem,
-               MIN(mem) AS min_mem
-        FROM per_timestamp
-        GROUP BY msname
-        ORDER BY msname
-    """).df()
     n_ms = len(max_min_df)
-    log(f"Found {n_ms} unique microservices.")
+    t_elapsed = time.time() - t_scan
+    log(f"Scan 2/4 done in {_fmt_duration(t_elapsed)}: {n_ms} unique microservices")
 
-    log("Scan 3/4: Computing avg instances per timestamp per microservice (parallel)...")
-    msnames = max_min_df["msname"].tolist()
-    BATCH_INST = 256
-    nw = min(8, len(msnames))
-    chunks = np.array_split(msnames, nw)
-    log(f"Spawning {nw} workers...")
+    # ---- Scan 3/4: Avg instances per timestamp (parallel) ----
+    log("=" * 60)
+    log("Scan 3/4: Avg instances per timestamp per microservice (parallel)...")
+    t_scan = time.time()
 
-    import time as _time
-    t_scan3_start = _time.time()
+    cached = _load_cache("scan3") if use_cache else None
+    if cached is not None:
+        kind, data = cached
+        avg_inst_dict = {k: float(v) for k, v in data.items()}
+    else:
+        msnames = max_min_df["msname"].tolist()
+        nw = min(args.num_workers, len(msnames))
+        chunks = np.array_split(msnames, nw)
+        log(f"  {len(msnames)} msnames -> {nw} workers, {len(chunks[0])} msnames/worker avg")
 
-    with mp.Pool(nw) as pool:
-        results = pool.starmap(
-            _compute_avg_instances_chunk,
-            [(chunk.tolist(), parquet_pattern) for chunk in chunks],
-        )
+        t_workers_start = time.time()
+        with mp.Pool(nw) as pool:
+            results = pool.starmap(
+                _compute_avg_instances_chunk,
+                [(i, chunk.tolist(), parquet_pattern) for i, chunk in enumerate(chunks)],
+            )
 
-    avg_inst_dict = {}
-    for r in results:
-        avg_inst_dict.update(r)
-    t_scan3_end = _time.time()
-    log(f"Scan 3/4 done: {len(avg_inst_dict)} msnames processed in {t_scan3_end - t_scan3_start:.1f}s")
+        avg_inst_dict = {}
+        for r in results:
+            avg_inst_dict.update(r)
+        t_workers_elapsed = time.time() - t_workers_start
+        log(f"  All workers combined: {len(avg_inst_dict)} msnames, {_fmt_duration(t_workers_elapsed)}")
+
+        _save_cache("scan3", avg_inst_dict)
+
     avg_inst_df = pd.DataFrame(
         list(avg_inst_dict.items()),
         columns=["msname", "avg_instances_per_ts"],
     )
     max_min_df = max_min_df.merge(avg_inst_df, on="msname", how="left")
+    t_elapsed = time.time() - t_scan
+    log(f"Scan 3/4 done in {_fmt_duration(t_elapsed)}")
 
-    log("Scan 4/4: Computing total unique instances per microservice...")
-    total_inst_df = con.execute(f"""
-        SELECT msname, COUNT(DISTINCT msinstanceid) AS total_instances
-        FROM read_parquet('{parquet_pattern}')
-        WHERE cpu_utilization BETWEEN 0.0 AND 1.0
-          AND memory_utilization BETWEEN 0.0 AND 1.0
-        GROUP BY msname
-    """).df()
-    con.close()
+    # ---- Scan 4/4: Total unique instances ----
+    log("=" * 60)
+    log("Scan 4/4: Total unique instances per microservice...")
+    t_scan = time.time()
+
+    cached = _load_cache("scan4") if use_cache else None
+    if cached is not None:
+        kind, data = cached
+        total_inst_df = data
+    else:
+        con = duckdb.connect()
+        con.execute("SET threads TO 2")
+        con.execute("SET memory_limit = '12GB'")
+        con.execute("SET preserve_insertion_order = false")
+        con.execute("SET temp_directory = '/dataset/temp'")
+
+        log("  Querying total unique instances...")
+        total_inst_df = con.execute(f"""
+            SELECT msname, COUNT(DISTINCT msinstanceid) AS total_instances
+            FROM read_parquet('{parquet_pattern}')
+            WHERE cpu_utilization BETWEEN 0.0 AND 1.0
+              AND memory_utilization BETWEEN 0.0 AND 1.0
+            GROUP BY msname
+        """).df()
+        con.close()
+        _save_cache("scan4", total_inst_df)
+
+    t_elapsed = time.time() - t_scan
+    log(f"Scan 4/4 done in {_fmt_duration(t_elapsed)}")
+
+    # ---- Aggregation + Summary ----
+    log("=" * 60)
+    log("Aggregating results...")
+    t_agg = time.time()
 
     cpu_counts = np.zeros(n_bins, dtype=np.int64)
     for bin_idx, cnt in cpu_hist_rows:
@@ -243,6 +430,9 @@ def main():
     avg_total_inst = float(total_inst_df["total_instances"].mean())
     max_total_inst = int(total_inst_df["total_instances"].max())
     min_total_inst = int(total_inst_df["total_instances"].min())
+
+    t_agg_elapsed = time.time() - t_agg
+    log(f"Aggregation done in {_fmt_duration(t_agg_elapsed)}")
 
     print("\n" + "=" * 60)
     print("  CPU/MEMORY UTILIZATION SUMMARY")
@@ -272,6 +462,10 @@ def main():
     print(f"  Average min CPU:              {avg_min_cpu:.6f}")
     print(f"  Average min memory:           {avg_min_mem:.6f}")
     print("=" * 60 + "\n")
+
+    # ---- Plots ----
+    log("Generating plots...")
+    t_plots = time.time()
 
     mm_bins = np.linspace(0.0, 1.0, n_bins + 1)
     plot_histogram(
@@ -336,7 +530,11 @@ def main():
         color="lightseagreen",
     )
 
-    log("Done.")
+    t_plots_elapsed = time.time() - t_plots
+    log(f"Plots done in {_fmt_duration(t_plots_elapsed)}")
+
+    t_total = time.time() - t_total_start
+    log(f"All done. Total wall-clock: {_fmt_duration(t_total)}")
 
 
 if __name__ == "__main__":
