@@ -14,7 +14,7 @@ from experiments.tsdp.config import CFG as TSDP_CFG
 logger = logging.getLogger(__name__)
 
 _VMD_CHANNELS = [f"vmd_mode_{k}" for k in range(10)]
-CHANNEL_DIRS = _VMD_CHANNELS + ["D2", "D3", "A3"]
+CHANNEL_DIRS = _VMD_CHANNELS + ["D2", "A2"]
 N_CHANNELS = len(CHANNEL_DIRS)
 
 

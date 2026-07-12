@@ -21,7 +21,7 @@ if REPO_ROOT not in sys.path:
 from shared.config_paths import PATHS
 from experiments.tsdp.config import CFG
 
-CHANNEL_DIRS = [f"vmd_mode_{k}" for k in range(10)] + ["D2", "D3", "A3"]
+CHANNEL_DIRS = [f"vmd_mode_{k}" for k in range(10)] + ["D2", "A2"]
 
 
 class _TehranFormatter(logging.Formatter):

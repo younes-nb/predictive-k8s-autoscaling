@@ -65,16 +65,9 @@ def decompose_window(window: np.ndarray, cfg) -> np.ndarray:
         )
         return np.zeros((cfg.TOTAL_CHANNELS, cfg.INPUT_LEN), dtype=np.float32)
 
-    pad_len = 64 - n
-    if pad_len > 0:
-        padded = np.pad(window, (pad_len, 0), mode='edge')
-    else:
-        padded = window
-    swt_coeffs = pywt.swt(padded, 'sym4', level=3, norm=True, trim_approx=True)
-    if pad_len > 0:
-        swt_coeffs = [c[pad_len:] for c in swt_coeffs]
+    swt_coeffs = pywt.swt(window, 'sym4', level=2, norm=True, trim_approx=True)
 
-    A3_ts, D3_ts, D2_ts, D1_ts = swt_coeffs
+    A2_ts, D2_ts, D1_ts = swt_coeffs
 
     vmd_modes = vmd_decompose(
         D1_ts, K=cfg.VMD_K, alpha=cfg.VMD_ALPHA,
@@ -86,8 +79,7 @@ def decompose_window(window: np.ndarray, cfg) -> np.ndarray:
     for k in range(vmd_modes.shape[0]):
         channels.append(vmd_modes[k].astype(np.float32))
     channels.append(D2_ts.astype(np.float32))
-    channels.append(D3_ts.astype(np.float32))
-    channels.append(A3_ts.astype(np.float32))
+    channels.append(A2_ts.astype(np.float32))
 
     result = np.stack(channels, axis=0)
     assert result.shape == (cfg.TOTAL_CHANNELS, cfg.INPUT_LEN), (

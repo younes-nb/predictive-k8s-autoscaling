@@ -17,7 +17,7 @@ def _log(msg: str) -> None:
     print(msg, file=sys.stderr, flush=True)
 
 
-CHANNEL_DIRS = [f"vmd_mode_{k}" for k in range(10)] + ["D2", "D3", "A3"]
+CHANNEL_DIRS = [f"vmd_mode_{k}" for k in range(10)] + ["D2", "A2"]
 N_CHANNELS = len(CHANNEL_DIRS)
 
 

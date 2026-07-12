@@ -17,7 +17,7 @@ class TsdpConfig:
     VMD_INIT: int = 1
     VMD_TOL: float = 1e-7
 
-    TOTAL_CHANNELS: int = 13
+    TOTAL_CHANNELS: int = 12
     LEARNING_RATE: float = 0.001
     BATCH_SIZE: int = 8192
     EPOCHS: int = 1000
