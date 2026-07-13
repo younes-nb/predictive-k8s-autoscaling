@@ -93,6 +93,8 @@ def main() -> None:
     ap.add_argument("--cpu", action="store_true")
     ap.add_argument("--batch_size", type=int, default=512)
     ap.add_argument("--dataset_workers", type=int, default=max(1, int(os.cpu_count() * 0.7)))
+    ap.add_argument("--max_services", type=int, default=0,
+                    help="Limit to first N services (0 = all from index)")
     args = ap.parse_args()
 
     timeout_kwargs = InitProcessGroupKwargs(timeout=timedelta(seconds=14400))
@@ -110,6 +112,8 @@ def main() -> None:
         log_path = None
 
     log_info("Evaluating TSDP [%s] on %s", ARCH_NAME, device)
+    log_info("Shared config: %s", GLOBAL_CFG)
+    log_info("Architecture config: %s", ARCH_CFG)
     log_info("Distributed Processes: %d", accelerator.num_processes)
 
     ckpt = os.path.join(args.model_dir, "tsdp.pt")
@@ -126,6 +130,7 @@ def main() -> None:
         stride=GLOBAL_CFG.STRIDE,
         train_frac=GLOBAL_CFG.TRAIN_FRAC, val_frac=GLOBAL_CFG.VAL_FRAC,
         num_workers=args.dataset_workers,
+        max_services=args.max_services,
     )
     if len(test_ds) == 0:
         logging.error("Empty test dataset. Cannot evaluate.")

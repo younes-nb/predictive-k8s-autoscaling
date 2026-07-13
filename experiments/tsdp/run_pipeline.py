@@ -80,6 +80,8 @@ def main() -> None:
             train_cmd.extend(["--epochs", str(args.epochs_override)])
         if args.dataset_workers > 0:
             train_cmd.extend(["--dataset_workers", str(args.dataset_workers)])
+        if args.max_services:
+            train_cmd.extend(["--max_services", str(args.max_services)])
         run_step(train_cmd, f"Step 2 — Train TSDP ({args.arch})")
 
     if not args.skip_eval:
@@ -91,6 +93,8 @@ def main() -> None:
         ]
         if args.cpu:
             eval_cmd.append("--cpu")
+        if args.max_services:
+            eval_cmd.extend(["--max_services", str(args.max_services)])
         run_step(eval_cmd, f"Step 3 — Evaluate TSDP ({args.arch})")
 
     print("\n" + "=" * 60)

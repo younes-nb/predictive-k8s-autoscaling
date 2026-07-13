@@ -19,7 +19,7 @@ class TsdpConfig:
 
     TOTAL_CHANNELS: int = 12
     LEARNING_RATE: float = 0.001
-    BATCH_SIZE: int = 8192
+    BATCH_SIZE: int = 4096
     EPOCHS: int = 1000
     WEIGHT_DECAY: float = 0.0
     GRAD_CLIP_NORM: float = 1.0

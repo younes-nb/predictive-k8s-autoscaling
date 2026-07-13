@@ -76,6 +76,8 @@ def main() -> None:
     ap.add_argument("--cpu", action="store_true")
     ap.add_argument("--num_workers", type=int, default=0)
     ap.add_argument("--dataset_workers", type=int, default=max(1, int(os.cpu_count() * 0.7)))
+    ap.add_argument("--max_services", type=int, default=0,
+                    help="Limit to first N services (0 = all from index)")
     ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()
 
@@ -106,6 +108,7 @@ def main() -> None:
 
     log_info("=" * 60)
     log_info("TSDP — %s — Training on %s", ARCH_NAME, device)
+    log_info("Shared config: %s", GLOBAL_CFG)
     log_info("Architecture config: %s", ARCH_CFG)
     if log_path:
         log_info("Log file: %s", log_path)
@@ -117,6 +120,7 @@ def main() -> None:
         stride=GLOBAL_CFG.STRIDE,
         train_frac=GLOBAL_CFG.TRAIN_FRAC, val_frac=GLOBAL_CFG.VAL_FRAC,
         num_workers=args.dataset_workers,
+        max_services=args.max_services,
     )
     val_ds = TsdpDataset(
         args.preprocess_dir, "val",
@@ -124,6 +128,7 @@ def main() -> None:
         stride=GLOBAL_CFG.STRIDE,
         train_frac=GLOBAL_CFG.TRAIN_FRAC, val_frac=GLOBAL_CFG.VAL_FRAC,
         num_workers=args.dataset_workers,
+        max_services=args.max_services,
     )
 
     if len(train_ds) == 0:

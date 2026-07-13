@@ -1,7 +1,8 @@
 import argparse
-import glob
+import json
 import logging
 import os
+import random
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
@@ -19,10 +20,10 @@ N_CHANNELS = len(CHANNEL_DIRS)
 
 
 def _load_service_windows(
-    sf, preprocess_dir, split, input_len, pred_horizon, stride, train_frac, val_frac,
+    svc_name, svc_idx, preprocess_dir, split, input_len, pred_horizon, stride,
+    train_frac, val_frac,
 ):
-    base = os.path.basename(sf)
-    svc_idx = int(base.replace("service_", "").replace(".npy", ""))
+    base = f"service_{svc_idx:05d}.npy"
 
     original_dir = os.path.join(preprocess_dir, "original")
     orig_path = os.path.join(original_dir, f"service_{svc_idx:05d}.npy")
@@ -111,39 +112,61 @@ class TsdpDataset(Dataset):
         train_frac: float = 0.70,
         val_frac: float = 0.10,
         num_workers: int = 0,
+        max_services: int = 0,
     ):
         assert split in ("train", "val", "test"), f"Unknown split: {split}"
         self.split = split
         self.input_len = input_len
         self.pred_horizon = pred_horizon
 
-        channel_base_dirs = [
-            os.path.join(preprocess_dir, d) for d in CHANNEL_DIRS
-        ]
-
-        service_files = sorted(glob.glob(os.path.join(channel_base_dirs[0], "service_*.npy")))
-        if not service_files:
-            raise FileNotFoundError(
-                f"No channel files found in {channel_base_dirs[0]}. "
-                "Run preprocess_services.py first."
+        svc_to_idx_path = os.path.join(preprocess_dir, "_svc_to_idx.json")
+        if os.path.exists(svc_to_idx_path):
+            with open(svc_to_idx_path) as f:
+                svc_to_idx = json.load(f)
+            logger.info(
+                "Loaded service index mapping from %s (%d services)",
+                svc_to_idx_path, len(svc_to_idx),
             )
+        else:
+            svc_to_idx = None
 
-        n_services = len(service_files)
+        if svc_to_idx:
+            service_items = list(svc_to_idx.items())
+            if max_services and len(service_items) > max_services:
+                rng = random.Random(42)
+                rng.shuffle(service_items)
+                service_items = service_items[:max_services]
+                service_items.sort(key=lambda x: x[1])
+            n_services = len(service_items)
+        else:
+            import glob
+            channel_base = os.path.join(preprocess_dir, CHANNEL_DIRS[0])
+            service_files = sorted(glob.glob(os.path.join(channel_base, "service_*.npy")))
+            if not service_files:
+                raise FileNotFoundError(
+                    f"No channel files found in {channel_base}. "
+                    "Run preprocess_services.py first."
+                )
+            service_items = []
+            for sf in service_files:
+                idx = int(os.path.basename(sf).replace("service_", "").replace(".npy", ""))
+                service_items.append((f"svc_{idx}", idx))
+            n_services = len(service_items)
+
         log_interval = max(1, n_services // 10) if n_services > 10 else 1
         t_start = time.time()
-
-        task_args = (
-            preprocess_dir, split, input_len, pred_horizon,
-            stride, train_frac, val_frac,
-        )
 
         all_parts = []
 
         if num_workers is not None and num_workers > 1:
             with ProcessPoolExecutor(max_workers=num_workers) as exe:
                 futures = {
-                    exe.submit(_load_service_windows, sf, *task_args): sf
-                    for sf in service_files
+                    exe.submit(
+                        _load_service_windows, svc_name, svc_idx,
+                        preprocess_dir, split, input_len, pred_horizon,
+                        stride, train_frac, val_frac,
+                    ): (svc_name, svc_idx)
+                    for svc_name, svc_idx in service_items
                 }
                 completed = 0
                 for f in as_completed(futures):
@@ -159,16 +182,20 @@ class TsdpDataset(Dataset):
                             100 * completed / n_services, elapsed,
                         )
         else:
-            for idx, sf in enumerate(service_files):
-                result = _load_service_windows(sf, *task_args)
+            for pos, (svc_name, svc_idx) in enumerate(service_items):
+                result = _load_service_windows(
+                    svc_name, svc_idx,
+                    preprocess_dir, split, input_len, pred_horizon,
+                    stride, train_frac, val_frac,
+                )
                 if result is not None:
                     all_parts.append(result)
-                if (idx + 1) % log_interval == 0:
+                if (pos + 1) % log_interval == 0:
                     elapsed = time.time() - t_start
                     logger.info(
                         "TsdpDataset[%s] %d/%d services (%.0f%%) in %.1fs",
-                        split, idx + 1, n_services,
-                        100 * (idx + 1) / n_services, elapsed,
+                        split, pos + 1, n_services,
+                        100 * (pos + 1) / n_services, elapsed,
                     )
 
         if not all_parts:
