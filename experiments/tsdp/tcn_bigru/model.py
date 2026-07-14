@@ -4,6 +4,7 @@ import warnings
 
 import torch
 import torch.nn as nn
+from torch.nn.utils import parametrizations
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, "..", "..", ".."))
@@ -31,18 +32,18 @@ class TemporalBlock(nn.Module):
     ):
         super().__init__()
         padding = (kernel_size - 1) * dilation
-        self.conv1 = nn.Conv1d(
+        self.conv1 = parametrizations.weight_norm(nn.Conv1d(
             in_channels, out_channels, kernel_size,
             padding=padding, dilation=dilation,
-        )
+        ))
         self.chomp1 = Chomp1d(padding)
         self.relu1 = nn.ReLU()
         self.drop1 = nn.Dropout(dropout)
 
-        self.conv2 = nn.Conv1d(
+        self.conv2 = parametrizations.weight_norm(nn.Conv1d(
             out_channels, out_channels, kernel_size,
             padding=padding, dilation=dilation,
-        )
+        ))
         self.chomp2 = Chomp1d(padding)
         self.relu2 = nn.ReLU()
         self.drop2 = nn.Dropout(dropout)
@@ -51,7 +52,7 @@ class TemporalBlock(nn.Module):
             self.conv1, self.chomp1, self.relu1, self.drop1,
             self.conv2, self.chomp2, self.relu2, self.drop2,
         )
-        self.downsample = nn.Conv1d(in_channels, out_channels, 1) if in_channels != out_channels else None
+        self.downsample = parametrizations.weight_norm(nn.Conv1d(in_channels, out_channels, 1)) if in_channels != out_channels else None
         self.relu = nn.ReLU()
 
     def forward(self, x):
@@ -83,15 +84,21 @@ class TcnBiGru(nn.Module):
         self.tcn = nn.Sequential(*tcn_layers)
         self.tcn_output_len = input_len
 
+        for m in self.tcn.modules():
+            if isinstance(m, nn.Conv1d):
+                torch.nn.init.uniform_(m.weight, a=0.0, b=0.0015)
+                if m.bias is not None:
+                    torch.nn.init.zeros_(m.bias)
+
         if len(bigru_hidden) == 1:
             self.bigru = nn.GRU(
-                tcn_filters[-1], bigru_hidden[0],
+                in_channels, bigru_hidden[0],
                 batch_first=True, bidirectional=True,
             )
             gru_out = bigru_hidden[0] * 2
         else:
             self.bigru = nn.GRU(
-                tcn_filters[-1], bigru_hidden[0],
+                in_channels, bigru_hidden[0],
                 batch_first=True, bidirectional=True,
                 num_layers=2, dropout=tcn_dropout if len(bigru_hidden) > 2 else 0,
             )
@@ -101,22 +108,20 @@ class TcnBiGru(nn.Module):
             )
             gru_out = (bigru_hidden[1] if len(bigru_hidden) > 1 else bigru_hidden[0]) * 2
 
-        self.fc = nn.Linear(gru_out, pred_horizon)
+        self.fc = nn.Linear(gru_out + tcn_filters[-1], pred_horizon)
 
     def forward(self, x):
-        x = x.transpose(1, 2)
-        tcn_out = self.tcn(x)
-        tcn_out = tcn_out.transpose(1, 2)
+        tcn_feat = self.tcn(x.transpose(1, 2))[:, :, -1]
 
         if hasattr(self, "bigru2"):
-            o1, _ = self.bigru(tcn_out)
+            o1, _ = self.bigru(x)
             o2, _ = self.bigru2(o1)
-            last = o2[:, -1, :]
+            gru_feat = o2[:, -1, :]
         else:
-            o, _ = self.bigru(tcn_out)
-            last = o[:, -1, :]
+            o, _ = self.bigru(x)
+            gru_feat = o[:, -1, :]
 
-        return self.fc(last)
+        return self.fc(torch.cat([tcn_feat, gru_feat], dim=1))
 
 
 if __name__ == "__main__":
