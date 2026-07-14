@@ -12,3 +12,4 @@ scikit-learn>=1.8.0
 joblib>=1.5.3
 pytz>=2026.2
 accelerate>=1.13.0
+statsmodels>=0.14.0
