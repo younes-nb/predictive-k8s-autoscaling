@@ -1,15 +1,6 @@
-import os
-import sys
-import warnings
-
 import torch
 import torch.nn as nn
 from torch.nn.utils import parametrizations
-
-THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, "..", "..", ".."))
-if REPO_ROOT not in sys.path:
-    sys.path.insert(0, REPO_ROOT)
 
 
 class Chomp1d(nn.Module):
@@ -122,26 +113,3 @@ class TcnBiGru(nn.Module):
             gru_feat = o[:, -1, :]
 
         return self.fc(torch.cat([tcn_feat, gru_feat], dim=1))
-
-
-if __name__ == "__main__":
-    from experiments.tsdp.config import CFG as GLOBAL_CFG
-    from experiments.tsdp.tcn_bigru.config import CFG as ARCH_CFG
-    from experiments.tsdp.dataset import N_CHANNELS
-
-    model = TcnBiGru(
-        in_channels=N_CHANNELS,
-        input_len=GLOBAL_CFG.INPUT_LEN,
-        pred_horizon=GLOBAL_CFG.PRED_HORIZON,
-        tcn_kernel_size=ARCH_CFG.TCN_KERNEL_SIZE,
-        tcn_filters=ARCH_CFG.TCN_FILTERS,
-        tcn_dilations=ARCH_CFG.TCN_DILATIONS,
-        tcn_dropout=ARCH_CFG.TCN_DROPOUT,
-        bigru_hidden=ARCH_CFG.BIGRU_HIDDEN,
-    )
-    x = torch.randn(4, GLOBAL_CFG.INPUT_LEN, N_CHANNELS)
-    out = model(x)
-    assert out.shape == (4, GLOBAL_CFG.PRED_HORIZON), f"Expected (4, {GLOBAL_CFG.PRED_HORIZON}), got {tuple(out.shape)}"
-    print(f"Output shape: {tuple(out.shape)}")
-    print(f"Parameters: {sum(p.numel() for p in model.parameters()):,}")
-    print("TcnBiGru smoke test passed")

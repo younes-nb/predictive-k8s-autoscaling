@@ -1,5 +1,6 @@
 import os
 import sys
+import random
 import argparse
 import logging
 import time
@@ -22,15 +23,92 @@ from shared.config_preprocessing_defaults import PREPROCESSING
 from shared.logging_utils import setup_logging
 from shared.features import target_features_for_feature_set, feature_names_for_feature_set
 from core.dataset import ShardedWindowsDataset
-from core.models import RNNForecaster
 
 from training.metrics import compute_metrics, find_max_inference_batch_size
 from training.train_helpers import head_slice_dataset_by_pct
+from training.sfoa_configs import get_config
+
+
+MODEL_TYPES = ("lstm", "gru", "bilstm", "bigrue", "cnn_bilstm", "tcn_bigru")
+PREPROCESS_APPROACHES = ("none", "smoothing", "sv", "cskv")
+
+
+def _build_model_from_checkpoint(checkpoint, input_size, device):
+    ckpt_args = checkpoint.get("args", {})
+    model_type = checkpoint.get("model_type", "lstm")
+    num_targets = len(target_features_for_feature_set(ckpt_args.get("feature_set", PREPROCESSING.FEATURE_SET)))
+
+    cfg = get_config(model_type)
+    hyperparams = checkpoint.get("hyperparams", cfg.DEFAULTS)
+    return cfg.build_model(hyperparams, input_size, ckpt_args, num_targets, device)
+
+
+def _load_test_dataset(args, ckpt_args, device, log_info):
+    input_len = ckpt_args.get("input_len", PREPROCESSING.INPUT_LEN)
+    horizon = ckpt_args.get("pred_horizon", PREPROCESSING.PRED_HORIZON)
+    model_type = ckpt_args.get("model_type", "lstm")
+    preprocess_approach = ckpt_args.get("preprocess_approach", "none")
+
+    if preprocess_approach in ("none", "smoothing"):
+        test_ds = ShardedWindowsDataset(
+            args.windows_dir, "test", input_len, horizon, use_weights=False
+        )
+        total_test_samples = len(test_ds)
+        test_ds = head_slice_dataset_by_pct(test_ds, args.test_pct)
+        log_info(f"Test samples (Total): {total_test_samples}")
+        log_info(
+            f"Test samples (Used):  {len(test_ds)}/{total_test_samples} "
+            f"({float(args.test_pct):g}%)"
+        )
+        if len(test_ds) > 0:
+            first_x, *_ = test_ds[0]
+            input_size = first_x.shape[-1]
+        else:
+            input_size = 1
+        return test_ds, input_size
+    elif preprocess_approach == "sv":
+        preprocess_dir = getattr(args, "preprocess_dir", None)
+        if not preprocess_dir:
+            raise RuntimeError("--preprocess_dir required for sv evaluate")
+        from preprocessing.sv.dataset import SvDataset
+        from preprocessing.sv.config import CFG as SV_CFG
+        test_ds = SvDataset(
+            preprocess_dir, "test",
+            input_len=SV_CFG.INPUT_LEN, pred_horizon=SV_CFG.PRED_HORIZON,
+            stride=SV_CFG.STRIDE,
+            train_frac=SV_CFG.TRAIN_FRAC, val_frac=SV_CFG.VAL_FRAC,
+        )
+        input_size = 12
+        return test_ds, input_size
+    elif preprocess_approach == "cskv":
+        preprocess_dir = getattr(args, "preprocess_dir", None)
+        if not preprocess_dir:
+            raise RuntimeError("--preprocess_dir required for cskv evaluate")
+        from preprocessing.cskv.dataset import CskvDataset
+        from preprocessing.cskv.config import CFG as CSKV_CFG
+        test_ds = CskvDataset(
+            preprocess_dir, "test",
+            input_len=CSKV_CFG.INPUT_LEN, pred_horizon=CSKV_CFG.PRED_HORIZON,
+            stride=CSKV_CFG.STRIDE,
+            train_frac=CSKV_CFG.TRAIN_FRAC, val_frac=CSKV_CFG.VAL_FRAC,
+        )
+        input_size = 1
+        return test_ds, input_size
+    else:
+        raise ValueError(f"Unknown preprocess_approach: {preprocess_approach}")
 
 
 def evaluate(args):
     accelerator = Accelerator(cpu=args.cpu)
     device = accelerator.device
+
+    seed = getattr(args, "seed", TRAINING.SEED)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
     log_info = lambda msg: (
         logging.info(msg) if accelerator.is_local_main_process else None
@@ -56,68 +134,30 @@ def evaluate(args):
     checkpoint = torch.load(args.checkpoint_path, map_location=device)
     ckpt_args = checkpoint.get("args", {})
 
-    hidden_size = ckpt_args.get("hidden_size", TRAINING.HIDDEN_SIZE)
-    num_layers = ckpt_args.get("num_layers", TRAINING.NUM_LAYERS)
-    dropout = ckpt_args.get("dropout", TRAINING.DROPOUT)
+    model_type = checkpoint.get("model_type", "lstm")
+    preprocess_approach = checkpoint.get("preprocess_approach", "none")
     horizon = ckpt_args.get("pred_horizon", PREPROCESSING.PRED_HORIZON)
-    rnn_type = ckpt_args.get("rnn_type", "lstm")
-    input_len = ckpt_args.get("input_len", PREPROCESSING.INPUT_LEN)
-    bidirectional = ckpt_args.get("bidirectional", TRAINING.BIDIRECTIONAL)
-    probabilistic = ckpt_args.get(
-        "probabilistic", TRAINING.PROBABILISTIC_TRAINING
-    )
-    quantiles = TRAINING.QUANTILES if probabilistic else None
     feature_set_name = ckpt_args.get("feature_set", PREPROCESSING.FEATURE_SET)
     target_features = target_features_for_feature_set(feature_set_name)
     feature_names = feature_names_for_feature_set(feature_set_name)
     num_targets = len(target_features)
     target_idxs_in_features = [feature_names.index(f) for f in target_features]
 
-    log_info(
-        f"RNN Architecture:   {rnn_type} (Layers: {num_layers}, Hidden: {hidden_size})"
-    )
-    log_info(f"Target Feature(s): {target_features}")
+    log_info(f"Model Type:         {model_type}")
+    log_info(f"Preprocess Approach:{preprocess_approach}")
+    log_info(f"Target Feature(s):  {target_features}")
 
     log_info("\n--- Loading Test Dataset ---")
+    test_ds, input_size = _load_test_dataset(args, ckpt_args, device, log_info)
 
-    test_ds = ShardedWindowsDataset(
-        args.windows_dir, "test", input_len, horizon, use_weights=False
-    )
-    total_test_samples = len(test_ds)
-    test_ds = head_slice_dataset_by_pct(test_ds, args.test_pct)
-    log_info(f"Test samples (Total): {total_test_samples}")
-    log_info(
-        f"Test samples (Used):  {len(test_ds)}/{total_test_samples} "
-        f"({float(args.test_pct):g}%)"
-    )
-
-    if len(test_ds) > 0:
-        first_x, *_ = test_ds[0]
-        input_size = first_x.shape[-1]
-    else:
-        input_size = checkpoint.get("input_size", 1)
-
-    model = RNNForecaster(
-        input_size=input_size,
-        hidden_size=hidden_size,
-        num_layers=num_layers,
-        dropout=dropout,
-        horizon=horizon,
-        rnn_type=rnn_type,
-        bidirectional=bidirectional,
-        quantiles=quantiles,
-        num_targets=num_targets,
-    ).to(device)
-
+    model = _build_model_from_checkpoint(checkpoint, input_size, device)
     model.load_state_dict(checkpoint["model_state_dict"])
 
     if device.type != "cpu":
         log_info("Tuning inference batch size to hardware limits...")
         max_batch = find_max_inference_batch_size(model, input_size, args, device)
-
         safe_batch_size = int(max_batch * 0.9)
         safe_batch_size = 2 ** int(math.log2(max(1, safe_batch_size)))
-
         log_info(f"Auto-selected per-GPU Inference Batch Size: {safe_batch_size}")
         args.batch_size = safe_batch_size
 
@@ -126,12 +166,19 @@ def evaluate(args):
     optimal_workers = min(system_cores, 4 * gpu_count)
     log_info(f"Dynamically set num_workers to {optimal_workers}")
 
+    def _worker_init_fn(worker_id):
+        wseed = seed + worker_id
+        random.seed(wseed)
+        np.random.seed(wseed)
+        torch.manual_seed(wseed)
+
     test_loader = DataLoader(
         test_ds,
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=optimal_workers,
         pin_memory=(device.type != "cpu"),
+        worker_init_fn=_worker_init_fn,
     )
 
     model, test_loader = accelerator.prepare(model, test_loader)
@@ -146,30 +193,19 @@ def evaluate(args):
     start_time = time.time()
     total_batches = len(test_loader)
 
-    if probabilistic and quantiles:
-        median_idx = min(
-            range(len(quantiles)), key=lambda i: abs(quantiles[i] - 0.5)
-        )
-    else:
-        median_idx = None
-
     for i, batch in enumerate(test_loader):
         x, y = batch[0], batch[1]
 
         with torch.no_grad():
             mu = model(x)
-            if median_idx is not None:
-                mu = mu[..., median_idx]
 
         gathered_mu, gathered_y, gathered_x = accelerator.gather_for_metrics((mu, y, x))
 
         if accelerator.is_local_main_process:
             y_last = gathered_x[:, -1, :].cpu().numpy()
-
             all_preds.append(gathered_mu.cpu().numpy())
             all_trues.append(gathered_y.cpu().numpy())
             all_lasts.append(y_last)
-
             print(f"Batch {i+1}/{total_batches} processed...", end="\r", flush=True)
 
     if not accelerator.is_local_main_process:
@@ -185,7 +221,7 @@ def evaluate(args):
     total_samples = y_pred.shape[0]
 
     log_info("\n=== Inference Summary ===")
-    log_info(f"Model: {rnn_type}")
+    log_info(f"Model: {model_type}")
 
     for t_idx, t_name in zip(target_idxs_in_features, target_features):
         y_last_t = y_last_all[:, t_idx]
@@ -217,6 +253,8 @@ def main():
         default=TRAINING.TEST_PCT,
         help="Percentage of test samples for evaluation; 25 means 25%, not 0.25 (100 uses all; <=0 uses all).",
     )
+    p.add_argument("--preprocess_dir", default=None, help="Decomposition output dir (for sv/cskv)")
+    p.add_argument("--seed", type=int, default=TRAINING.SEED, help="Random seed for reproducibility")
 
     try:
         evaluate(p.parse_args())

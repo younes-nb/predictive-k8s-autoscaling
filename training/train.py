@@ -1,8 +1,9 @@
 import os
 import sys
+import random
 import argparse
 import logging
-import random
+import numpy as np
 from datetime import datetime, timedelta
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -24,21 +25,79 @@ from shared.config_training_defaults import TRAINING
 from shared.logging_utils import setup_logging
 from shared.features import target_features_for_feature_set
 from core.dataset import ShardedWindowsDataset
-from core.models import RNNForecaster
 
-from training.loss import PinballLoss, weighted_mse
+from training.loss import weighted_mse
 from training.train_helpers import (
-    hyperparam_key,
-    sample_hyperparams,
-    apply_hyperparams,
     head_slice_dataset_by_pct,
     load_resume_state,
     save_resume_state,
 )
 from training.sfoa_search import run_sfoa_search
+from training.sfoa_configs import get_config
+
+
+MODEL_TYPES = ("lstm", "gru", "bilstm", "bigrue", "cnn_bilstm", "tcn_bigru")
+PREPROCESS_APPROACHES = ("none", "smoothing", "sv", "cskv")
+
+
+def _build_model(model_type, input_size, args, num_targets, hyperparams, device):
+    _, _, build_fn = get_config(model_type)
+    return build_fn(hyperparams, input_size, args, num_targets, device)
+
+
+def _load_datasets(args, preprocess_approach):
+    if preprocess_approach in ("none", "smoothing"):
+        train_ds = ShardedWindowsDataset(
+            args.windows_dir, "train", args.input_len, args.pred_horizon, args.use_weights
+        )
+        val_ds = ShardedWindowsDataset(
+            args.windows_dir, "val", args.input_len, args.pred_horizon, args.use_weights
+        )
+        return train_ds, val_ds
+    elif preprocess_approach == "sv":
+        from preprocessing.sv.dataset import SvDataset, N_CHANNELS
+        from preprocessing.sv.config import CFG as SV_CFG
+        train_ds = SvDataset(
+            args.preprocess_dir, "train",
+            input_len=SV_CFG.INPUT_LEN, pred_horizon=SV_CFG.PRED_HORIZON,
+            stride=SV_CFG.STRIDE,
+            train_frac=SV_CFG.TRAIN_FRAC, val_frac=SV_CFG.VAL_FRAC,
+            num_workers=args.dataset_workers,
+            max_services=getattr(args, "max_services", 0),
+        )
+        val_ds = SvDataset(
+            args.preprocess_dir, "val",
+            input_len=SV_CFG.INPUT_LEN, pred_horizon=SV_CFG.PRED_HORIZON,
+            stride=SV_CFG.STRIDE,
+            train_frac=SV_CFG.TRAIN_FRAC, val_frac=SV_CFG.VAL_FRAC,
+            num_workers=args.dataset_workers,
+            max_services=getattr(args, "max_services", 0),
+        )
+        return train_ds, val_ds
+    elif preprocess_approach == "cskv":
+        from preprocessing.cskv.dataset import CskvDataset
+        from preprocessing.cskv.config import CFG as CSKV_CFG
+        train_ds = CskvDataset(
+            args.preprocess_dir, "train",
+            input_len=CSKV_CFG.INPUT_LEN, pred_horizon=CSKV_CFG.PRED_HORIZON,
+            stride=CSKV_CFG.STRIDE,
+            train_frac=CSKV_CFG.TRAIN_FRAC, val_frac=CSKV_CFG.VAL_FRAC,
+        )
+        val_ds = CskvDataset(
+            args.preprocess_dir, "val",
+            input_len=CSKV_CFG.INPUT_LEN, pred_horizon=CSKV_CFG.PRED_HORIZON,
+            stride=CSKV_CFG.STRIDE,
+            train_frac=CSKV_CFG.TRAIN_FRAC, val_frac=CSKV_CFG.VAL_FRAC,
+        )
+        return train_ds, val_ds
+    else:
+        raise ValueError(f"Unknown preprocess_approach: {preprocess_approach}")
 
 
 def train(args):
+    model_type = args.model_type
+    preprocess_approach = args.preprocess_approach
+
     timeout_kwargs = InitProcessGroupKwargs(timeout=timedelta(seconds=14400))
     mixed_precision = "fp16" if not args.cpu and torch.cuda.is_available() else "no"
     accelerator = Accelerator(cpu=args.cpu, mixed_precision=mixed_precision, kwargs_handlers=[timeout_kwargs])
@@ -51,23 +110,26 @@ def train(args):
     if not hasattr(args, "resume_training"):
         args.resume_training = False
 
-    resume_state = (
-        load_resume_state(PATHS.RESUME_STATE_FILE) if args.resume_training else None
-    )
-    if resume_state and "args" in resume_state:
-        _cli_overrides = {
-            k: getattr(args, k) for k in (
-                "sfoa_train_pct", "sfoa_val_pct", "sfoa_num_workers",
-                "train_pct", "val_pct", "batch_size", "num_workers",
-                "epochs",
-            ) if hasattr(args, k)
-        }
-        args = argparse.Namespace(**resume_state["args"])
-        args.resume_training = True
-        for _k, _v in _cli_overrides.items():
-            setattr(args, _k, _v)
-    if not hasattr(args, "probabilistic"):
-        args.probabilistic = TRAINING.PROBABILISTIC_TRAINING
+    resume_state = None
+    if args.resume_training:
+        resume_state = load_resume_state(PATHS.RESUME_STATE_FILE)
+        if resume_state and "args" in resume_state:
+            _cli_overrides = {
+                k: getattr(args, k) for k in (
+                    "sfoa_train_pct", "sfoa_val_pct", "sfoa_num_workers",
+                    "train_pct", "val_pct", "batch_size", "num_workers",
+                    "epochs", "seed",
+                ) if hasattr(args, k)
+            }
+            args = argparse.Namespace(**resume_state["args"])
+            args.resume_training = True
+            args.model_type = model_type
+            args.preprocess_approach = preprocess_approach
+            if hasattr(args, "preprocess_dir"):
+                args.preprocess_dir = getattr(args, "preprocess_dir", None)
+            for _k, _v in _cli_overrides.items():
+                setattr(args, _k, _v)
+
     sfoa_defaults = {
         "sfoa_train_pct": TRAINING.SFOA_TRAIN_PCT,
         "sfoa_val_pct": TRAINING.SFOA_VAL_PCT,
@@ -76,6 +138,7 @@ def train(args):
     for attr, default in sfoa_defaults.items():
         if not hasattr(args, attr):
             setattr(args, attr, default)
+
     dataset_pct_defaults = {
         "train_pct": TRAINING.TRAIN_PCT,
         "val_pct": TRAINING.VAL_PCT,
@@ -83,6 +146,7 @@ def train(args):
     for attr, default in dataset_pct_defaults.items():
         if not hasattr(args, attr):
             setattr(args, attr, default)
+
     hyperparam_optimizer = getattr(
         args, "hyperparam_optimizer", TRAINING.HYPERPARAM_OPTIMIZER
     )
@@ -91,19 +155,12 @@ def train(args):
     if resume_state:
         sfoa_done = resume_state.get("sfoa_done") is True
         if "hyperparam_optimizer" in resume_state.get("args", {}):
-            args.hyperparam_optimizer = resume_state["args"]["hyperparam_optimizer"]
-
-    rng = random.Random(args.seed)
+            hyperparam_optimizer = resume_state["args"]["hyperparam_optimizer"]
 
     log_path = None
     if accelerator.is_local_main_process:
-        log_path = setup_logging("train")  # always fresh — never restore from checkpoint
+        log_path = setup_logging("train")
 
-    used_keys = (
-        {tuple(k) for k in resume_state.get("used_hyperparams", [])}
-        if resume_state
-        else set()
-    )
     start_epoch = resume_state.get("epoch", 0) + 1 if resume_state else 1
     best_score = (
         resume_state.get("best_score", float("inf")) if resume_state else float("inf")
@@ -131,13 +188,7 @@ def train(args):
 
     log_info("\n--- Loading Datasets ---")
 
-    train_ds = ShardedWindowsDataset(
-        args.windows_dir, "train", args.input_len, args.pred_horizon, args.use_weights
-    )
-
-    val_ds = ShardedWindowsDataset(
-        args.windows_dir, "val", args.input_len, args.pred_horizon, args.use_weights
-    )
+    train_ds, val_ds = _load_datasets(args, preprocess_approach)
 
     total_train_samples = len(train_ds)
     total_val_samples = len(val_ds)
@@ -151,17 +202,23 @@ def train(args):
     else:
         raise RuntimeError("Train dataset is empty.")
 
+    if preprocess_approach == "sv":
+        from preprocessing.sv.config import CFG as SV_CFG
+        log_info(f"SV Config: {SV_CFG}")
+        input_size = 12
+    elif preprocess_approach == "cskv":
+        from preprocessing.cskv.config import CFG as CSKV_CFG
+        log_info(f"CSKV Config: {CSKV_CFG}")
+
+    cfg = get_config(model_type)
+    log_info(f"Model Type: {model_type} | Search Space: {[s['name'] for s in cfg.SEARCH_SPACE]}")
+
+    num_targets = len(target_features_for_feature_set(args.feature_set))
+
     current_hyperparams = resume_state.get("hyperparams") if resume_state else None
-    if current_hyperparams is not None:
-        used_keys.add(hyperparam_key(current_hyperparams))
 
     if hyperparam_optimizer == "none":
-        current_hyperparams = {
-            "hidden_size": TRAINING.HIDDEN_SIZE,
-            "num_layers": TRAINING.NUM_LAYERS,
-            "dropout": TRAINING.DROPOUT,
-            "lr": TRAINING.LR,
-        }
+        current_hyperparams = cfg.DEFAULTS.copy()
         sfoa_done = True
 
     if current_hyperparams is None and not sfoa_done and hyperparam_optimizer == "sfoa":
@@ -178,34 +235,16 @@ def train(args):
             rank_seed=args.seed,
             accelerator=accelerator,
             resume=getattr(args, "resume_training", False),
+            config=cfg,
         )
         sfoa_done = True
         if accelerator.num_processes > 1:
             accelerator.wait_for_everyone()
         if current_hyperparams is None:
             logging.warning(
-                "[SFOA] Search did not return hyperparameters; falling back to random sampling."
+                "[SFOA] Search did not return hyperparameters; using fixed defaults."
             )
-            current_hyperparams = sample_hyperparams(rng, used_keys)
-
-    elif current_hyperparams is None:
-        if sfoa_done:
-            log_info(
-                "[SFOA] Previously completed but best hyperparams missing from resume state. "
-                "Falling back to random sampling."
-            )
-        current_hyperparams = sample_hyperparams(rng, used_keys)
-
-    if current_hyperparams is not None:
-        used_keys.add(hyperparam_key(current_hyperparams))
-
-    if current_hyperparams is None:
-        raise RuntimeError(
-            "Unable to select a unique hyperparameter set after "
-            f"{TRAINING.HYPERPARAM_SAMPLE_ATTEMPTS} attempts."
-        )
-
-    apply_hyperparams(args, current_hyperparams)
+            current_hyperparams = cfg.DEFAULTS.copy()
 
     train_ds = head_slice_dataset_by_pct(train_ds, args.train_pct)
     val_ds = head_slice_dataset_by_pct(val_ds, args.val_pct)
@@ -224,53 +263,63 @@ def train(args):
     log_info("-" * 30)
 
     log_info(f"Device: {device} | Distributed Processes: {accelerator.num_processes}")
-    torch.manual_seed(args.seed)
+    log_info(f"Model Type: {model_type} | Preprocess Approach: {preprocess_approach}")
 
-    quantiles = TRAINING.QUANTILES
-    pinball_loss = PinballLoss(quantiles).to(device) if args.probabilistic else None
+    if accelerator.num_processes > 1:
+        accelerator.wait_for_everyone()
+    seed = args.seed
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    log_info(f"Seed set: {seed}")
 
-    num_targets = len(target_features_for_feature_set(args.feature_set))
+    model = _build_model(model_type, input_size, args, num_targets, current_hyperparams, device)
 
-    model = RNNForecaster(
-        input_size=input_size,
-        hidden_size=args.hidden_size,
-        num_layers=args.num_layers,
-        dropout=args.dropout,
-        horizon=args.pred_horizon,
-        rnn_type=args.rnn_type,
-        bidirectional=args.bidirectional,
-        quantiles=quantiles if args.probabilistic else None,
-        num_targets=num_targets,
-    ).to(device)
+    n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    log_info(f"Model parameters: {n_params:,}")
 
+    batch_size = args.batch_size
     log_info(
-        f"Using fixed per-GPU batch size: {args.batch_size} "
-        f"(Global: {args.batch_size * accelerator.num_processes})"
+        f"Using fixed per-GPU batch size: {batch_size} "
+        f"(Global: {batch_size * accelerator.num_processes})"
     )
     optimal_workers = getattr(args, "num_workers", TRAINING.NUM_WORKERS)
-    log_info(
-        f"num_workers: {optimal_workers}"
-    )
+    log_info(f"num_workers: {optimal_workers}")
+
+    def _worker_init_fn(worker_id):
+        worker_seed = seed + worker_id
+        random.seed(worker_seed)
+        np.random.seed(worker_seed)
+        torch.manual_seed(worker_seed)
+
+    train_generator = torch.Generator().manual_seed(seed)
+    val_generator = torch.Generator().manual_seed(seed)
 
     pin_memory = device.type != "cpu"
     train_loader = DataLoader(
         train_ds,
-        batch_size=args.batch_size,
+        batch_size=batch_size,
         shuffle=True,
         num_workers=optimal_workers,
         pin_memory=pin_memory,
+        worker_init_fn=_worker_init_fn,
+        generator=train_generator,
     )
     val_loader = DataLoader(
         val_ds,
-        batch_size=args.batch_size,
+        batch_size=batch_size,
         shuffle=False,
         num_workers=optimal_workers,
         pin_memory=pin_memory,
+        worker_init_fn=_worker_init_fn,
+        generator=val_generator,
     )
 
-    optimizer = torch.optim.Adam(
-        model.parameters(), lr=args.lr, weight_decay=args.weight_decay
-    )
+    lr = current_hyperparams.get("lr", TRAINING.LR)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
     if resume_state:
         model_state = resume_state.get("model_state_dict")
@@ -289,6 +338,8 @@ def train(args):
 
     log_info("\n--- Starting Training Loop ---")
 
+    criterion = nn.MSELoss()
+
     for epoch in range(start_epoch, args.epochs + 1):
         start_time = datetime.now()
         model.train()
@@ -306,15 +357,16 @@ def train(args):
 
             with accelerator.autocast():
                 preds = model(x)
-                if args.probabilistic:
-                    loss = pinball_loss(preds, y, w)
-                else:
+                if w is not None:
                     loss = weighted_mse(preds, y, w, under_penalty=args.under_penalty)
+                else:
+                    loss = criterion(preds, y)
 
             accelerator.backward(loss)
 
-            if args.grad_clip:
-                accelerator.clip_grad_norm_(model.parameters(), args.grad_clip)
+            grad_clip = getattr(args, "grad_clip", 0) or TRAINING.GRAD_CLIP
+            if grad_clip:
+                accelerator.clip_grad_norm_(model.parameters(), grad_clip)
 
             optimizer.step()
             train_loss_accum += loss.item() * x.size(0)
@@ -338,10 +390,10 @@ def train(args):
 
                 preds = model(x)
 
-                if args.probabilistic:
-                    loss = pinball_loss(preds, y, w)
-                else:
+                if w is not None:
                     loss = weighted_mse(preds, y, w, under_penalty=args.under_penalty)
+                else:
+                    loss = criterion(preds, y)
 
                 val_loss_accum += loss.item() * x.size(0)
                 val_samples_seen += x.size(0)
@@ -365,15 +417,17 @@ def train(args):
                 os.makedirs(os.path.dirname(args.checkpoint_path), exist_ok=True)
 
                 unwrapped_model = accelerator.unwrap_model(model)
-                torch.save(
-                    {
-                        "model_state_dict": unwrapped_model.state_dict(),
-                        "args": vars(args),
-                        "input_size": input_size,
-                        "best_val_loss": best_score,
-                    },
-                    args.checkpoint_path,
-                )
+                ckpt_payload = {
+                    "model_state_dict": unwrapped_model.state_dict(),
+                    "args": vars(args),
+                    "input_size": input_size,
+                    "best_val_loss": best_score,
+                    "model_type": model_type,
+                    "preprocess_approach": preprocess_approach,
+                    "hyperparams": current_hyperparams,
+                }
+
+                torch.save(ckpt_payload, args.checkpoint_path)
             log_msg += " [Checkpoint Saved]"
 
         log_info(log_msg)
@@ -386,68 +440,20 @@ def train(args):
             else:
                 no_change_streak = 0
 
-        if hyperparam_optimizer == "random":
-            if (
-                no_change_streak >= TRAINING.HYPERPARAM_CHECK_INTERVAL
-                and epoch < args.epochs
-            ):
-                new_hyperparams = sample_hyperparams(rng, used_keys)
-                if new_hyperparams is not None:
-                    delta_display = f"{delta:.4f}" if delta is not None else "N/A"
-                    log_info(
-                        "Train loss change below threshold for "
-                        f"{no_change_streak} consecutive epochs (Δ={delta_display}). "
-                        "Switching hyperparameters."
-                    )
-                    log_info(f"New hyperparameters: {new_hyperparams}")
-
-                    apply_hyperparams(args, new_hyperparams)
-
-                    new_model = RNNForecaster(
-                        input_size=input_size,
-                        hidden_size=args.hidden_size,
-                        num_layers=args.num_layers,
-                        dropout=args.dropout,
-                        horizon=args.pred_horizon,
-                        rnn_type=args.rnn_type,
-                        bidirectional=args.bidirectional,
-                        quantiles=quantiles if args.probabilistic else None,
-                        num_targets=num_targets,
-                    ).to(device)
-
-                    new_optimizer = torch.optim.Adam(
-                        new_model.parameters(),
-                        lr=args.lr,
-                        weight_decay=args.weight_decay,
-                    )
-
-                    model, optimizer = accelerator.prepare(new_model, new_optimizer)
-
-                    current_hyperparams = new_hyperparams
-                    last_train_loss = None
-                else:
-                    log_info(
-                        "No unused hyperparameter combinations remain; keeping current settings."
-                    )
-                    last_train_loss = avg_train_loss
-                no_change_streak = 0
-            else:
-                last_train_loss = avg_train_loss
-        else:
-            last_train_loss = avg_train_loss
-            delta_display = f"{delta:.4f}" if delta is not None else "N/A"
-            if no_change_streak > 0 and (delta is None or delta >= TRAINING.LOSS_CHANGE_THRESHOLD):
-                log_info(
-                    f"Train loss change above threshold for epoch {epoch} (Δ={delta_display}). "
-                    f"No-change streak reset ({no_change_streak}/{TRAINING.NO_CHANGE_EPOCHS_LIMIT})."
-                )
-            elif no_change_streak >= TRAINING.NO_CHANGE_EPOCHS_LIMIT:
-                log_info(
-                    "\n=== Early Stopping ===\n"
-                    f"Train loss has not changed by at least {TRAINING.LOSS_CHANGE_THRESHOLD} "
-                    f"for {no_change_streak} consecutive epochs."
-                )
-                break
+        last_train_loss = avg_train_loss
+        delta_display = f"{delta:.4f}" if delta is not None else "N/A"
+        if no_change_streak > 0 and (delta is None or delta >= TRAINING.LOSS_CHANGE_THRESHOLD):
+            log_info(
+                f"Train loss change above threshold for epoch {epoch} (Δ={delta_display}). "
+                f"No-change streak reset ({no_change_streak}/{TRAINING.NO_CHANGE_EPOCHS_LIMIT})."
+            )
+        elif no_change_streak >= TRAINING.NO_CHANGE_EPOCHS_LIMIT:
+            log_info(
+                "\n=== Early Stopping ===\n"
+                f"Train loss has not changed by at least {TRAINING.LOSS_CHANGE_THRESHOLD} "
+                f"for {no_change_streak} consecutive epochs."
+            )
+            break
 
         if accelerator.is_local_main_process:
             resume_payload = {
@@ -458,11 +464,9 @@ def train(args):
                     current_hyperparams if hyperparam_optimizer == "sfoa" else None
                 ),
                 "sfoa_done": sfoa_done,
-                "used_hyperparams": list(used_keys),
                 "best_score": best_score,
                 "last_train_loss": last_train_loss,
                 "no_change_streak": no_change_streak,
-                # "log_path" intentionally omitted — generated fresh on every session start
                 "model_state_dict": accelerator.unwrap_model(model).state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
             }
@@ -489,57 +493,36 @@ def main():
     p.add_argument("--under_penalty", type=float, default=TRAINING.UNDER_PENALTY)
     p.add_argument("--seed", type=int, default=TRAINING.SEED)
     p.add_argument("--cpu", action="store_true")
-    p.add_argument("--num_workers", type=int, default=TRAINING.NUM_WORKERS,
-                   help="DataLoader workers for main training (default: 0 = in-process)")
+    p.add_argument("--num_workers", type=int, default=TRAINING.NUM_WORKERS)
     p.add_argument("--rnn_type", default="lstm")
     p.add_argument("--feature_set", default=PREPROCESSING.FEATURE_SET)
-    p.add_argument(
-        "--resume_training",
-        action="store_true",
-    )
-    p.add_argument(
-        "--bidirectional", action="store_true", default=TRAINING.BIDIRECTIONAL
-    )
-    p.add_argument(
-        "--probabilistic",
-        action="store_true",
-        default=TRAINING.PROBABILISTIC_TRAINING,
-    )
+    p.add_argument("--resume_training", action="store_true")
     p.add_argument(
         "--hyperparam_optimizer",
         default=TRAINING.HYPERPARAM_OPTIMIZER,
-        choices=["random", "sfoa", "none"],
+        choices=["sfoa", "none"],
+    )
+    p.add_argument("--sfoa_train_pct", type=float, default=TRAINING.SFOA_TRAIN_PCT)
+    p.add_argument("--sfoa_val_pct", type=float, default=TRAINING.SFOA_VAL_PCT)
+    p.add_argument("--sfoa_num_workers", type=int, default=TRAINING.SFOA_NUM_WORKERS)
+    p.add_argument("--train_pct", type=float, default=TRAINING.TRAIN_PCT)
+    p.add_argument("--val_pct", type=float, default=TRAINING.VAL_PCT)
+    p.add_argument(
+        "--model_type",
+        default="lstm",
+        choices=list(MODEL_TYPES),
+        help="Model architecture: lstm, gru, bilstm, bigrue, cnn_bilstm, tcn_bigru",
     )
     p.add_argument(
-        "--sfoa_train_pct",
-        type=float,
-        default=TRAINING.SFOA_TRAIN_PCT,
-        help="Percentage of training samples per SFOA candidate (<=0 uses all).",
+        "--preprocess_approach",
+        default="none",
+        choices=list(PREPROCESS_APPROACHES),
+        help="Preprocessing approach used: none, smoothing, sv, cskv",
     )
-    p.add_argument(
-        "--sfoa_val_pct",
-        type=float,
-        default=TRAINING.SFOA_VAL_PCT,
-        help="Percentage of validation samples per SFOA candidate (<=0 uses all).",
-    )
-    p.add_argument(
-        "--sfoa_num_workers",
-        type=int,
-        default=TRAINING.SFOA_NUM_WORKERS,
-        help="DataLoader workers for SFOA candidate evaluation.",
-    )
-    p.add_argument(
-        "--train_pct",
-        type=float,
-        default=TRAINING.TRAIN_PCT,
-        help="Percentage of training samples for main training; 25 means 25%, not 0.25 (100 uses all; <=0 uses all).",
-    )
-    p.add_argument(
-        "--val_pct",
-        type=float,
-        default=TRAINING.VAL_PCT,
-        help="Percentage of validation samples for main training; 25 means 25%, not 0.25 (100 uses all; <=0 uses all).",
-    )
+    p.add_argument("--preprocess_dir", default=None, help="Decomposition output dir (for sv/cskv)")
+    p.add_argument("--dataset_workers", type=int, default=0, help="Workers for sv/cskv dataset loading")
+    p.add_argument("--max_services", type=int, default=0, help="Max services for sv/cskv")
+
     try:
         train(p.parse_args())
     except Exception as e:

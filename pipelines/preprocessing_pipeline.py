@@ -38,11 +38,14 @@ def main():
         default=PREPROCESSING.MAX_SERVICES,
     )
     ap.add_argument(
-        "--smote_tomek",
-        action="store_true",
-        default=PREPROCESSING.SMOTE_TOMEK,
-        help="Apply SMOTE-Tomek to training windows.",
+        "--preprocess_approach",
+        default="none",
+        choices=["none", "smoothing", "sv", "cskv"],
+        help="Post-processing approach applied after windows are built.",
     )
+    ap.add_argument("--smooth_window", type=int, default=5, help="Smoothing window size (for 'smoothing' approach)")
+    ap.add_argument("--dataset_workers", type=int, default=0, help="Workers for sv/cskv decomposition")
+    ap.add_argument("--subset_seed", type=int, default=42, help="Seed for service subsampling in build_windows")
 
     args = ap.parse_args()
 
@@ -52,6 +55,9 @@ def main():
     fetch_script = os.path.join(REPO_ROOT, "preprocessing", "fetch_traces.py")
     ingest_script = os.path.join(REPO_ROOT, "preprocessing", "ingest_traces_parquet.py")
     windows_script = os.path.join(REPO_ROOT, "preprocessing", "build_windows.py")
+    smooth_script = os.path.join(REPO_ROOT, "preprocessing", "smooth_windows.py")
+    sv_script = os.path.join(REPO_ROOT, "preprocessing", "sv", "preprocess.py")
+    cskv_script = os.path.join(REPO_ROOT, "preprocessing", "cskv", "preprocess.py")
 
     if not args.skip_fetch:
         cmd = [
@@ -100,9 +106,22 @@ def main():
         ]
         if args.max_services is not None:
             cmd.extend(["--max_services", str(args.max_services)])
-        if args.smote_tomek:
-            cmd.append("--smote_tomek")
+        cmd.extend(["--subset_seed", str(args.subset_seed)])
         run(cmd, "Step 3: Build windows (join tables)")
+
+        if args.preprocess_approach == "smoothing":
+            cmd_smooth = [
+                sys.executable, smooth_script,
+                "--windows_dir", args.windows_dir,
+                "--smooth_window", str(args.smooth_window),
+            ]
+            run(cmd_smooth, "Step 3b: Smoothing")
+        elif args.preprocess_approach == "sv":
+            cmd_sv = [sys.executable, sv_script]
+            run(cmd_sv, "Step 3b: SV Decomposition")
+        elif args.preprocess_approach == "cskv":
+            cmd_cskv = [sys.executable, cskv_script]
+            run(cmd_cskv, "Step 3b: CSKV Decomposition")
     else:
         print("\n=== Skipping windows ===")
 

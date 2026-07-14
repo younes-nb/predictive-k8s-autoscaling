@@ -15,16 +15,13 @@ if REPO_ROOT not in sys.path:
 import polars as pl
 import numpy as np
 
-from core.utils import windowize_multivariate, moving_average
+from core.utils import windowize_multivariate
 
 from shared.config_paths import PATHS, DATASET_TABLES
 from shared.config_preprocessing_defaults import PREPROCESSING
-from shared.config_training_defaults import TRAINING
-from shared.features import FEATURE_SETS, get_feature_set, tables_for_feature_set, table_to_feature_exprs, FEATURES, is_derived_feature
+from shared.features import FEATURE_SETS, get_feature_set, tables_for_feature_set, table_to_feature_exprs, FEATURES
 
 from preprocessing.parquet_utils import list_parquet_parts, build_table_agg
-from preprocessing.adjacency import build_adjacency_map
-from shared.smote_tomek import _apply_smote_tomek
 
 
 def save_chunk(out_dir, shard_idx, chunk_idx, shard_data):
@@ -58,15 +55,9 @@ def save_chunk(out_dir, shard_idx, chunk_idx, shard_data):
     return saved_any
 
 
-def compute_delta(arr: np.ndarray) -> np.ndarray:
-    delta = np.zeros_like(arr)
-    delta[1:] = arr[1:] - arr[:-1]
-    return delta
-
-
 def main():
     p = argparse.ArgumentParser(
-        description="Build windows using global service batching to ensure correct splitting and bypass OOM."
+        description="Build windows: join tables, create sliding windows, split train/val/test."
     )
 
     p.add_argument("--out_dir", required=True)
@@ -84,9 +75,6 @@ def main():
     p.add_argument("--stride", type=int, default=PREPROCESSING.STRIDE)
     p.add_argument("--train_frac", type=float, default=PREPROCESSING.TRAIN_FRAC)
     p.add_argument("--val_frac", type=float, default=PREPROCESSING.VAL_FRAC)
-    p.add_argument(
-        "--smoothing_window", type=int, default=PREPROCESSING.SMOOTHING_WINDOW
-    )
     p.add_argument("--service_col", type=str, default=PREPROCESSING.SERVICE_COL)
     p.add_argument("--max_services", type=int, default=PREPROCESSING.MAX_SERVICES)
     p.add_argument("--subset_seed", type=int, default=PREPROCESSING.SUBSET_SEED)
@@ -94,12 +82,6 @@ def main():
         "--batch_size",
         type=int,
         default=256,
-    )
-    p.add_argument(
-        "--smote_tomek",
-        action="store_true",
-        default=PREPROCESSING.SMOTE_TOMEK,
-        help="Apply SMOTE-Tomek to training windows.",
     )
 
     args = p.parse_args()
@@ -116,24 +98,19 @@ def main():
     feature_names = list(spec["features"])
     target_features = list(spec["targets"])
     target_indices = [feature_names.index(f) for f in target_features]
-    mcr_feats = [f for f in feature_names if "mcr" in f.lower()]
-
-    requires_callgraph = spec.get("requires_callgraph", False)
-    requires_delta = spec.get("requires_delta", False)
 
     needed_tables = sorted(list(tables_for_feature_set(args.feature_set)))
     table_exprs = table_to_feature_exprs(args.feature_set)
-    base_table = FEATURES[target_features[0]]["table"]
+    base_table = spec.get("base_table", FEATURES[target_features[0]]["table"])
 
-    use_service_level = True
-    effective_id_cols = [args.service_col] if use_service_level else list(args.id_cols)
+    effective_id_cols = [args.service_col]
 
     def agg_exprs_for_table(table_name: str):
         exprs = []
         for feat_name, raw_col in table_exprs[table_name]:
-            if use_service_level and table_name == "msresource":
+            if table_name == "msresource":
                 exprs.append(pl.col(raw_col).mean().alias(feat_name))
-            elif use_service_level and table_name == "msrtmcre":
+            elif table_name == "msrtmcre":
                 exprs.append(pl.col(raw_col).sum().alias(feat_name))
             else:
                 exprs.append(pl.col(raw_col).last().alias(feat_name))
@@ -166,39 +143,6 @@ def main():
     else:
         print(f"Processing all {len(all_services_list)} services globally")
 
-    adjacency = {}
-    if requires_callgraph:
-        cache_path = os.path.join(PATHS.PARQUET_ROOT, "cache", "adjacency.pkl")
-        print(f"Building adjacency map from MSCallGraph...")
-        adjacency = build_adjacency_map(set(all_services_list), cache_path)
-        print(f"Adjacency map built: {len(adjacency)} services with upstream callers")
-
-    mcr_minmax = {}
-    if use_service_level and mcr_feats and "msrtmcre" in needed_tables:
-        mcr_raw_cols = [
-            raw for feat, raw in table_exprs["msrtmcre"] if feat in mcr_feats
-        ]
-        lf_mcr = pl.scan_parquet(table_parts["msrtmcre"]).select(
-            [args.time_col, *effective_id_cols, *mcr_raw_cols]
-        )
-        mcr_agg = build_table_agg(
-            lf_mcr,
-            args.time_col,
-            effective_id_cols,
-            args.freq,
-            table_exprs["msrtmcre"],
-            agg_exprs=agg_exprs_for_table("msrtmcre"),
-        )
-        mcr_stats = mcr_agg.select(
-            *[pl.col(f).min().alias(f"{f}_min") for f in mcr_feats],
-            *[pl.col(f).max().alias(f"{f}_max") for f in mcr_feats],
-        ).collect(engine="streaming")
-        if mcr_stats.height > 0:
-            mcr_minmax = {
-                f: (float(mcr_stats[f"{f}_min"][0]), float(mcr_stats[f"{f}_max"][0]))
-                for f in mcr_feats
-            }
-
     os.makedirs(args.out_dir, exist_ok=True)
     total_batches = (len(all_services_list) + args.batch_size - 1) // args.batch_size
 
@@ -222,13 +166,7 @@ def main():
 
         batch_start_time = time.time()
 
-        load_ids = set(current_batch_ids)
-        if requires_callgraph:
-            for ms in current_batch_ids:
-                upstream_callers = adjacency.get(ms, set())
-                load_ids.update(upstream_callers)
-            load_ids = sorted(load_ids)
-            print(f"  Loading {len(load_ids)} services (including upstream callers)")
+        load_ids = sorted(set(current_batch_ids))
 
         base_id_cols = effective_id_cols
         base_need_cols = list(
@@ -300,23 +238,7 @@ def main():
             )
             joined_lazy = joined_lazy.join(lf_t_agg, on=join_on, how="left")
 
-        if mcr_minmax:
-            for f in mcr_feats:
-                fmin, fmax = mcr_minmax[f]
-                denom = (fmax - fmin) if (fmax - fmin) != 0 else 1.0
-                joined_lazy = joined_lazy.with_columns(
-                    ((pl.col(f) - fmin) / denom).clip(0.0, 1.0).alias(f)
-                )
-
-        upstream_data = {}
-        if requires_callgraph:
-            for ms in current_batch_ids:
-                upstream_callers = adjacency.get(ms, set())
-                upstream_data[ms] = list(upstream_callers)
-
         for feat in feature_names:
-            if is_derived_feature(feat):
-                continue
             is_resource = "cpu" in feat.lower() or "mem" in feat.lower()
             if is_resource:
                 joined_lazy = joined_lazy.with_columns(pl.col(feat).clip(0.0, 1.0))
@@ -325,9 +247,8 @@ def main():
             set(effective_id_cols).intersection(joined_lazy.collect_schema().names())
         ) + ["_t"]
 
-        raw_feature_names = [f for f in feature_names if not is_derived_feature(f)]
         joined = (
-            joined_lazy.drop_nulls(raw_feature_names)
+            joined_lazy.drop_nulls(feature_names)
             .collect(engine="streaming")
             .sort(sort_cols)
         )
@@ -338,25 +259,10 @@ def main():
             open(done_marker, "a").close()
             continue
 
-        # Build service_data for upstream lookups
-        service_data = {}
-        group_cols = [c for c in effective_id_cols if c in joined.columns]
-        if requires_callgraph:
-            for ms_key, g in joined.group_by(group_cols, maintain_order=True):
-                ms_id = ms_key if isinstance(ms_key, str) else ms_key[0]
-                service_data[ms_id] = {
-                    "timestamps": g["_t"].to_numpy(),
-                    "values": g["cpu_utilization"].to_numpy().astype("float32"),
-                }
-
-        upstream_data = {}
-        if requires_callgraph:
-            for ms in current_batch_ids:
-                upstream_callers = adjacency.get(ms, set())
-                upstream_data[ms] = list(upstream_callers)
-
         shard_data = {"train": ([], [], []), "val": ([], [], []), "test": ([], [], [])}
         batch_set = set(current_batch_ids)
+
+        group_cols = [c for c in effective_id_cols if c in joined.columns]
 
         for ms_key, g in joined.group_by(group_cols, maintain_order=True):
             if g.height < args.input_len + args.pred_horizon:
@@ -368,61 +274,14 @@ def main():
                 continue
 
             feat_arrays = {}
-            for feat in raw_feature_names:
+            for feat in feature_names:
                 feat_arrays[feat] = g[feat].to_numpy().astype("float32")
-
-            if requires_delta:
-                for feat in list(feat_arrays.keys()):
-                    feat_arrays[f"{feat}_delta"] = compute_delta(feat_arrays[feat])
-
-            if requires_callgraph:
-                upstream_callers = upstream_data.get(ms_id, [])
-                if upstream_callers:
-                    timestamps = g["_t"].to_numpy()
-                    upstream_cpu = np.zeros(len(timestamps), dtype="float32")
-                    valid_count = np.zeros(len(timestamps), dtype="int32")
-
-                    for um in upstream_callers:
-                        if um in service_data:
-                            um_ts = service_data[um]["timestamps"]
-                            um_vals = service_data[um]["values"]
-                            ts_to_val = dict(zip(um_ts, um_vals))
-                            for i, t in enumerate(timestamps):
-                                if t in ts_to_val:
-                                    upstream_cpu[i] += ts_to_val[t]
-                                    valid_count[i] += 1
-
-                    upstream_cpu_mean = np.divide(
-                        upstream_cpu, valid_count,
-                        out=np.zeros_like(upstream_cpu),
-                        where=valid_count > 0,
-                    )
-                else:
-                    upstream_cpu_mean = np.zeros(len(g), dtype="float32")
-
-                feat_arrays["upstream_cpu_utilization_mean"] = upstream_cpu_mean
-                feat_arrays["upstream_cpu_utilization_delta_mean"] = compute_delta(upstream_cpu_mean)
 
             feat_raw = np.stack(
                 [feat_arrays[feat] for feat in feature_names], axis=1
             )
-            feat_processed = np.zeros_like(feat_raw)
-            valid_group = True
 
-            for j in range(len(feature_names)):
-                vals = moving_average(feat_raw[:, j], args.smoothing_window)
-                if vals is None:
-                    if j in target_indices:
-                        valid_group = False
-                        break
-                    feat_processed[:, j] = 0.0
-                    continue
-                feat_processed[:, j] = vals
-
-            if not valid_group:
-                continue
-
-            n = len(feat_processed)
+            n = len(feat_raw)
             idx_tr = int(n * args.train_frac)
             idx_val = int(n * (args.train_frac + args.val_frac))
 
@@ -433,7 +292,7 @@ def main():
             ]
 
             for split_name, start, end in split_configs:
-                sub_feat = feat_processed[start:end]
+                sub_feat = feat_raw[start:end]
                 if len(sub_feat) < args.input_len + args.pred_horizon:
                     continue
 
@@ -453,20 +312,6 @@ def main():
                     shard_data[split_name][0].append(Xs)
                     shard_data[split_name][1].append(Ys)
                     shard_data[split_name][2].append(Ss)
-
-        if args.smote_tomek:
-            try:
-                shard_data["train"] = _apply_smote_tomek(
-                    "train",
-                    shard_data["train"],
-                    TRAINING.THETA_BASE,
-                    rng,
-                )
-            except (MemoryError, RuntimeError) as e:
-                print(
-                    f"[WARN] SMOTE-Tomek skipped for batch {batch_idx}: {e}. "
-                )
-            gc.collect()
 
         save_chunk(args.out_dir, batch_idx, 0, shard_data)
 

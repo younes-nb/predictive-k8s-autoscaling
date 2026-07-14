@@ -31,7 +31,7 @@ class TrainingDefaults:
     BIDIRECTIONAL: bool = False
     PROBABILISTIC_TRAINING: bool = False
     QUANTILES: Tuple[float, ...] = (0.5, 0.9, 0.95)
-    HYPERPARAM_OPTIMIZER: str = "sfoa"
+    HYPERPARAM_OPTIMIZER: str = "none"
     SFOA_POPULATION: int = 10
     SFOA_ITERATIONS: int = 5
     SFOA_EVAL_EPOCHS: int = 10

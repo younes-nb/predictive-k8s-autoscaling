@@ -90,7 +90,7 @@ def decompose_window(window: np.ndarray, cfg) -> np.ndarray:
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.DEBUG)
-    from experiments.tsdp.config import CFG as CFG
+    from preprocessing.sv.config import CFG as CFG
 
     print("=" * 60)
     print("Scenario A — SWT-VMD Decomposition smoke test")

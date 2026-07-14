@@ -114,7 +114,7 @@ class CoImfDataset(Dataset):
     def __getitem__(self, idx: int):
         return self.X[idx], self.y[idx], self.last[idx]
 
-class CvcbmDataset(Dataset):
+class CskvDataset(Dataset):
     """Multi-channel dataset: stacks all Co-IMFs + VMD modes into one input matrix.
 
     Input shape:  (num_samples, input_len, total_channels)
@@ -290,7 +290,7 @@ class CvcbmDataset(Dataset):
 
         if not all_X:
             logger.warning(
-                "CvcbmDataset[%s]: no valid windows found in %s",
+                "CskvDataset[%s]: no valid windows found in %s",
                 split, preprocess_dir,
             )
             self.X = torch.empty((0, input_len, 1), dtype=torch.float32)
@@ -304,7 +304,7 @@ class CvcbmDataset(Dataset):
             self.total_channels = total_channels_svc
 
         logger.info(
-            "CvcbmDataset[%s]: %d windows, %d channels from %d service files",
+            "CskvDataset[%s]: %d windows, %d channels from %d service files",
             split, len(self.X), self.total_channels, len(service_files),
         )
 
@@ -316,9 +316,9 @@ class CvcbmDataset(Dataset):
 
 
 def _smoke_check(preprocess_dir: str, split: str) -> None:
-    from experiments.cvcbm.config import CFG
+    from preprocessing.cskv.config import CFG
 
-    ds = CvcbmDataset(
+    ds = CskvDataset(
         preprocess_dir,
         split,
         input_len=CFG.INPUT_LEN,
@@ -335,10 +335,10 @@ def _smoke_check(preprocess_dir: str, split: str) -> None:
     assert last.dim() == 0, f"Bad last shape: {tuple(last.shape)}"
     print(f"Dataset windows: {len(ds)}")
     print(f"x={tuple(x.shape)} y={tuple(y.shape)} last_dim={last.dim()} channels={ds.total_channels}")
-    print("CvcbmDataset smoke test passed")
+    print("CskvDataset smoke test passed")
 
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser(description="Smoke-check CvcbmDataset shapes.")
+    ap = argparse.ArgumentParser(description="Smoke-check CskvDataset shapes.")
     ap.add_argument("--preprocess_dir", required=True)
     ap.add_argument("--split", choices=("train", "val", "test"), default="train")
     args = ap.parse_args()

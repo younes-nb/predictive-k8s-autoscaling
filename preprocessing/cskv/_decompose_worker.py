@@ -10,8 +10,8 @@ REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, "..", ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from experiments.cvcbm.config import CFG, set_seed
-from experiments.cvcbm.decomposition import decompose_service_signal
+from preprocessing.cskv.config import CFG, set_seed
+from preprocessing.cskv.decomposition import decompose_service_signal
 
 def _log(msg: str) -> None:
     print(msg, file=sys.stderr, flush=True)

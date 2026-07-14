@@ -12,9 +12,8 @@ from .features import (
     table_to_raw_columns,
     table_to_feature_exprs,
 )
-from .logging_utils import setup_logging
+from .logging_utils import setup_logging, log_configs
 from .subprocess_utils import run
-from .smote_tomek import _apply_smote_tomek, _combine_split_arrays
 
 __all__ = [
     "PATHS",
@@ -35,7 +34,6 @@ __all__ = [
     "table_to_raw_columns",
     "table_to_feature_exprs",
     "setup_logging",
+    "log_configs",
     "run",
-    "_apply_smote_tomek",
-    "_combine_split_arrays",
 ]

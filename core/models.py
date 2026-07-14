@@ -1,4 +1,3 @@
-from typing import Optional, Sequence, Tuple
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -29,7 +28,6 @@ class RNNForecaster(nn.Module):
         horizon: int = 5,
         rnn_type: str = "lstm",
         bidirectional: bool = False,
-        quantiles: Optional[Sequence[float]] = None,
         num_targets: int = 1,
     ):
         super().__init__()
@@ -37,10 +35,6 @@ class RNNForecaster(nn.Module):
         self.rnn_type = rnn_type.lower()
         self.bidirectional = bidirectional
         self.num_targets = num_targets
-        self.quantiles: Optional[Tuple[float, ...]] = (
-            tuple(float(q) for q in quantiles) if quantiles else None
-        )
-        self.num_quantiles = len(self.quantiles) if self.quantiles else 1
 
         rnn_cls = nn.LSTM if self.rnn_type == "lstm" else nn.GRU
         self.rnn = rnn_cls(
@@ -54,7 +48,7 @@ class RNNForecaster(nn.Module):
 
         self.dropout_layer = nn.Dropout(dropout)
         fc_input_dim = hidden_size * 2 if self.bidirectional else hidden_size
-        fc_out = horizon * self.num_targets * self.num_quantiles
+        fc_out = horizon * self.num_targets
         self.fc = nn.Linear(fc_input_dim, fc_out)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -65,8 +59,6 @@ class RNNForecaster(nn.Module):
         last_step = out[:, -1, :]
         last_step = self.dropout_layer(last_step)
         out = self.fc(last_step)
-        if self.quantiles:
-            return out.view(out.size(0), self.horizon, self.num_targets, self.num_quantiles)
         if self.num_targets > 1:
             return out.view(out.size(0), self.horizon, self.num_targets)
         return out

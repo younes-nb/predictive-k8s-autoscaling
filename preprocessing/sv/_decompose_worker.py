@@ -9,15 +9,15 @@ REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, "..", ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from experiments.cshvtb.config import CFG
-from experiments.cshvtb.decomposition import decompose_window
+from preprocessing.sv.config import CFG
+from preprocessing.sv.decomposition import decompose_window
 
 
 def _log(msg: str) -> None:
     print(msg, file=sys.stderr, flush=True)
 
 
-CHANNEL_DIRS = [f"vmd_{i}" for i in range(CFG.VMD_K)] + ["lowfreq_0"]
+CHANNEL_DIRS = [f"vmd_mode_{k}" for k in range(10)] + ["D2", "A2"]
 N_CHANNELS = len(CHANNEL_DIRS)
 
 
@@ -27,7 +27,7 @@ def main() -> None:
     out_dir = sys.argv[3]
     _t0 = _time.time()
 
-    done_marker = os.path.join(out_dir, "vmd_0", f"service_{idx:05d}.done")
+    done_marker = os.path.join(out_dir, CHANNEL_DIRS[0], f"service_{idx:05d}.done")
     if os.path.exists(done_marker):
         all_exist = all(
             os.path.exists(os.path.join(out_dir, d, f"service_{idx:05d}.npy"))

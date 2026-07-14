@@ -11,6 +11,26 @@ except ImportError:
 from .config_paths import PATHS
 
 
+def log_configs(shared_config, approach_config=None, approach_label=None):
+    logging.info("\n--- Shared Configuration ---")
+    if hasattr(shared_config, "__dict__"):
+        for key, value in vars(shared_config).items():
+            if not key.startswith("_"):
+                logging.info(f"{key:<28}: {value}")
+    else:
+        logging.info(str(shared_config))
+
+    if approach_config is not None:
+        label = approach_label or "Approach"
+        logging.info(f"\n--- {label} Configuration ---")
+        if hasattr(approach_config, "__dict__"):
+            for key, value in vars(approach_config).items():
+                if not key.startswith("_"):
+                    logging.info(f"{key:<28}: {value}")
+        else:
+            logging.info(str(approach_config))
+
+
 def setup_logging(mode="train", log_path=None):
     os.makedirs(PATHS.LOGS_DIR, exist_ok=True)
 

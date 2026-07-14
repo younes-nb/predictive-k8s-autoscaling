@@ -182,8 +182,7 @@ def run_smoke_test(args):
         dropout=args.dropout,
         horizon=args.pred_horizon,
         rnn_type=args.rnn_type,
-        bidirectional=args.bidirectional,
-        quantiles=None,
+        bidirectional=getattr(args, "model_type", "lstm") in ("bilstm", "bigrue"),
         num_targets=num_targets,
     ).to(device)
 
@@ -261,10 +260,10 @@ def main():
     p.add_argument("--pred_horizon", type=int, default=PREPROCESSING.PRED_HORIZON)
     p.add_argument("--feature_set", default=PREPROCESSING.FEATURE_SET)
     p.add_argument("--rnn_type", default="lstm")
+    p.add_argument("--model_type", default="lstm", choices=["lstm", "gru", "bilstm", "bigrue"])
     p.add_argument("--hidden_size", type=int, default=TRAINING.HIDDEN_SIZE)
     p.add_argument("--num_layers", type=int, default=TRAINING.NUM_LAYERS)
     p.add_argument("--dropout", type=float, default=0.0)
-    p.add_argument("--bidirectional", action="store_true", default=TRAINING.BIDIRECTIONAL)
     args = p.parse_args()
     run_smoke_test(args)
 

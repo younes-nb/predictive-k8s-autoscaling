@@ -1,6 +1,3 @@
-
-import os
-import sys
 import warnings
 
 import torch
@@ -8,10 +5,6 @@ import torch.nn as nn
 
 warnings.filterwarnings("ignore", "Using padding='same' with even kernel lengths")
 
-THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, "..", "..", ".."))
-if REPO_ROOT not in sys.path:
-    sys.path.insert(0, REPO_ROOT)
 
 class CnnBiLSTM(nn.Module):
 
@@ -55,7 +48,6 @@ class CnnBiLSTM(nn.Module):
         self.fc = nn.Linear(h[2] * 2, pred_horizon)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-
         if x.dim() == 2:
             x = x.unsqueeze(-1)
 
@@ -72,24 +64,3 @@ class CnnBiLSTM(nn.Module):
 
         last = o3[:, -1, :]
         return self.fc(last)
-
-if __name__ == "__main__":
-    from experiments.tsdp.config import CFG as GLOBAL_CFG
-    from experiments.tsdp.cnn_bilstm.config import CFG as ARCH_CFG
-    from experiments.tsdp.dataset import N_CHANNELS
-
-    model = CnnBiLSTM(
-        in_channels=N_CHANNELS,
-        input_len=GLOBAL_CFG.INPUT_LEN,
-        pred_horizon=GLOBAL_CFG.PRED_HORIZON,
-        kernel_sizes=ARCH_CFG.KERNEL_SIZES,
-        conv1_out_ch=ARCH_CFG.CONV1_OUT_CH,
-        conv2_out_ch=ARCH_CFG.CONV2_OUT_CH,
-        bilstm_hidden=ARCH_CFG.BILSTM_HIDDEN,
-    )
-    x = torch.randn(4, GLOBAL_CFG.INPUT_LEN, N_CHANNELS)
-    out = model(x)
-    assert out.shape == (4, GLOBAL_CFG.PRED_HORIZON), f"Expected (4, {GLOBAL_CFG.PRED_HORIZON}), got {tuple(out.shape)}"
-    print(f"Output shape: {tuple(out.shape)}")
-    print(f"Parameters: {sum(p.numel() for p in model.parameters()):,}")
-    print("CnnBiLSTM smoke test passed")

@@ -9,7 +9,6 @@ class PreprocessingDefaults:
     STRIDE: int = 10
     TRAIN_FRAC: float = 0.7
     VAL_FRAC: float = 0.1
-    SMOOTHING_WINDOW: int = 5
     REPARTITION: int = 4
     TIME_COL: str = "timestamp_dt"
     ID_COLS: Tuple[str, ...] = ("msname", "msinstanceid")
@@ -18,7 +17,6 @@ class PreprocessingDefaults:
     MAX_SERVICES: Optional[int] = None
     SUBSET_SEED: int = 42
     FEATURE_SET: str = "cpu_mem_both"
-    SMOTE_TOMEK: bool = False
 
 
 PREPROCESSING = PreprocessingDefaults()

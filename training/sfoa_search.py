@@ -2,6 +2,7 @@ import copy
 import logging
 import math as _math
 import os
+import random
 import time as _time
 
 import numpy as np
@@ -71,25 +72,25 @@ def _head_slice_dataset(dataset, max_samples: int):
 def _same_hyperparams(left, right) -> bool:
     if not left or not right:
         return False
+    if set(left.keys()) != set(right.keys()):
+        return False
     try:
-        return (
-            int(left.get("hidden_size")) == int(right.get("hidden_size"))
-            and int(left.get("num_layers")) == int(right.get("num_layers"))
-            and round(float(left.get("dropout")), 4) == round(float(right.get("dropout")), 4)
-            and round(float(left.get("lr")), 8) == round(float(right.get("lr")), 8)
-        )
+        for k in left:
+            lv, rv = left[k], right[k]
+            if isinstance(lv, float):
+                if round(lv, 8) != round(rv, 8):
+                    return False
+            elif lv != rv:
+                return False
+        return True
     except (TypeError, ValueError):
         return False
 
 
 class SFOAOptimizer:
 
-    D = 4
-    BOUNDS_LOW = None
-    BOUNDS_HIGH = None
-
     def __init__(
-        self, eval_fn, N, Tmax, Gp, seed=42, parallel_eval=False, accelerator=None
+        self, eval_fn, N, Tmax, Gp, search_space, seed=42, parallel_eval=False, accelerator=None
     ):
         if N < 3:
             raise ValueError("SFOA requires N >= 3 to sample distinct distances.")
@@ -100,6 +101,8 @@ class SFOAOptimizer:
         self.parallel_eval = bool(parallel_eval)
         self.accelerator = accelerator
         self.rng = np.random.default_rng(seed)
+        self.search_space = search_space
+        self.D = len(search_space)
         self.BOUNDS_LOW, self.BOUNDS_HIGH = self._build_bounds()
         if self.N < 6:
             logging.warning(
@@ -108,40 +111,35 @@ class SFOAOptimizer:
             )
 
     def _build_bounds(self):
-        low = np.array(
-            [
-                0.0,
-                0.0,
-                TRAINING.DROPOUT_RANGE[0],
-                _math.log10(TRAINING.LR_RANGE[0]),
-            ],
-            dtype=float,
-        )
-        high = np.array(
-            [
-                float(len(TRAINING.HIDDEN_SIZE_OPTIONS) - 1),
-                float(len(TRAINING.NUM_LAYERS_OPTIONS) - 1),
-                TRAINING.DROPOUT_RANGE[1],
-                _math.log10(TRAINING.LR_RANGE[1]),
-            ],
-            dtype=float,
-        )
-        return low, high
+        low = []
+        high = []
+        for spec in self.search_space:
+            if spec["type"] == "categorical":
+                low.append(0.0)
+                high.append(float(len(spec["options"]) - 1))
+            elif spec["type"] == "continuous":
+                low.append(spec["low"])
+                high.append(spec["high"])
+            elif spec["type"] == "log":
+                low.append(_math.log10(spec["low"]))
+                high.append(_math.log10(spec["high"]))
+        return np.array(low, dtype=float), np.array(high, dtype=float)
 
     def _decode(self, x: np.ndarray) -> dict:
         def clip(val, low, high):
             return max(low, min(high, float(val)))
 
-        idx_hidden = int(round(clip(x[0], self.BOUNDS_LOW[0], self.BOUNDS_HIGH[0])))
-        idx_layers = int(round(clip(x[1], self.BOUNDS_LOW[1], self.BOUNDS_HIGH[1])))
-        dropout = round(float(clip(x[2], self.BOUNDS_LOW[2], self.BOUNDS_HIGH[2])), 4)
-        lr = round(10 ** float(clip(x[3], self.BOUNDS_LOW[3], self.BOUNDS_HIGH[3])), 8)
-        return {
-            "hidden_size": TRAINING.HIDDEN_SIZE_OPTIONS[idx_hidden],
-            "num_layers": TRAINING.NUM_LAYERS_OPTIONS[idx_layers],
-            "dropout": dropout,
-            "lr": lr,
-        }
+        result = {}
+        for i, spec in enumerate(self.search_space):
+            name = spec["name"]
+            if spec["type"] == "categorical":
+                idx = int(round(clip(x[i], self.BOUNDS_LOW[i], self.BOUNDS_HIGH[i])))
+                result[name] = spec["options"][idx]
+            elif spec["type"] == "continuous":
+                result[name] = round(float(clip(x[i], self.BOUNDS_LOW[i], self.BOUNDS_HIGH[i])), 4)
+            elif spec["type"] == "log":
+                result[name] = round(10 ** float(clip(x[i], self.BOUNDS_LOW[i], self.BOUNDS_HIGH[i])), 8)
+        return result
 
     def _clip_to_bounds(self, x: np.ndarray) -> np.ndarray:
         return np.clip(x, self.BOUNDS_LOW, self.BOUNDS_HIGH)
@@ -638,9 +636,9 @@ def run_sfoa_search(
     rank_seed: int = 42,
     accelerator=None,
     resume: bool = False,
+    config=None,
 ) -> dict:
     import torch.distributed as dist
-    from core.models import RNNForecaster
 
     is_distributed = accelerator is not None and accelerator.num_processes > 1
     rank = accelerator.process_index if (is_distributed and accelerator is not None) else 0
@@ -707,13 +705,8 @@ def run_sfoa_search(
     eval_counter = {"count": 0}
 
     def _decode_and_log(hyperparams: dict, candidate_idx: int) -> str:
-        return (
-            f"cand#{candidate_idx} "
-            f"hidden={hyperparams['hidden_size']} "
-            f"layers={hyperparams['num_layers']} "
-            f"dropout={hyperparams['dropout']:.4f} "
-            f"lr={hyperparams['lr']:.8f}"
-        )
+        params_str = " ".join(f"{k}={v}" for k, v in hyperparams.items())
+        return f"cand#{candidate_idx} {params_str}"
 
     def eval_fn(
         hyperparams: dict,
@@ -727,6 +720,20 @@ def run_sfoa_search(
         eval_counter["count"] += 1
         pin_memory = eval_device.type == "cuda"
 
+        cand_seed = rank_seed + candidate_idx
+        random.seed(cand_seed)
+        np.random.seed(cand_seed)
+        torch.manual_seed(cand_seed)
+        torch.cuda.manual_seed_all(cand_seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
+        def _worker_init_fn(worker_id):
+            wseed = cand_seed + worker_id
+            random.seed(wseed)
+            np.random.seed(wseed)
+            torch.manual_seed(wseed)
+
         train_loader = DataLoader(
             sfoa_train_ds,
             batch_size=args.batch_size,
@@ -734,6 +741,7 @@ def run_sfoa_search(
             num_workers=sfoa_workers,
             pin_memory=pin_memory,
             persistent_workers=False,
+            worker_init_fn=_worker_init_fn,
         )
         val_loader = DataLoader(
             sfoa_val_ds,
@@ -742,9 +750,9 @@ def run_sfoa_search(
             num_workers=sfoa_workers,
             pin_memory=pin_memory,
             persistent_workers=False,
+            worker_init_fn=_worker_init_fn,
         )
 
-        torch.manual_seed(rank_seed + candidate_idx)
         label = _decode_and_log(hyperparams, candidate_idx)
         saved_hyperparams = (
             candidate_state.get("candidate_hyperparams")
@@ -772,17 +780,7 @@ def run_sfoa_search(
             )
 
         try:
-            model = RNNForecaster(
-                input_size=input_size,
-                hidden_size=hyperparams["hidden_size"],
-                num_layers=hyperparams["num_layers"],
-                dropout=hyperparams["dropout"],
-                horizon=args.pred_horizon,
-                rnn_type=args.rnn_type,
-                bidirectional=args.bidirectional,
-                num_targets=num_targets,
-                quantiles=None,
-            ).to(eval_device)
+            model = config.build_model(hyperparams, input_size, args, num_targets, eval_device)
             
             optimizer = torch.optim.Adam(
                 model.parameters(),
@@ -966,6 +964,7 @@ def run_sfoa_search(
         N=TRAINING.SFOA_POPULATION,
         Tmax=TRAINING.SFOA_ITERATIONS,
         Gp=TRAINING.SFOA_GP,
+        search_space=config.SEARCH_SPACE,
         seed=rank_seed,
         parallel_eval=True,
         accelerator=accelerator if is_distributed else None,

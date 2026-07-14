@@ -29,51 +29,140 @@ def find_max_inference_batch_size(
     raise RuntimeError("Could not find a batch size that fits in memory.")
 
 
+def _compute_one_step(y_pred_step, y_true_step, y_last):
+    err = y_pred_step - y_true_step
+    abs_err = np.abs(err)
+
+    under_mask = y_pred_step < y_true_step
+    over_mask = y_pred_step > y_true_step
+    n = len(y_true_step)
+    n_under = int(np.sum(under_mask))
+    n_over = int(np.sum(over_mask))
+
+    mse = float(np.mean(err ** 2))
+    mae = float(np.mean(abs_err))
+    rmse = float(np.sqrt(mse))
+
+    ss_res = float(np.sum(err ** 2))
+    ss_tot = float(np.sum((y_true_step - np.mean(y_true_step)) ** 2))
+    r2 = 1.0 - (ss_res / ss_tot) if ss_tot > 0 else 0.0
+
+    nonzero = np.abs(y_true_step) > 1e-12
+    if int(np.sum(nonzero)) > 0:
+        mape = float(np.mean(np.abs(err[nonzero]) / np.abs(y_true_step[nonzero]))) * 100.0
+    else:
+        mape = 0.0
+
+    actual_dir = np.sign(y_true_step - y_last)
+    pred_dir = np.sign(y_pred_step - y_last)
+    mda = float(np.mean(actual_dir == pred_dir))
+
+    under_rate = (n_under / n * 100.0) if n > 0 else 0.0
+    over_rate = (n_over / n * 100.0) if n > 0 else 0.0
+
+    if n_under > 0:
+        mean_under = float(np.mean(y_true_step[under_mask] - y_pred_step[under_mask]))
+        max_under = float(np.max(y_true_step[under_mask] - y_pred_step[under_mask]))
+    else:
+        mean_under = 0.0
+        max_under = 0.0
+
+    if n_over > 0:
+        mean_over = float(np.mean(y_pred_step[over_mask] - y_true_step[over_mask]))
+        max_over = float(np.max(y_pred_step[over_mask] - y_true_step[over_mask]))
+    else:
+        mean_over = 0.0
+        max_over = 0.0
+
+    return {
+        "MSE": mse,
+        "MAE": mae,
+        "RMSE": rmse,
+        "R²": r2,
+        "MAPE (%)": mape,
+        "MDA (%)": mda * 100.0,
+        "Under-Pred Rate (%)": under_rate,
+        "Over-Pred Rate (%)": over_rate,
+        "Mean Under Error": mean_under,
+        "Mean Over Error": mean_over,
+        "Max Under Error": max_under,
+        "Max Over Error": max_over,
+    }
+
+
+METRIC_NAMES = [
+    "MSE", "MAE", "RMSE", "R²", "MAPE (%)", "MDA (%)",
+    "Under-Pred Rate (%)", "Over-Pred Rate (%)",
+    "Mean Under Error", "Mean Over Error",
+    "Max Under Error", "Max Over Error",
+]
+
+PCT_METRICS = {"MAPE (%)", "MDA (%)", "Under-Pred Rate (%)", "Over-Pred Rate (%)"}
+
+
+def _delta_pct(model_val, naive_val):
+    denom = abs(naive_val)
+    if denom < 1e-12:
+        return "N/A"
+    pct = (model_val - naive_val) / denom * 100.0
+    return f"{pct:+.1f}"
+
+
 def compute_metrics(
     y_pred, y_true, y_last, horizon, total_samples, log_info, target_name=None
 ):
     if total_samples == 0:
         log_info("No samples found in test set.")
-        return
+        return {}
 
-    target_idx = horizon - 1
+    last_step = _compute_one_step(y_pred[:, -1], y_true[:, -1], y_last)
 
-    y_true_target = y_true[:, target_idx]
-    y_pred_target = y_pred[:, target_idx]
+    avg_steps = {}
+    for name in METRIC_NAMES:
+        vals = []
+        for h in range(horizon):
+            step_metrics = _compute_one_step(y_pred[:, h], y_true[:, h], y_last)
+            vals.append(step_metrics[name])
+        avg_steps[name] = float(np.mean(vals))
 
-    mse = np.mean((y_pred_target - y_true_target) ** 2)
-    mae = np.mean(np.abs(y_pred_target - y_true_target))
+    naive = _compute_one_step(y_last, y_true[:, -1], y_last)
 
-    mse_naive = np.mean((y_true_target - y_last) ** 2)
+    corr_0, _ = pearsonr(y_true[:, -1], y_pred[:, -1])
+    corr_1, _ = pearsonr(y_last, y_pred[:, -1])
 
-    skill_score = 1.0 - (mse / mse_naive)
-
-    actual_dir = np.sign(y_true_target - y_last)
-    pred_dir = np.sign(y_pred_target - y_last)
-    mda = np.mean(actual_dir == pred_dir)
-
-    corr_0, _ = pearsonr(y_true_target, y_pred_target)
-    corr_1, _ = pearsonr(y_last, y_pred_target)
-
-    is_shadowing = (skill_score < 0.05) or (corr_1 > corr_0) or (mda < 0.55)
-
-    header = f"=== Performance Metrics{f' [{target_name}]' if target_name else ''} ==="
+    header = f"=== Evaluation{f': {target_name}' if target_name else ''} ==="
     log_info(f"\n{header}")
-    log_info("-" * 30)
-    log_info(f"MSE:                   {mse:.4f}")
-    log_info(f"MAE:                   {mae:.4f}")
-    log_info("-" * 30)
-    log_info(">>> SHADOWING DIAGNOSTICS <<<")
-    log_info(f"Skill Score (vs Naive): {skill_score:.4f}  (Ideal: > 0.1)")
-    log_info(f"Directional Acc (MDA):  {mda:.2%} (Ideal: > 60%)")
-    log_info(f"Correlation (Lag 0):    {corr_0:.4f}")
-    log_info(f"Correlation (Lag -1):   {corr_1:.4f}")
+    log_info("")
+    log_info(
+        f"{'Metric':<26s} {'Last Step':>14s} {'Avg Steps':>14s} "
+        f"{'Naive':>14s} {'Δ (%)':>10s}"
+    )
+    log_info("-" * 82)
 
-    if is_shadowing:
-        log_info(
-            "!! WARNING: Model shows signs of SHADOWING (overfitting to last step) !!"
-        )
-    else:
-        log_info("PASSED: Model appears to have learned temporal dynamics.")
+    results = {}
+    for name in METRIC_NAMES:
+        ls = last_step[name]
+        av = avg_steps[name]
+        nv = naive[name]
+        d = _delta_pct(ls, nv)
 
-    log_info("-" * 30)
+        if name in PCT_METRICS:
+            log_info(
+                f"{name:<26s} {ls:>13.8f}% {av:>13.8f}% {nv:>13.8f}% {d:>10s}"
+            )
+        else:
+            log_info(
+                f"{name:<26s} {ls:>14.8e} {av:>14.8e} {nv:>14.8e} {d:>10s}"
+            )
+
+        results[name] = {"last_step": ls, "avg_steps": av, "naive": nv, "delta_pct": d}
+
+    log_info("")
+    log_info(f"{'Correlation (Lag 0)':<26s} {corr_0:>14.8f}")
+    log_info(f"{'Correlation (Lag 1)':<26s} {corr_1:>14.8f}")
+    log_info("-" * 82)
+
+    results["Correlation (Lag 0)"] = corr_0
+    results["Correlation (Lag 1)"] = corr_1
+
+    return results

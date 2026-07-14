@@ -10,7 +10,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from experiments.tsdp.config import CFG as TSDP_CFG
+from preprocessing.sv.config import CFG as SV_CFG
 
 logger = logging.getLogger(__name__)
 
@@ -101,7 +101,7 @@ def _load_service_windows(
     )
 
 
-class TsdpDataset(Dataset):
+class SvDataset(Dataset):
     def __init__(
         self,
         preprocess_dir: str,
@@ -177,7 +177,7 @@ class TsdpDataset(Dataset):
                     if completed % log_interval == 0:
                         elapsed = time.time() - t_start
                         logger.info(
-                            "TsdpDataset[%s] %d/%d services (%.0f%%) in %.1fs",
+                            "SvDataset[%s] %d/%d services (%.0f%%) in %.1fs",
                             split, completed, n_services,
                             100 * completed / n_services, elapsed,
                         )
@@ -193,14 +193,14 @@ class TsdpDataset(Dataset):
                 if (pos + 1) % log_interval == 0:
                     elapsed = time.time() - t_start
                     logger.info(
-                        "TsdpDataset[%s] %d/%d services (%.0f%%) in %.1fs",
+                        "SvDataset[%s] %d/%d services (%.0f%%) in %.1fs",
                         split, pos + 1, n_services,
                         100 * (pos + 1) / n_services, elapsed,
                     )
 
         if not all_parts:
             logger.warning(
-                "TsdpDataset[%s]: no valid windows found in %s",
+                "SvDataset[%s]: no valid windows found in %s",
                 split, preprocess_dir,
             )
             self.X = torch.empty((0, input_len, N_CHANNELS), dtype=torch.float32)
@@ -212,7 +212,7 @@ class TsdpDataset(Dataset):
             self.last = torch.from_numpy(np.concatenate([p[2] for p in all_parts], axis=0))
 
         logger.info(
-            "TsdpDataset[%s]: %d windows from %d service files in %.1fs",
+            "SvDataset[%s]: %d windows from %d service files in %.1fs",
             split, len(self.X), n_services, time.time() - t_start,
         )
 
@@ -224,9 +224,9 @@ class TsdpDataset(Dataset):
 
 
 def _smoke_check(preprocess_dir: str, split: str, num_workers: int = 0) -> None:
-    from experiments.tsdp.config import CFG
+    from preprocessing.sv.config import CFG
 
-    ds = TsdpDataset(
+    ds = SvDataset(
         preprocess_dir,
         split,
         input_len=CFG.INPUT_LEN,
@@ -246,11 +246,11 @@ def _smoke_check(preprocess_dir: str, split: str, num_workers: int = 0) -> None:
     assert last.dim() == 0, f"Bad last shape: {tuple(last.shape)}"
     print(f"Dataset windows: {len(ds)}")
     print(f"x={tuple(x.shape)} y={tuple(y.shape)} last_dim={last.dim()}")
-    print("TsdpDataset smoke test passed")
+    print("SvDataset smoke test passed")
 
 
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser(description="Smoke-check TsdpDataset shapes.")
+    ap = argparse.ArgumentParser(description="Smoke-check SvDataset shapes.")
     ap.add_argument("--preprocess_dir", required=True)
     ap.add_argument("--split", choices=("train", "val", "test"), default="train")
     ap.add_argument("--num_workers", type=int, default=0)

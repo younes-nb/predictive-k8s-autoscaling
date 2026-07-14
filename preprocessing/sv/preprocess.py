@@ -19,9 +19,9 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from shared.config_paths import PATHS
-from experiments.cshvtb.config import CFG
+from preprocessing.sv.config import CFG
 
-CHANNEL_DIRS = [f"vmd_{i}" for i in range(CFG.VMD_K)] + ["lowfreq_0"]
+CHANNEL_DIRS = [f"vmd_mode_{k}" for k in range(10)] + ["D2", "A2"]
 
 
 class _TehranFormatter(logging.Formatter):
@@ -43,7 +43,7 @@ def setup_logging(out_dir: str) -> None:
     sh = logging.StreamHandler(sys.stdout)
     sh.setFormatter(fmt)
     root.addHandler(sh)
-    logging.getLogger("PyEMD").setLevel(logging.WARNING)
+    logging.getLogger("preprocessing.sv.decomposition").setLevel(logging.WARNING)
     logging.info("Preprocessing log: %s", log_path)
 
 
@@ -71,10 +71,10 @@ def _load_batch_signals(
 
 def main() -> None:
     ap = argparse.ArgumentParser(
-        description="Decompose MSResource CPU signals into 6 CSHVTB channels."
+        description="Decompose MSResource CPU signals via SWT + VMD into 13 channels."
     )
     ap.add_argument("--msresource_dir", default=PATHS.PARQUET_MSRESOURCE)
-    ap.add_argument("--out_dir", default="/dataset/cshvtb_preprocess")
+    ap.add_argument("--out_dir", default="/dataset/sv_preprocess")
     ap.add_argument("--max_services", type=int, default=0, help="Max services (0 = all)")
     ap.add_argument("--num_workers", type=float, default=0.9,
                     help="Fraction of CPU cores to use (default: 0.9)")
@@ -205,7 +205,7 @@ def main() -> None:
 
     pre_done = 0
     for i in range(total):
-        dm = os.path.join(args.out_dir, "vmd_0", f"service_{i:05d}.done")
+        dm = os.path.join(args.out_dir, CHANNEL_DIRS[0], f"service_{i:05d}.done")
         if os.path.exists(dm):
             if all(
                 os.path.exists(os.path.join(args.out_dir, d, f"service_{i:05d}.npy"))
@@ -236,7 +236,7 @@ def main() -> None:
             out_path = os.path.join(args.out_dir, "original", f"service_{idx:05d}.npy")
             if not os.path.exists(out_path):
                 np.save(out_path, sig)
-            done_marker = os.path.join(args.out_dir, "vmd_0", f"service_{idx:05d}.done")
+            done_marker = os.path.join(args.out_dir, CHANNEL_DIRS[0], f"service_{idx:05d}.done")
             if os.path.exists(done_marker):
                 files_exist = all(
                     os.path.exists(os.path.join(args.out_dir, d, f"service_{idx:05d}.npy"))
@@ -251,7 +251,7 @@ def main() -> None:
             if ms_name not in signals:
                 idx = svc_to_idx.get(ms_name, -1)
                 if idx >= 0:
-                    dm = os.path.join(args.out_dir, "vmd_0", f"service_{idx:05d}.done")
+                    dm = os.path.join(args.out_dir, CHANNEL_DIRS[0], f"service_{idx:05d}.done")
                     if not os.path.exists(dm):
                         skipped += 1
                     else:

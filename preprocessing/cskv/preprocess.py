@@ -1,3 +1,4 @@
+
 import argparse
 import json
 import logging
@@ -19,16 +20,14 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from shared.config_paths import PATHS
-from experiments.tsdp.config import CFG
-
-CHANNEL_DIRS = [f"vmd_mode_{k}" for k in range(10)] + ["D2", "A2"]
-
+from preprocessing.cskv.config import CFG, set_seed
+from preprocessing.cskv._decompose_worker import MAX_IMFS
 
 class _TehranFormatter(logging.Formatter):
+
     def format(self, record: logging.LogRecord) -> str:
         ts = datetime.now(ZoneInfo("Asia/Tehran")).strftime("%Y-%m-%d %H:%M:%S")
         return f"{ts} [{record.levelname}] {record.getMessage()}"
-
 
 def setup_logging(out_dir: str) -> None:
     os.makedirs(out_dir, exist_ok=True)
@@ -43,9 +42,8 @@ def setup_logging(out_dir: str) -> None:
     sh = logging.StreamHandler(sys.stdout)
     sh.setFormatter(fmt)
     root.addHandler(sh)
-    logging.getLogger("experiments.tsdp.decomposition").setLevel(logging.WARNING)
+    logging.getLogger("PyEMD").setLevel(logging.WARNING)
     logging.info("Preprocessing log: %s", log_path)
-
 
 def _load_batch_signals(
     msresource_dir: str, services_batch: list[str],
@@ -68,29 +66,38 @@ def _load_batch_signals(
             signals[ms_name] = sig
     return signals
 
-
 def main() -> None:
     ap = argparse.ArgumentParser(
-        description="Decompose MSResource CPU signals via SWT + VMD into 13 channels."
+        description="Decompose MSResource CPU signals into Co-IMFs for CVCBM training."
     )
     ap.add_argument("--msresource_dir", default=PATHS.PARQUET_MSRESOURCE)
-    ap.add_argument("--out_dir", default="/dataset/tsdp_preprocess")
+    ap.add_argument("--out_dir", default="/dataset/cskv_preprocess")
     ap.add_argument("--max_services", type=int, default=0, help="Max services (0 = all)")
     ap.add_argument("--num_workers", type=float, default=0.9,
                     help="Fraction of CPU cores to use (default: 0.9)")
     ap.add_argument("--batch_size", type=int, default=512,
-                    help="Services per batch (default: 512).")
+                    help="Services per batch (default: 512). Load this many from parquet at once.")
+    ap.add_argument("--no_clustering", action="store_true",
+                    help="Skip Sample Entropy, K-Means, and VMD; use raw IMFs only.")
     args = ap.parse_args()
 
+    set_seed(CFG.SEED)
+
+    # Compute worker count as a fraction of available CPU cores (default 90%).
     n_cpus = os.cpu_count() or 1
     num_workers = max(1, int(n_cpus * args.num_workers))
 
     setup_logging(args.out_dir)
-
-    for d in CHANNEL_DIRS:
-        os.makedirs(os.path.join(args.out_dir, d), exist_ok=True)
+    if args.no_clustering:
+        for k in range(MAX_IMFS):
+            os.makedirs(os.path.join(args.out_dir, f"raw_imf_{k}"), exist_ok=True)
+    else:
+        for k in range(CFG.N_CLUSTERS):
+            os.makedirs(os.path.join(args.out_dir, f"co_imf_{k}"), exist_ok=True)
     os.makedirs(os.path.join(args.out_dir, "original"), exist_ok=True)
 
+    # --- Service list ---
+    # Reuse a persistent service name index to avoid re-scanning 112 GB of parquet.
     svc_names_path = os.path.join(args.out_dir, "_service_names.npy")
     if os.path.exists(svc_names_path):
         all_services = np.load(svc_names_path, allow_pickle=True).tolist()
@@ -110,6 +117,8 @@ def main() -> None:
         logging.info("Found %d unique services and saved index in %.1fs",
                      len(all_services), time.time() - t0)
 
+    # On reruns, load the previous service-to-index mapping so we can
+    # look up cached original/ files by service name.
     svc_to_idx_path = os.path.join(args.out_dir, "_svc_to_idx.json")
     prev_svc_to_idx: dict[str, int] = {}
     if os.path.exists(svc_to_idx_path):
@@ -117,6 +126,7 @@ def main() -> None:
             prev_svc_to_idx = json.load(f)
         logging.info("Loaded previous index mapping with %d entries", len(prev_svc_to_idx))
     else:
+        # Fallback: reconstruct from .meta files left by a previous run.
         meta_dir = args.out_dir
         meta_files = sorted(
             f for f in os.listdir(meta_dir)
@@ -139,6 +149,7 @@ def main() -> None:
     t_load = time.time()
     all_signals: dict[str, np.ndarray] = {}
 
+    # First, try to fill from cached files — avoids any parquet access on reruns.
     need = args.max_services or len(all_services)
     for ms_name in all_services:
         if len(all_signals) >= need:
@@ -162,6 +173,7 @@ def main() -> None:
     else:
         logging.info("Cache provided %d/%d services, loading remaining from parquet...",
                      len(all_signals), need)
+        # Load remaining signals from parquet in chunks.
         remaining = [ms for ms in all_services if ms not in all_signals]
         batch_size_parquet = 2000
         for chunk_start in range(0, len(remaining), batch_size_parquet):
@@ -181,6 +193,8 @@ def main() -> None:
 
     logging.info("Total valid signals: %d (%.1fs)", len(all_signals), time.time() - t_load)
 
+    # Build services list from valid signals; if max_services is set,
+    # take the first N valid ones (skips past any that are too short).
     services = sorted(all_signals.keys())
     if args.max_services:
         services = services[:args.max_services]
@@ -205,13 +219,17 @@ def main() -> None:
 
     pre_done = 0
     for i in range(total):
-        dm = os.path.join(args.out_dir, CHANNEL_DIRS[0], f"service_{i:05d}.done")
+        dm = os.path.join(args.out_dir, f"service_{i:05d}.done")
         if os.path.exists(dm):
-            if all(
-                os.path.exists(os.path.join(args.out_dir, d, f"service_{i:05d}.npy"))
-                for d in CHANNEL_DIRS
-            ):
-                pre_done += 1
+            if args.no_clustering:
+                if os.path.exists(os.path.join(args.out_dir, "raw_imf_0", f"service_{i:05d}.npy")):
+                    pre_done += 1
+            else:
+                if all(
+                    os.path.exists(os.path.join(args.out_dir, f"co_imf_{k}", f"service_{i:05d}.npy"))
+                    for k in range(CFG.N_CLUSTERS)
+                ):
+                    pre_done += 1
     if pre_done:
         logging.info("Pre-existing completed services: %d", pre_done)
 
@@ -236,12 +254,15 @@ def main() -> None:
             out_path = os.path.join(args.out_dir, "original", f"service_{idx:05d}.npy")
             if not os.path.exists(out_path):
                 np.save(out_path, sig)
-            done_marker = os.path.join(args.out_dir, CHANNEL_DIRS[0], f"service_{idx:05d}.done")
+            done_marker = os.path.join(args.out_dir, f"service_{idx:05d}.done")
             if os.path.exists(done_marker):
-                files_exist = all(
-                    os.path.exists(os.path.join(args.out_dir, d, f"service_{idx:05d}.npy"))
-                    for d in CHANNEL_DIRS
-                )
+                if args.no_clustering:
+                    files_exist = os.path.exists(os.path.join(args.out_dir, "raw_imf_0", f"service_{idx:05d}.npy"))
+                else:
+                    files_exist = all(
+                        os.path.exists(os.path.join(args.out_dir, f"co_imf_{k}", f"service_{idx:05d}.npy"))
+                        for k in range(CFG.N_CLUSTERS)
+                    )
                 if files_exist:
                     continue
                 os.remove(done_marker)
@@ -251,14 +272,17 @@ def main() -> None:
             if ms_name not in signals:
                 idx = svc_to_idx.get(ms_name, -1)
                 if idx >= 0:
-                    dm = os.path.join(args.out_dir, CHANNEL_DIRS[0], f"service_{idx:05d}.done")
+                    dm = os.path.join(args.out_dir, f"service_{idx:05d}.done")
                     if not os.path.exists(dm):
                         skipped += 1
                     else:
-                        files_exist = all(
-                            os.path.exists(os.path.join(args.out_dir, d, f"service_{idx:05d}.npy"))
-                            for d in CHANNEL_DIRS
-                        )
+                        if args.no_clustering:
+                            files_exist = os.path.exists(os.path.join(args.out_dir, "raw_imf_0", f"service_{idx:05d}.npy"))
+                        else:
+                            files_exist = all(
+                                os.path.exists(os.path.join(args.out_dir, f"co_imf_{k}", f"service_{idx:05d}.npy"))
+                                for k in range(CFG.N_CLUSTERS)
+                            )
                         if not files_exist:
                             os.remove(dm)
                             skipped += 1
@@ -281,7 +305,7 @@ def main() -> None:
             worker_env["LOKY_MAX_CPU_COUNT"] = "1"
             worker_env["JOBLIB_NUM_THREADS"] = "1"
             proc = subprocess.Popen(
-                [sys.executable, worker_script, ms_name, str(idx), args.out_dir],
+                [sys.executable, worker_script, ms_name, str(idx), args.out_dir, "1" if args.no_clustering else "0"],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 env=worker_env,
             )
@@ -317,6 +341,8 @@ def main() -> None:
                     parts = result_line.split(":", 2)
                     success = parts[1] == "True" if len(parts) >= 2 else True
                     message = parts[2] if len(parts) >= 3 else "ok"
+                    if "(MAE=" in message:
+                        message = "ok"
                     if success:
                         if "already done" in message or "too short" in message:
                             skipped += 1
@@ -349,6 +375,7 @@ def main() -> None:
                     )
                     continue
 
+                # Show per-service completion with name and timing
                 pct = f" ({done_count*100//total}%)" if total else ""
                 logging.info(
                     "  [%s] done (%d/%d%s, batch %d/%d, %.1fs)",
@@ -356,6 +383,7 @@ def main() -> None:
                     batch_idx + 1, n_batches, duration,
                 )
 
+                # Periodic batch-level progress with ETA
                 if batch_done % log_every == 0 or batch_done == n_submitted:
                     elapsed_batch = time.time() - batch_start_t
                     rate = batch_done / elapsed_batch if elapsed_batch > 0 else 0
@@ -382,7 +410,6 @@ def main() -> None:
         "Preprocessing complete. Processed: %d | Skipped/Failed: %d | Time: %.1fs",
         processed, skipped, elapsed,
     )
-
 
 if __name__ == "__main__":
     main()

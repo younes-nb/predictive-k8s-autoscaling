@@ -27,11 +27,11 @@ REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, "..", ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from experiments.tsdp.config import CFG
+from preprocessing.sv.config import CFG
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_ORIGINAL_DIR = "/dataset/tsdp_preprocess/original"
+DEFAULT_ORIGINAL_DIR = "/dataset/sv_preprocess/original"
 WORKER_SCRIPT = os.path.join(THIS_DIR, "_vmd_k_worker.py")
 
 
