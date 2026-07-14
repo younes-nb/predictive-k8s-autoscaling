@@ -91,7 +91,7 @@ def main() -> None:
     os.makedirs(args.out_dir, exist_ok=True)
 
     timeout_kwargs = InitProcessGroupKwargs(timeout=timedelta(seconds=14400))
-    mixed_precision = "fp16" if not args.cpu and torch.cuda.is_available() else "no"
+    mixed_precision = "no"
     accelerator = Accelerator(cpu=args.cpu, mixed_precision=mixed_precision, kwargs_handlers=[timeout_kwargs])
     device = accelerator.device
 
