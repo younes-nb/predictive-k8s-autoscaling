@@ -93,7 +93,7 @@ def _load_test_dataset(args, ckpt_args, device, log_info, feature_set_name="cpu"
             stride=CSKV_CFG.STRIDE,
             train_frac=CSKV_CFG.TRAIN_FRAC, val_frac=CSKV_CFG.VAL_FRAC,
         )
-        input_size = 1
+        input_size = test_ds.total_channels
         return test_ds, input_size
     else:
         raise ValueError(f"Unknown preprocess_approach: {preprocess_approach}")
@@ -200,14 +200,14 @@ def evaluate(args):
         with torch.no_grad():
             mu = model(x)
 
-        if preprocess_approach == "sv":
+        if preprocess_approach in ("sv", "cskv"):
             batch_last = batch[2]
             gathered_mu, gathered_y, gathered_last = accelerator.gather_for_metrics((mu, y, batch_last))
         else:
             gathered_mu, gathered_y, gathered_x = accelerator.gather_for_metrics((mu, y, x))
 
         if accelerator.is_local_main_process:
-            if preprocess_approach == "sv":
+            if preprocess_approach in ("sv", "cskv"):
                 y_last = gathered_last.cpu().numpy()
             else:
                 y_last = gathered_x[:, -1, :].cpu().numpy()
