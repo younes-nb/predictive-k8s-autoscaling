@@ -185,7 +185,7 @@ def main():
             args.preprocess_approach,
         ]
         if args.preprocess_approach in ("sv", "cskv"):
-            cmd_train.extend(["--preprocess_dir", args.windows_dir])
+            cmd_train.extend(["--preprocess_dir", os.path.join(args.windows_dir, args.preprocess_approach)])
             cmd_train.extend(["--dataset_workers", str(args.dataset_workers)])
         if TRAINING.USE_WEIGHTS:
             cmd_train.append("--use_weights")
@@ -214,7 +214,7 @@ def main():
             str(TRAINING.BATCH_SIZE),
         ]
         if args.preprocess_approach in ("sv", "cskv"):
-            cmd_test.extend(["--preprocess_dir", args.windows_dir])
+            cmd_test.extend(["--preprocess_dir", os.path.join(args.windows_dir, args.preprocess_approach)])
         if args.cpu:
             cmd_test.append("--cpu")
         cmd_test.extend(["--test_pct", str(args.test_pct)])
