@@ -43,7 +43,7 @@ def _build_model_from_checkpoint(checkpoint, input_size, device):
     return cfg.build_model(hyperparams, input_size, ckpt_args, num_targets, device)
 
 
-def _load_test_dataset(args, ckpt_args, device, log_info):
+def _load_test_dataset(args, ckpt_args, device, log_info, feature_set_name="cpu"):
     input_len = ckpt_args.get("input_len", PREPROCESSING.INPUT_LEN)
     horizon = ckpt_args.get("pred_horizon", PREPROCESSING.PRED_HORIZON)
     model_type = ckpt_args.get("model_type", "lstm")
@@ -77,8 +77,9 @@ def _load_test_dataset(args, ckpt_args, device, log_info):
             input_len=SV_CFG.INPUT_LEN, pred_horizon=SV_CFG.PRED_HORIZON,
             stride=SV_CFG.STRIDE,
             train_frac=SV_CFG.TRAIN_FRAC, val_frac=SV_CFG.VAL_FRAC,
+            feature_set=feature_set_name,
         )
-        input_size = 12
+        input_size = test_ds.n_channels
         return test_ds, input_size
     elif preprocess_approach == "cskv":
         preprocess_dir = getattr(args, "preprocess_dir", None)
@@ -148,7 +149,7 @@ def evaluate(args):
     log_info(f"Target Feature(s):  {target_features}")
 
     log_info("\n--- Loading Test Dataset ---")
-    test_ds, input_size = _load_test_dataset(args, ckpt_args, device, log_info)
+    test_ds, input_size = _load_test_dataset(args, ckpt_args, device, log_info, feature_set_name)
 
     model = _build_model_from_checkpoint(checkpoint, input_size, device)
     model.load_state_dict(checkpoint["model_state_dict"])
@@ -199,10 +200,17 @@ def evaluate(args):
         with torch.no_grad():
             mu = model(x)
 
-        gathered_mu, gathered_y, gathered_x = accelerator.gather_for_metrics((mu, y, x))
+        if preprocess_approach == "sv":
+            batch_last = batch[2]
+            gathered_mu, gathered_y, gathered_last = accelerator.gather_for_metrics((mu, y, batch_last))
+        else:
+            gathered_mu, gathered_y, gathered_x = accelerator.gather_for_metrics((mu, y, x))
 
         if accelerator.is_local_main_process:
-            y_last = gathered_x[:, -1, :].cpu().numpy()
+            if preprocess_approach == "sv":
+                y_last = gathered_last.cpu().numpy()
+            else:
+                y_last = gathered_x[:, -1, :].cpu().numpy()
             all_preds.append(gathered_mu.cpu().numpy())
             all_trues.append(gathered_y.cpu().numpy())
             all_lasts.append(y_last)
@@ -217,6 +225,8 @@ def evaluate(args):
     y_pred = np.concatenate(all_preds, axis=0)
     y_true = np.concatenate(all_trues, axis=0)
     y_last_all = np.concatenate(all_lasts, axis=0)
+    if y_last_all.ndim == 1:
+        y_last_all = y_last_all[:, np.newaxis]
 
     total_samples = y_pred.shape[0]
 

@@ -118,7 +118,8 @@ def main():
             run(cmd_smooth, "Step 3b: Smoothing")
         elif args.preprocess_approach == "sv":
             sv_out = os.path.join(args.windows_dir, "sv")
-            cmd_sv = [sys.executable, sv_script, "--out_dir", sv_out]
+            cmd_sv = [sys.executable, sv_script, "--out_dir", sv_out,
+                      "--feature_set", args.feature_set]
             if args.max_services is not None:
                 cmd_sv.extend(["--max_services", str(args.max_services)])
             run(cmd_sv, "Step 3b: SV Decomposition")

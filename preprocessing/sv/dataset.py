@@ -14,14 +14,14 @@ from preprocessing.sv.config import CFG as SV_CFG
 
 logger = logging.getLogger(__name__)
 
-_VMD_CHANNELS = [f"vmd_mode_{k}" for k in range(10)]
-CHANNEL_DIRS = _VMD_CHANNELS + ["D2", "A2"]
-N_CHANNELS = len(CHANNEL_DIRS)
+CPU_CHANNEL_DIRS = [f"vmd_mode_{k}" for k in range(10)] + ["D2", "A2"]
+MEM_CHANNEL_DIRS = [f"mem_vmd_mode_{k}" for k in range(10)] + ["mem_D2", "mem_A2"]
+CPU_N_CHANNELS = len(CPU_CHANNEL_DIRS)
 
 
 def _load_service_windows(
     svc_name, svc_idx, preprocess_dir, split, input_len, pred_horizon, stride,
-    train_frac, val_frac,
+    train_frac, val_frac, channel_dirs, n_channels, has_mem,
 ):
     base = f"service_{svc_idx:05d}.npy"
 
@@ -34,8 +34,18 @@ def _load_service_windows(
     except (EOFError, ValueError):
         return None
 
+    mem_original = None
+    if has_mem:
+        mem_orig_path = os.path.join(preprocess_dir, "mem_original", base)
+        if not os.path.exists(mem_orig_path):
+            return None
+        try:
+            mem_original = np.load(mem_orig_path).astype(np.float64)
+        except (EOFError, ValueError):
+            return None
+
     channel_arrays = []
-    for d in CHANNEL_DIRS:
+    for d in channel_dirs:
         ch_path = os.path.join(preprocess_dir, d, base)
         if not os.path.exists(ch_path):
             break
@@ -45,7 +55,7 @@ def _load_service_windows(
         except (EOFError, ValueError):
             break
 
-    if len(channel_arrays) != N_CHANNELS:
+    if len(channel_arrays) != n_channels:
         return None
 
     ref_shape = channel_arrays[0].shape
@@ -53,6 +63,9 @@ def _load_service_windows(
     for arr in channel_arrays:
         if arr.shape[0] != ref_shape[0]:
             return None
+
+    if has_mem and mem_original is not None and len(mem_original) != len(original):
+        return None
 
     idx_tr = int(num_windows * train_frac)
     idx_val = int(num_windows * (train_frac + val_frac))
@@ -77,12 +90,21 @@ def _load_service_windows(
             continue
 
         X = np.stack(
-            [channel_arrays[c][j] for c in range(N_CHANNELS)],
+            [channel_arrays[c][j] for c in range(n_channels)],
             axis=1,
         ).astype(np.float32)
 
-        y = original[pos + input_len: pos + input_len + pred_horizon].astype(np.float32)
-        last_val = original[pos + input_len - 1].astype(np.float32)
+        cpu_y = original[pos + input_len: pos + input_len + pred_horizon].astype(np.float32)
+        cpu_last = original[pos + input_len - 1].astype(np.float32)
+
+        if has_mem and mem_original is not None:
+            mem_y = mem_original[pos + input_len: pos + input_len + pred_horizon].astype(np.float32)
+            mem_last = mem_original[pos + input_len - 1].astype(np.float32)
+            y = np.stack([cpu_y, mem_y], axis=-1)
+            last_val = np.stack([cpu_last, mem_last])
+        else:
+            y = cpu_y
+            last_val = cpu_last
 
         if np.isnan(X).any() or np.isinf(X).any() or np.isnan(y).any() or np.isinf(y).any():
             continue
@@ -113,11 +135,16 @@ class SvDataset(Dataset):
         val_frac: float = 0.10,
         num_workers: int = 0,
         max_services: int = 0,
+        feature_set: str = "cpu",
     ):
         assert split in ("train", "val", "test"), f"Unknown split: {split}"
         self.split = split
         self.input_len = input_len
         self.pred_horizon = pred_horizon
+
+        self.has_mem = feature_set == "cpu_mem_both"
+        self.channel_dirs = CPU_CHANNEL_DIRS + (MEM_CHANNEL_DIRS if self.has_mem else [])
+        self.n_channels = len(self.channel_dirs)
 
         svc_to_idx_path = os.path.join(preprocess_dir, "_svc_to_idx.json")
         if os.path.exists(svc_to_idx_path):
@@ -140,7 +167,7 @@ class SvDataset(Dataset):
             n_services = len(service_items)
         else:
             import glob
-            channel_base = os.path.join(preprocess_dir, CHANNEL_DIRS[0])
+            channel_base = os.path.join(preprocess_dir, self.channel_dirs[0])
             service_files = sorted(glob.glob(os.path.join(channel_base, "service_*.npy")))
             if not service_files:
                 raise FileNotFoundError(
@@ -165,6 +192,7 @@ class SvDataset(Dataset):
                         _load_service_windows, svc_name, svc_idx,
                         preprocess_dir, split, input_len, pred_horizon,
                         stride, train_frac, val_frac,
+                        self.channel_dirs, self.n_channels, self.has_mem,
                     ): (svc_name, svc_idx)
                     for svc_name, svc_idx in service_items
                 }
@@ -187,6 +215,7 @@ class SvDataset(Dataset):
                     svc_name, svc_idx,
                     preprocess_dir, split, input_len, pred_horizon,
                     stride, train_frac, val_frac,
+                    self.channel_dirs, self.n_channels, self.has_mem,
                 )
                 if result is not None:
                     all_parts.append(result)
@@ -203,17 +232,22 @@ class SvDataset(Dataset):
                 "SvDataset[%s]: no valid windows found in %s",
                 split, preprocess_dir,
             )
-            self.X = torch.empty((0, input_len, N_CHANNELS), dtype=torch.float32)
-            self.y = torch.empty((0, pred_horizon), dtype=torch.float32)
-            self.last = torch.empty((0,), dtype=torch.float32)
+            self.X = torch.empty((0, input_len, self.n_channels), dtype=torch.float32)
+            if self.has_mem:
+                self.y = torch.empty((0, pred_horizon, 2), dtype=torch.float32)
+                self.last = torch.empty((0, 2), dtype=torch.float32)
+            else:
+                self.y = torch.empty((0, pred_horizon), dtype=torch.float32)
+                self.last = torch.empty((0,), dtype=torch.float32)
         else:
             self.X = torch.from_numpy(np.concatenate([p[0] for p in all_parts], axis=0))
             self.y = torch.from_numpy(np.concatenate([p[1] for p in all_parts], axis=0))
             self.last = torch.from_numpy(np.concatenate([p[2] for p in all_parts], axis=0))
 
         logger.info(
-            "SvDataset[%s]: %d windows from %d service files in %.1fs",
-            split, len(self.X), n_services, time.time() - t_start,
+            "SvDataset[%s]: %d windows, X=%s, y=%s from %d services in %.1fs",
+            split, len(self.X), tuple(self.X.shape), tuple(self.y.shape),
+            n_services, time.time() - t_start,
         )
 
     def __len__(self) -> int:
@@ -223,7 +257,8 @@ class SvDataset(Dataset):
         return self.X[idx], self.y[idx], self.last[idx]
 
 
-def _smoke_check(preprocess_dir: str, split: str, num_workers: int = 0) -> None:
+def _smoke_check(preprocess_dir: str, split: str, num_workers: int = 0,
+                  feature_set: str = "cpu") -> None:
     from preprocessing.sv.config import CFG
 
     ds = SvDataset(
@@ -235,17 +270,25 @@ def _smoke_check(preprocess_dir: str, split: str, num_workers: int = 0) -> None:
         train_frac=CFG.TRAIN_FRAC,
         val_frac=CFG.VAL_FRAC,
         num_workers=num_workers,
+        feature_set=feature_set,
     )
     assert len(ds) > 0, "Dataset has no windows"
     x, y, last = ds[0]
-    expected_x_shape = (CFG.INPUT_LEN, N_CHANNELS)
+    expected_x_shape = (CFG.INPUT_LEN, ds.n_channels)
     assert tuple(x.shape) == expected_x_shape, \
         f"Bad x shape: {tuple(x.shape)} expected {expected_x_shape}"
-    assert tuple(y.shape) == (CFG.PRED_HORIZON,), \
-        f"Bad y shape: {tuple(y.shape)}"
-    assert last.dim() == 0, f"Bad last shape: {tuple(last.shape)}"
+    if ds.has_mem:
+        expected_y_shape = (CFG.PRED_HORIZON, 2)
+        expected_last_shape = (2,)
+    else:
+        expected_y_shape = (CFG.PRED_HORIZON,)
+        expected_last_shape = ()
+    assert tuple(y.shape) == expected_y_shape, \
+        f"Bad y shape: {tuple(y.shape)} expected {expected_y_shape}"
+    assert tuple(last.shape) == expected_last_shape, \
+        f"Bad last shape: {tuple(last.shape)} expected {expected_last_shape}"
     print(f"Dataset windows: {len(ds)}")
-    print(f"x={tuple(x.shape)} y={tuple(y.shape)} last_dim={last.dim()}")
+    print(f"x={tuple(x.shape)} y={tuple(y.shape)} last={tuple(last.shape)}")
     print("SvDataset smoke test passed")
 
 
@@ -254,5 +297,7 @@ if __name__ == "__main__":
     ap.add_argument("--preprocess_dir", required=True)
     ap.add_argument("--split", choices=("train", "val", "test"), default="train")
     ap.add_argument("--num_workers", type=int, default=0)
+    ap.add_argument("--feature_set", default="cpu")
     args = ap.parse_args()
-    _smoke_check(args.preprocess_dir, args.split, num_workers=args.num_workers)
+    _smoke_check(args.preprocess_dir, args.split, num_workers=args.num_workers,
+                 feature_set=args.feature_set)

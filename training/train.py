@@ -55,7 +55,7 @@ def _load_datasets(args, preprocess_approach):
         )
         return train_ds, val_ds
     elif preprocess_approach == "sv":
-        from preprocessing.sv.dataset import SvDataset, N_CHANNELS
+        from preprocessing.sv.dataset import SvDataset
         from preprocessing.sv.config import CFG as SV_CFG
         train_ds = SvDataset(
             args.preprocess_dir, "train",
@@ -64,6 +64,7 @@ def _load_datasets(args, preprocess_approach):
             train_frac=SV_CFG.TRAIN_FRAC, val_frac=SV_CFG.VAL_FRAC,
             num_workers=args.dataset_workers,
             max_services=getattr(args, "max_services", 0),
+            feature_set=args.feature_set,
         )
         val_ds = SvDataset(
             args.preprocess_dir, "val",
@@ -72,6 +73,7 @@ def _load_datasets(args, preprocess_approach):
             train_frac=SV_CFG.TRAIN_FRAC, val_frac=SV_CFG.VAL_FRAC,
             num_workers=args.dataset_workers,
             max_services=getattr(args, "max_services", 0),
+            feature_set=args.feature_set,
         )
         return train_ds, val_ds
     elif preprocess_approach == "cskv":
@@ -205,7 +207,7 @@ def train(args):
     if preprocess_approach == "sv":
         from preprocessing.sv.config import CFG as SV_CFG
         log_info(f"SV Config: {SV_CFG}")
-        input_size = 12
+        input_size = train_ds.n_channels
     elif preprocess_approach == "cskv":
         from preprocessing.cskv.config import CFG as CSKV_CFG
         log_info(f"CSKV Config: {CSKV_CFG}")

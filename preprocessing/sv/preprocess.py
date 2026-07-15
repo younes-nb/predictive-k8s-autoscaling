@@ -22,6 +22,7 @@ from shared.config_paths import PATHS
 from preprocessing.sv.config import CFG
 
 CHANNEL_DIRS = [f"vmd_mode_{k}" for k in range(10)] + ["D2", "A2"]
+MEM_CHANNEL_DIRS = [f"mem_vmd_mode_{k}" for k in range(10)] + ["mem_D2", "mem_A2"]
 
 
 class _TehranFormatter(logging.Formatter):
@@ -48,48 +49,64 @@ def setup_logging(out_dir: str) -> None:
 
 
 def _load_batch_signals(
-    msresource_dir: str, services_batch: list[str],
-) -> dict[str, np.ndarray]:
+    msresource_dir: str, services_batch: list[str], load_memory: bool = False,
+) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray] | None]:
     if not services_batch:
-        return {}
+        return {}, None
+    agg_cols = [pl.col("cpu_utilization").mean()]
+    if load_memory:
+        agg_cols.append(pl.col("memory_utilization").mean())
     df = (
         pl.scan_parquet(os.path.join(msresource_dir, "*.parquet"))
         .filter(pl.col("msname").is_in(services_batch))
         .group_by("msname", "timestamp")
-        .agg(pl.col("cpu_utilization").mean())
+        .agg(agg_cols)
         .sort("msname", "timestamp")
         .collect(engine="streaming")
     )
-    signals = {}
+    min_len = CFG.INPUT_LEN + CFG.PRED_HORIZON
+    cpu_signals: dict[str, np.ndarray] = {}
+    mem_signals: dict[str, np.ndarray] = {} if load_memory else None
     for key, group in df.group_by("msname", maintain_order=True):
         ms_name = key[0] if isinstance(key, tuple) else key
         sig = group["cpu_utilization"].to_numpy().astype(np.float32)
-        if len(sig) >= CFG.INPUT_LEN + CFG.PRED_HORIZON:
-            signals[ms_name] = sig
-    return signals
+        if len(sig) >= min_len:
+            cpu_signals[ms_name] = sig
+        if load_memory:
+            mem_sig = group["memory_utilization"].to_numpy().astype(np.float32)
+            if len(mem_sig) >= min_len:
+                mem_signals[ms_name] = mem_sig
+    return cpu_signals, mem_signals
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(
-        description="Decompose MSResource CPU signals via SWT + VMD into 13 channels."
+        description="Decompose MSResource signals via SWT + VMD into channels."
     )
     ap.add_argument("--msresource_dir", default=PATHS.PARQUET_MSRESOURCE)
     ap.add_argument("--out_dir", default="/dataset/sv_preprocess")
     ap.add_argument("--max_services", type=int, default=0, help="Max services (0 = all)")
+    ap.add_argument("--feature_set", default="cpu",
+                    help="Feature set: 'cpu' for CPU only, 'cpu_mem_both' for CPU + memory")
     ap.add_argument("--num_workers", type=float, default=0.9,
                     help="Fraction of CPU cores to use (default: 0.9)")
     ap.add_argument("--batch_size", type=int, default=512,
                     help="Services per batch (default: 512).")
     args = ap.parse_args()
 
+    has_mem = args.feature_set == "cpu_mem_both"
+    all_channel_dirs = CHANNEL_DIRS + (MEM_CHANNEL_DIRS if has_mem else [])
+
     n_cpus = os.cpu_count() or 1
     num_workers = max(1, int(n_cpus * args.num_workers))
 
     setup_logging(args.out_dir)
 
-    for d in CHANNEL_DIRS:
+    for d in all_channel_dirs:
         os.makedirs(os.path.join(args.out_dir, d), exist_ok=True)
     os.makedirs(os.path.join(args.out_dir, "original"), exist_ok=True)
+    if has_mem:
+        os.makedirs(os.path.join(args.out_dir, "mem_original"), exist_ok=True)
 
     svc_names_path = os.path.join(args.out_dir, "_service_names.npy")
     if os.path.exists(svc_names_path):
@@ -137,11 +154,13 @@ def main() -> None:
                              len(prev_svc_to_idx))
 
     t_load = time.time()
-    all_signals: dict[str, np.ndarray] = {}
+    all_cpu_signals: dict[str, np.ndarray] = {}
+    all_mem_signals: dict[str, np.ndarray] = {} if has_mem else None
 
     need = args.max_services or len(all_services)
+    min_len = CFG.INPUT_LEN + CFG.PRED_HORIZON
     for ms_name in all_services:
-        if len(all_signals) >= need:
+        if len(all_cpu_signals) >= need:
             break
         idx = prev_svc_to_idx.get(ms_name)
         if idx is None:
@@ -151,47 +170,74 @@ def main() -> None:
             continue
         try:
             sig = np.load(path).astype(np.float32)
-            if len(sig) >= CFG.INPUT_LEN + CFG.PRED_HORIZON:
-                all_signals[ms_name] = sig
+            if len(sig) >= min_len:
+                all_cpu_signals[ms_name] = sig
         except Exception:
             pass
+        if has_mem:
+            mem_path = os.path.join(args.out_dir, "mem_original", f"service_{idx:05d}.npy")
+            if os.path.exists(mem_path):
+                try:
+                    mem_sig = np.load(mem_path).astype(np.float32)
+                    if len(mem_sig) >= min_len:
+                        all_mem_signals[ms_name] = mem_sig
+                except Exception:
+                    pass
 
-    if len(all_signals) >= need:
+    if len(all_cpu_signals) >= need:
         logging.info("Filled %d/%d services from cache (%.1fs) — skipping parquet",
-                     len(all_signals), need, time.time() - t_load)
+                     len(all_cpu_signals), need, time.time() - t_load)
     else:
         logging.info("Cache provided %d/%d services, loading remaining from parquet...",
-                     len(all_signals), need)
-        remaining = [ms for ms in all_services if ms not in all_signals]
+                     len(all_cpu_signals), need)
+        remaining = [ms for ms in all_services if ms not in all_cpu_signals]
         batch_size_parquet = 2000
         for chunk_start in range(0, len(remaining), batch_size_parquet):
             chunk = remaining[chunk_start:chunk_start + batch_size_parquet]
-            chunk_signals = _load_batch_signals(args.msresource_dir, chunk)
-            for ms_name, sig in chunk_signals.items():
-                if ms_name not in all_signals:
-                    all_signals[ms_name] = sig
-                    if len(all_signals) >= need:
+            cpu_chunk, mem_chunk = _load_batch_signals(
+                args.msresource_dir, chunk, load_memory=has_mem,
+            )
+            for ms_name, sig in cpu_chunk.items():
+                if ms_name not in all_cpu_signals:
+                    all_cpu_signals[ms_name] = sig
+                    if len(all_cpu_signals) >= need:
                         break
+            if has_mem and mem_chunk:
+                for ms_name, sig in mem_chunk.items():
+                    if ms_name not in all_mem_signals:
+                        all_mem_signals[ms_name] = sig
             elapsed = time.time() - t_load
             logging.info("Loaded %d / %d needed signals (%.1fs, chunk %d)",
-                         len(all_signals), need, elapsed,
+                         len(all_cpu_signals), need, elapsed,
                          chunk_start // batch_size_parquet + 1)
-            if len(all_signals) >= need:
+            if len(all_cpu_signals) >= need:
                 break
 
-    logging.info("Total valid signals: %d (%.1fs)", len(all_signals), time.time() - t_load)
+    if has_mem:
+        valid = set(all_cpu_signals.keys()) & set(all_mem_signals.keys())
+        dropped = len(all_cpu_signals) - len(valid)
+        if dropped:
+            logging.info("Dropped %d services without memory signal", dropped)
+        all_cpu_signals = {ms: all_cpu_signals[ms] for ms in valid}
+        all_mem_signals = {ms: all_mem_signals[ms] for ms in valid}
 
-    services = sorted(all_signals.keys())
+    logging.info("Total valid signals: %d (%.1fs)%s",
+                 len(all_cpu_signals), time.time() - t_load,
+                 " (CPU+mem)" if has_mem else " (CPU)")
+
+    services = sorted(all_cpu_signals.keys())
     if args.max_services:
         services = services[:args.max_services]
-        all_signals = {ms: all_signals[ms] for ms in services}
+        all_cpu_signals = {ms: all_cpu_signals[ms] for ms in services}
+        if has_mem:
+            all_mem_signals = {ms: all_mem_signals[ms] for ms in services}
 
     total = len(services)
     batch_size = args.batch_size if args.batch_size > 0 else num_workers
     n_batches = (total + batch_size - 1) // batch_size
 
-    logging.info("Services: %d | Workers: %d | Batch: %d | Batches: %d",
-                 total, num_workers, batch_size, n_batches)
+    logging.info("Services: %d | Workers: %d | Batch: %d | Batches: %d | Feature set: %s",
+                 total, num_workers, batch_size, n_batches, args.feature_set)
     if args.max_services and total < args.max_services:
         logging.warning("Only %d valid services found (requested %d)", total, args.max_services)
 
@@ -209,7 +255,7 @@ def main() -> None:
         if os.path.exists(dm):
             if all(
                 os.path.exists(os.path.join(args.out_dir, d, f"service_{i:05d}.npy"))
-                for d in CHANNEL_DIRS
+                for d in all_channel_dirs
             ):
                 pre_done += 1
     if pre_done:
@@ -218,29 +264,58 @@ def main() -> None:
     for batch_idx in range(n_batches):
         batch_services = services[batch_idx * batch_size: (batch_idx + 1) * batch_size]
 
-        signals = {}
+        cpu_batch: dict[str, np.ndarray] = {}
+        mem_batch: dict[str, np.ndarray] = {} if has_mem else None
         for ms_name in batch_services:
             idx = svc_to_idx[ms_name]
             path = os.path.join(args.out_dir, "original", f"service_{idx:05d}.npy")
+            cpu_sig = None
             if os.path.exists(path):
-                sig = np.load(path).astype(np.float32)
-                if len(sig) >= CFG.INPUT_LEN + CFG.PRED_HORIZON:
-                    signals[ms_name] = sig
+                try:
+                    cpu_sig = np.load(path).astype(np.float32)
+                    if len(cpu_sig) < min_len:
+                        cpu_sig = None
+                except Exception:
+                    cpu_sig = None
+            if cpu_sig is None and ms_name in all_cpu_signals:
+                cpu_sig = all_cpu_signals[ms_name]
+            if cpu_sig is None:
+                continue
+
+            mem_sig = None
+            if has_mem:
+                mem_path = os.path.join(args.out_dir, "mem_original", f"service_{idx:05d}.npy")
+                if os.path.exists(mem_path):
+                    try:
+                        mem_sig = np.load(mem_path).astype(np.float32)
+                        if len(mem_sig) < min_len:
+                            mem_sig = None
+                    except Exception:
+                        mem_sig = None
+                if mem_sig is None and ms_name in all_mem_signals:
+                    mem_sig = all_mem_signals[ms_name]
+                if mem_sig is None:
                     continue
-            if ms_name in all_signals:
-                signals[ms_name] = all_signals[ms_name]
+
+            cpu_batch[ms_name] = cpu_sig
+            if has_mem:
+                mem_batch[ms_name] = mem_sig
 
         worker_args = []
-        for ms_name, sig in signals.items():
+        for ms_name in cpu_batch:
             idx = svc_to_idx[ms_name]
             out_path = os.path.join(args.out_dir, "original", f"service_{idx:05d}.npy")
             if not os.path.exists(out_path):
-                np.save(out_path, sig)
+                np.save(out_path, cpu_batch[ms_name])
+            if has_mem:
+                mem_out = os.path.join(args.out_dir, "mem_original", f"service_{idx:05d}.npy")
+                if not os.path.exists(mem_out):
+                    np.save(mem_out, mem_batch[ms_name])
             done_marker = os.path.join(args.out_dir, CHANNEL_DIRS[0], f"service_{idx:05d}.done")
             if os.path.exists(done_marker):
                 files_exist = all(
                     os.path.exists(os.path.join(args.out_dir, d, f"service_{idx:05d}.npy"))
-                    for d in CHANNEL_DIRS
+                    for d in all_channel_dirs
                 )
                 if files_exist:
                     continue
@@ -248,7 +323,7 @@ def main() -> None:
             worker_args.append((ms_name, idx))
 
         for ms_name in batch_services:
-            if ms_name not in signals:
+            if ms_name not in cpu_batch:
                 idx = svc_to_idx.get(ms_name, -1)
                 if idx >= 0:
                     dm = os.path.join(args.out_dir, CHANNEL_DIRS[0], f"service_{idx:05d}.done")
@@ -257,7 +332,7 @@ def main() -> None:
                     else:
                         files_exist = all(
                             os.path.exists(os.path.join(args.out_dir, d, f"service_{idx:05d}.npy"))
-                            for d in CHANNEL_DIRS
+                            for d in all_channel_dirs
                         )
                         if not files_exist:
                             os.remove(dm)
@@ -281,7 +356,8 @@ def main() -> None:
             worker_env["LOKY_MAX_CPU_COUNT"] = "1"
             worker_env["JOBLIB_NUM_THREADS"] = "1"
             proc = subprocess.Popen(
-                [sys.executable, worker_script, ms_name, str(idx), args.out_dir],
+                [sys.executable, worker_script, ms_name, str(idx), args.out_dir,
+                 args.feature_set],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 env=worker_env,
             )
