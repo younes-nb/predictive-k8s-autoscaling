@@ -10,6 +10,10 @@ Phase 2: For each input size, run SWT level=1 to get D1, then run successive VMD
 
 Both CPU and Memory utilisation are processed independently.
 
+Parallelisation follows the same subprocess-worker pattern as
+``preprocessing/sv/preprocess.py``: ``ThreadPoolExecutor`` + ``subprocess.Popen``
+with 90 % of CPU cores by default.
+
 SVMD implementation based on:
   Nazari & Sakhaei, "Successive variational mode decomposition",
   Signal Processing 174 (2020) 107610.
@@ -19,8 +23,10 @@ import argparse
 import json
 import logging
 import os
+import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -39,6 +45,10 @@ METRIC_COLUMNS = {
     "cpu": "cpu_utilization",
     "memory": "memory_utilization",
 }
+
+_WINDOW_WORKER = os.path.join(THIS_DIR, "_window_worker.py")
+_ENERGY_WORKER = os.path.join(THIS_DIR, "_energy_worker.py")
+_SVMD_WORKER = os.path.join(THIS_DIR, "_svmd_worker.py")
 
 
 # ---------------------------------------------------------------------------
@@ -68,73 +78,14 @@ def setup_logging(out_dir: str) -> None:
     logging.info("Log file: %s", log_path)
 
 
-# ---------------------------------------------------------------------------
-# SVMD - Successive Variational Mode Decomposition
-# (Nazari & Sakhaei, Signal Processing 174, 2020)
-# ---------------------------------------------------------------------------
-
-def svmd(
-    signal: np.ndarray,
-    alpha: float = 2000.0,
-    tau: float = 0.0,
-    tol: float = 1e-7,
-    max_modes: int = 20,
-    stop_power_ratio: float = 1e-6,
-    dc: int = 0,
-    init: int = 1,
-) -> np.ndarray:
-    """Successive VMD - extract modes one at a time from the residual.
-
-    Uses ``vmdpy.VMD`` with K=1 per iteration.  After each mode is extracted
-    it is subtracted from the signal and the next mode is extracted from the
-    residual.
-
-    Returns
-    -------
-    modes : ndarray, shape (n_modes, T)
-    """
-    from vmdpy import VMD
-    import warnings as _warnings
-
-    signal = np.asarray(signal, dtype=np.float64)
-    orig_len = len(signal)
-
-    if orig_len < 4:
-        return signal[np.newaxis, :]
-
-    pad = orig_len % 2
-    if pad:
-        signal = np.append(signal, signal[-1])
-
-    eps = np.finfo(np.float64).eps
-    signal_power = float(np.sum(signal ** 2))
-    residual = signal.copy()
-    modes_list: list[np.ndarray] = []
-
-    for k in range(max_modes):
-        with _warnings.catch_warnings():
-            _warnings.simplefilter("ignore")
-            try:
-                u, _, _ = VMD(residual, alpha, tau, K=1, DC=dc, init=init, tol=tol)
-            except Exception:
-                break
-
-        mode = u[0]
-
-        if pad:
-            mode = mode[:-1]
-
-        mode_power = float(np.sum(mode ** 2))
-        if k > 0 and mode_power / (signal_power + eps) < stop_power_ratio:
-            break
-
-        modes_list.append(mode)
-        residual = residual - u[0]
-
-    if not modes_list:
-        return signal[:orig_len][np.newaxis, :]
-
-    return np.stack(modes_list, axis=0)
+def _worker_env() -> dict[str, str]:
+    """Environment that pins each subprocess to a single thread."""
+    env = os.environ.copy()
+    for var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",
+                "VECLIB_MAXIMUM_THREADS", "NUMEXPR_NUM_THREADS",
+                "LOKY_MAX_CPU_COUNT", "JOBLIB_NUM_THREADS"):
+        env[var] = "1"
+    return env
 
 
 # ---------------------------------------------------------------------------
@@ -156,7 +107,6 @@ def load_all_signals(
 
     all_columns = [METRIC_COLUMNS[m] for m in metrics]
 
-    # list parquet parts
     parts = sorted(
         p for p in os.listdir(msresource_dir)
         if p.endswith(".parquet") and p.startswith("part-")
@@ -166,7 +116,6 @@ def load_all_signals(
 
     result: dict[str, dict[str, np.ndarray]] = {m: {} for m in metrics}
 
-    # Scan parts one at a time until we have enough services
     t0 = time.time()
     for part_idx, part_path in enumerate(parts):
         if max_services and all(len(result[m]) >= max_services for m in metrics):
@@ -174,7 +123,6 @@ def load_all_signals(
 
         logging.info("  Reading part %d/%d ...", part_idx + 1, len(parts))
 
-        # Get service names from this part
         svc_names = (
             pl.scan_parquet(part_path)
             .select("msname").unique()
@@ -184,7 +132,6 @@ def load_all_signals(
         )
         svc_names.sort()
 
-        # If not limiting, collect all names first across all parts
         if not max_services:
             for pp in parts[part_idx + 1:]:
                 more = (
@@ -197,11 +144,10 @@ def load_all_signals(
                 svc_names = sorted(set(svc_names) | set(more))
             logging.info("Total unique services across all parts: %d", len(svc_names))
 
-        # Filter to services we still need
         needed = [s for s in svc_names
                   if not max_services or any(len(result[m]) < max_services for m in metrics)]
         if max_services:
-            needed = needed[:max_services * 2]  # read a bit extra in case some are too short
+            needed = needed[:max_services * 2]
 
         if not needed:
             continue
@@ -246,7 +192,7 @@ def load_all_signals(
 
 
 # ---------------------------------------------------------------------------
-# Phase 0 - Window preparation + D1 caching
+# Phase 0 - Window preparation + D1 caching (parallelised)
 # ---------------------------------------------------------------------------
 
 def phase0_prepare_windows(
@@ -254,15 +200,18 @@ def phase0_prepare_windows(
     out_dir: str,
     input_sizes: list[int],
     stride: int = PREPROCESSING.STRIDE,
+    num_workers: int = 1,
 ) -> dict[int, dict[str, np.ndarray]]:
-    """Create windows for each input size, save to disk, and cache D1.
+    """Create windows for each input size using parallel subprocess workers.
+
+    1. Save raw signals to ``{out_dir}/original/``.
+    2. Dispatch ``_window_worker.py`` per service via ThreadPoolExecutor.
+    3. Wait for completion, verify outputs.
 
     Returns
     -------
     dict mapping input_size -> {service_name: ndarray(n_windows, input_size)}
     """
-    import pywt
-
     services = sorted(all_signals.keys())
     svc_to_idx = {name: i for i, name in enumerate(services)}
 
@@ -272,57 +221,90 @@ def phase0_prepare_windows(
     names_path = os.path.join(out_dir, "_service_names.npy")
     np.save(names_path, np.array(services, dtype=object))
 
-    result: dict[int, dict[str, np.ndarray]] = {sz: {} for sz in input_sizes}
+    # --- save signals to disk ---
+    orig_dir = os.path.join(out_dir, "original")
+    os.makedirs(orig_dir, exist_ok=True)
+    for svc_name in services:
+        idx = svc_to_idx[svc_name]
+        npy_path = os.path.join(orig_dir, f"service_{idx:05d}.npy")
+        if not os.path.exists(npy_path):
+            np.save(npy_path, all_signals[svc_name])
 
-    for input_size in input_sizes:
-        win_dir = os.path.join(out_dir, f"windows_{input_size}")
-        d1_dir = os.path.join(out_dir, f"d1_{input_size}")
-        os.makedirs(win_dir, exist_ok=True)
-        os.makedirs(d1_dir, exist_ok=True)
+    # --- identify which services still need processing ---
+    input_sizes_json = json.dumps(input_sizes)
+    worker_args: list[tuple[str, int]] = []
+    for svc_name in services:
+        idx = svc_to_idx[svc_name]
+        # check if ANY input size is missing windows
+        needs_work = False
+        for sz in input_sizes:
+            win_path = os.path.join(out_dir, f"windows_{sz}", f"service_{idx:05d}.npy")
+            if not os.path.exists(win_path):
+                sig = all_signals[svc_name]
+                if len(sig) >= sz:
+                    needs_work = True
+                    break
+        if needs_work:
+            worker_args.append((svc_name, idx))
 
-        done_marker = os.path.join(win_dir, ".done")
-        if os.path.exists(done_marker):
-            logging.info("  windows_%d cached — loading from disk", input_size)
-            for svc_name in services:
-                idx = svc_to_idx[svc_name]
-                wpath = os.path.join(win_dir, f"service_{idx:05d}.npy")
-                if os.path.exists(wpath):
-                    result[input_size][svc_name] = np.load(wpath)
-            continue
+    logging.info("  Phase 0: %d services to process, %d workers",
+                 len(worker_args), num_workers)
 
-        logging.info("  Creating windows for input_size=%d (stride=%d)...", input_size, stride)
+    if not worker_args:
+        logging.info("  All windows already cached.")
+    else:
         t0 = time.time()
-        count = 0
+        done_count = 0
+        failed = 0
 
-        for svc_name in services:
-            sig = all_signals[svc_name]
-            if len(sig) < input_size:
-                continue
+        def _run(svc_name: str, idx: int) -> tuple[int, str, str, float]:
+            proc = subprocess.Popen(
+                [sys.executable, _WINDOW_WORKER, svc_name, str(idx),
+                 out_dir, input_sizes_json, str(stride)],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                env=_worker_env(),
+            )
+            t_start = time.time()
+            stdout, stderr = proc.communicate()
+            return proc.returncode, stdout.decode(), stderr.decode(), time.time() - t_start
 
-            T = len(sig) - input_size + 1
-            windows = []
-            d1s = []
-            for i in range(0, T, stride):
-                w = sig[i: i + input_size].astype(np.float64)
-                windows.append(w.astype(np.float32))
+        with ThreadPoolExecutor(max_workers=num_workers) as pool:
+            fut_map = {
+                pool.submit(_run, sn, idx): (sn, idx)
+                for sn, idx in worker_args
+            }
+            for future in as_completed(fut_map):
+                svc_name, idx = fut_map[future]
+                rc, out, err, dur = future.result()
+                done_count += 1
+                if rc == 0 and "RESULT:True" in out:
+                    status = "ok"
+                else:
+                    failed += 1
+                    # extract error message
+                    status = "FAILED"
+                    for line in out.strip().split("\n"):
+                        if line.startswith("RESULT:False:ERROR:"):
+                            status = line.split(":", 2)[-1].strip()[:120]
+                            break
+                logging.info("  [%s] %d/%d  %s  (%.1fs)",
+                             svc_name, done_count, len(worker_args), status, dur)
 
-                coeffs = pywt.swt(w, "sym4", level=1, norm=True, trim_approx=True)
-                _, d1 = coeffs
-                d1s.append(d1.astype(np.float32))
+        elapsed = time.time() - t0
+        logging.info("  Phase 0 workers done: %d ok, %d failed (%.1fs)",
+                     done_count - failed, failed, elapsed)
 
-            if not windows:
-                continue
+    # --- load results into memory ---
+    result: dict[int, dict[str, np.ndarray]] = {sz: {} for sz in input_sizes}
+    for svc_name in services:
+        idx = svc_to_idx[svc_name]
+        for sz in input_sizes:
+            wpath = os.path.join(out_dir, f"windows_{sz}", f"service_{idx:05d}.npy")
+            if os.path.exists(wpath):
+                result[sz][svc_name] = np.load(wpath)
 
-            idx = svc_to_idx[svc_name]
-            np.save(os.path.join(win_dir, f"service_{idx:05d}.npy"),
-                    np.stack(windows, axis=0))
-            np.save(os.path.join(d1_dir, f"service_{idx:05d}.npy"),
-                    np.stack(d1s, axis=0))
-            result[input_size][svc_name] = np.stack(windows, axis=0)
-            count += 1
-
-        open(done_marker, "a").close()
-        logging.info("  input_size=%d: %d services (%.1fs)", input_size, count, time.time() - t0)
+    for sz in input_sizes:
+        logging.info("  Loaded %d services for input_size=%d", len(result[sz]), sz)
 
     return result
 
@@ -332,52 +314,98 @@ def phase0_prepare_windows(
 # ---------------------------------------------------------------------------
 
 def phase1_swt_energy(
-    window_data: dict[int, dict[str, np.ndarray]],
     out_dir: str,
     swt_levels: list[int],
     input_sizes: list[int],
     metric_label: str,
+    num_workers: int = 1,
 ) -> None:
-    """Compute energy of every SWT component for all (input_size, level) cases."""
-    import pywt
+    """Compute energy of every SWT component using parallel subprocess workers."""
+    svc_idx_path = os.path.join(out_dir, "_svc_to_idx.json")
+    with open(svc_idx_path) as f:
+        svc_to_idx = json.load(f)
+    services = sorted(svc_to_idx.keys())
 
+    input_sizes_json = json.dumps(input_sizes)
+    swt_levels_json = json.dumps(swt_levels)
+
+    # accumulators keyed by (input_size, level)
+    acc: dict[tuple[int, int], dict] = {}
+    for sz in input_sizes:
+        for lv in swt_levels:
+            acc[(sz, lv)] = {
+                "energies": np.zeros(lv + 1, dtype=np.float64),
+                "total": 0.0,
+                "count": 0,
+            }
+
+    logging.info("  Phase 1: processing %d services with %d workers...", len(services), num_workers)
+    t0 = time.time()
+
+    def _run(svc_name: str, idx: int) -> tuple[int, str, str, float]:
+        proc = subprocess.Popen(
+            [sys.executable, _ENERGY_WORKER, svc_name, str(idx),
+             out_dir, input_sizes_json, swt_levels_json],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env=_worker_env(),
+        )
+        t_start = time.time()
+        stdout, stderr = proc.communicate()
+        return proc.returncode, stdout.decode(), stderr.decode(), time.time() - t_start
+
+    worker_args = [(svc_name, svc_to_idx[svc_name]) for svc_name in services]
+    done_count = 0
+    failed = 0
+
+    with ThreadPoolExecutor(max_workers=num_workers) as pool:
+        fut_map = {
+            pool.submit(_run, sn, idx): (sn, idx)
+            for sn, idx in worker_args
+        }
+        for future in as_completed(fut_map):
+            svc_name, idx = fut_map[future]
+            rc, out, err, dur = future.result()
+            done_count += 1
+
+            if rc == 0 and "RESULT:True" in out:
+                for line in out.strip().split("\n"):
+                    if line.startswith("RESULT:True:"):
+                        payload = line.split(":", 2)[-1]
+                        data = json.loads(payload)
+                        for key_str, vals in data.items():
+                            parts = key_str.split("_")
+                            inp_sz, lvl = int(parts[0]), int(parts[1])
+                            k = (inp_sz, lvl)
+                            n_comp = lvl + 1
+                            acc[k]["energies"] += np.array(vals["energies"][:n_comp], dtype=np.float64)
+                            acc[k]["total"] += vals["total"]
+                            acc[k]["count"] += vals["count"]
+                        break
+            else:
+                failed += 1
+
+            if done_count % max(1, len(worker_args) // 10) == 0 or done_count == len(worker_args):
+                logging.info("    %d/%d services done (%.1fs)",
+                             done_count, len(worker_args), time.time() - t0)
+
+    elapsed = time.time() - t0
+    logging.info("  Phase 1 workers done: %d ok, %d failed (%.1fs)",
+                 done_count - failed, failed, elapsed)
+
+    # --- aggregate and print ---
     results: list[dict] = []
-
     for input_size in input_sizes:
-        svc_windows = window_data[input_size]
-        if not svc_windows:
-            logging.warning("  No windows for input_size=%d — skipping", input_size)
-            continue
-
         for level in swt_levels:
-            comp_names = [f"A{level}"] + [f"D{i}" for i in range(level, 0, -1)]
-            n_comp = level + 1
-
-            energy_sums = np.zeros(n_comp, dtype=np.float64)
-            total_energy_sum = 0.0
-            n_windows = 0
-
-            for svc_name, win_arr in svc_windows.items():
-                for wi in range(win_arr.shape[0]):
-                    window = win_arr[wi].astype(np.float64)
-                    if np.std(window) < 1e-12:
-                        continue
-
-                    coeffs = pywt.swt(window, "sym4", level=level, norm=True, trim_approx=True)
-                    assert len(coeffs) == n_comp
-
-                    energies = np.array([float(np.sum(c ** 2)) for c in coeffs])
-                    e_total = float(np.sum(energies))
-
-                    energy_sums += energies
-                    total_energy_sum += e_total
-                    n_windows += 1
-
+            k = (input_size, level)
+            data = acc[k]
+            n_windows = data["count"]
             if n_windows == 0:
                 continue
 
-            avg_energies = energy_sums / n_windows
-            avg_total = total_energy_sum / n_windows
+            comp_names = [f"A{level}"] + [f"D{i}" for i in range(level, 0, -1)]
+            n_comp = level + 1
+            avg_energies = data["energies"] / n_windows
+            avg_total = data["total"] / n_windows
 
             logging.info("    size=%d  level=%d  windows=%d  E_total=%.4f",
                          input_size, level, n_windows, avg_total)
@@ -392,7 +420,6 @@ def phase1_swt_energy(
                     "avg_energy_pct": float(pct),
                 })
 
-    # print
     print("\n" + "=" * 80)
     print(f"PHASE 1: SWT Energy Distribution [{metric_label.upper()}]")
     print("=" * 80)
@@ -413,7 +440,7 @@ def phase1_swt_energy(
 
 
 # ---------------------------------------------------------------------------
-# Phase 2 - SWT(1) + SVMD Mode Count
+# Phase 2 - SWT(1) + SVMD Mode Count (parallelised)
 # ---------------------------------------------------------------------------
 
 def phase2_svmd_mode_count(
@@ -425,8 +452,9 @@ def phase2_svmd_mode_count(
     svmd_max_modes: int,
     svmd_stop_power_ratio: float,
     metric_label: str,
+    num_workers: int = 1,
 ) -> None:
-    """Load cached D1, run SVMD on each, report mode count statistics."""
+    """Load cached D1, run SVMD via parallel workers, report mode count statistics."""
     results: list[dict] = []
 
     for input_size in input_sizes:
@@ -440,26 +468,49 @@ def phase2_svmd_mode_count(
             logging.warning("  No D1 files for input_size=%d — skipping", input_size)
             continue
 
-        logging.info("  SVMD for input_size=%d (%d services)...", input_size, len(npy_files))
+        logging.info("  SVMD for input_size=%d (%d services, %d workers)...",
+                     input_size, len(npy_files), num_workers)
         t0 = time.time()
 
+        # --- dispatch SVMD workers ---
         mode_counts: list[int] = []
 
-        for fname in npy_files:
-            d1_arr = np.load(os.path.join(d1_dir, fname)).astype(np.float64)
-            for wi in range(d1_arr.shape[0]):
-                d1 = d1_arr[wi]
-                if np.std(d1) < 1e-12:
-                    continue
-                modes = svmd(
-                    d1,
-                    alpha=svmd_alpha,
-                    tau=svmd_tau,
-                    tol=svmd_tol,
-                    max_modes=svmd_max_modes,
-                    stop_power_ratio=svmd_stop_power_ratio,
-                )
-                mode_counts.append(modes.shape[0])
+        def _run_svmd(fname: str) -> tuple[int, str, str, float]:
+            svc_idx = int(fname.replace("service_", "").replace(".npy", ""))
+            proc = subprocess.Popen(
+                [sys.executable, _SVMD_WORKER, str(svc_idx), d1_dir,
+                 str(input_size), str(svmd_alpha), str(svmd_tau),
+                 str(svmd_tol), str(svmd_max_modes), str(svmd_stop_power_ratio)],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                env=_worker_env(),
+            )
+            t_start = time.time()
+            stdout, stderr = proc.communicate()
+            return proc.returncode, stdout.decode(), stderr.decode(), time.time() - t_start
+
+        done_count = 0
+        with ThreadPoolExecutor(max_workers=num_workers) as pool:
+            fut_map = {
+                pool.submit(_run_svmd, fname): fname
+                for fname in npy_files
+            }
+            for future in as_completed(fut_map):
+                fname = fut_map[future]
+                rc, out, err, dur = future.result()
+                done_count += 1
+                if rc == 0 and "RESULT:True" in out:
+                    for line in out.strip().split("\n"):
+                        if line.startswith("RESULT:True:"):
+                            payload = line.split(":", 2)[-1]
+                            data = json.loads(payload)
+                            mode_counts.extend(data["counts"])
+                            break
+                else:
+                    logging.warning("  [%s] worker failed (exit=%d)", fname, rc)
+
+                if done_count % max(1, len(npy_files) // 10) == 0 or done_count == len(npy_files):
+                    logging.info("    %d/%d services done (%.1fs)",
+                                 done_count, len(npy_files), time.time() - t0)
 
         if not mode_counts:
             logging.warning("  No valid D1 windows for input_size=%d", input_size)
@@ -532,6 +583,10 @@ def main() -> None:
     ap.add_argument("--svmd_max_modes", type=int, default=20)
     ap.add_argument("--svmd_stop_power_ratio", type=float, default=1e-6)
 
+    # parallelism
+    ap.add_argument("--num_workers", type=float, default=0.9,
+                    help="Fraction of CPU cores for workers (default: 0.9).")
+
     # control
     ap.add_argument("--skip_window_prep", action="store_true",
                     help="Skip Phase 0 — reuse cached windows and D1.")
@@ -542,8 +597,12 @@ def main() -> None:
     args = ap.parse_args()
     np.random.default_rng(args.seed)
 
+    n_cpus = os.cpu_count() or 1
+    num_workers = max(1, int(n_cpus * args.num_workers))
+
     setup_logging(args.out_dir)
     logging.info("Args: %s", vars(args))
+    logging.info("CPUs: %d | Workers: %d", n_cpus, num_workers)
 
     # ---- Phase 0: load signals for all requested metrics ----
     all_signals_by_metric: dict[str, dict[str, np.ndarray]] = {}
@@ -576,7 +635,8 @@ def main() -> None:
                 logging.warning("  No %s signals — skipping metric.", metric)
                 continue
             window_data = phase0_prepare_windows(
-                sigs, metric_out, args.input_sizes, stride=args.stride,
+                sigs, metric_out, args.input_sizes,
+                stride=args.stride, num_workers=num_workers,
             )
         else:
             logging.info("PHASE 0: loading cached windows [%s]", metric)
@@ -604,7 +664,8 @@ def main() -> None:
         if not args.skip_phase1:
             logging.info("PHASE 1: SWT Energy [%s]", metric)
             phase1_swt_energy(
-                window_data, metric_out, args.swt_levels, args.input_sizes, metric,
+                metric_out, args.swt_levels, args.input_sizes, metric,
+                num_workers=num_workers,
             )
         else:
             logging.info("PHASE 1: skipped [%s]", metric)
@@ -620,6 +681,7 @@ def main() -> None:
                 svmd_max_modes=args.svmd_max_modes,
                 svmd_stop_power_ratio=args.svmd_stop_power_ratio,
                 metric_label=metric,
+                num_workers=num_workers,
             )
         else:
             logging.info("PHASE 2: skipped [%s]", metric)
