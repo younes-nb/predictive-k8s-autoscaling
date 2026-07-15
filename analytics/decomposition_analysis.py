@@ -320,7 +320,7 @@ def phase1_swt_energy(
     metric_label: str,
     num_workers: int = 1,
 ) -> None:
-    """Compute energy of every SWT component using parallel subprocess workers."""
+    """Compute energy and sample entropy of every SWT component using parallel workers."""
     svc_idx_path = os.path.join(out_dir, "_svc_to_idx.json")
     with open(svc_idx_path) as f:
         svc_to_idx = json.load(f)
@@ -336,6 +336,8 @@ def phase1_swt_energy(
             acc[(sz, lv)] = {
                 "energies": np.zeros(lv + 1, dtype=np.float64),
                 "total": 0.0,
+                "se_sums": np.zeros(lv + 1, dtype=np.float64),
+                "se_counts": np.zeros(lv + 1, dtype=np.int64),
                 "count": 0,
             }
 
@@ -380,6 +382,10 @@ def phase1_swt_energy(
                             acc[k]["energies"] += np.array(vals["energies"][:n_comp], dtype=np.float64)
                             acc[k]["total"] += vals["total"]
                             acc[k]["count"] += vals["count"]
+                            se_avgs = np.array(vals["se_avgs"][:n_comp], dtype=np.float64)
+                            se_cnts = np.array(vals["se_counts"][:n_comp], dtype=np.int64)
+                            acc[k]["se_sums"] += se_avgs * se_cnts
+                            acc[k]["se_counts"] += se_cnts
                         break
             else:
                 failed += 1
@@ -406,6 +412,11 @@ def phase1_swt_energy(
             n_comp = level + 1
             avg_energies = data["energies"] / n_windows
             avg_total = data["total"] / n_windows
+            avg_se = np.where(
+                data["se_counts"] > 0,
+                data["se_sums"] / data["se_counts"],
+                float("nan"),
+            )
 
             logging.info("    size=%d  level=%d  windows=%d  E_total=%.4f",
                          input_size, level, n_windows, avg_total)
@@ -418,24 +429,31 @@ def phase1_swt_energy(
                     "component": cname,
                     "avg_energy": float(avg_energies[ci]),
                     "avg_energy_pct": float(pct),
+                    "avg_se": float(avg_se[ci]),
+                    "se_valid_count": int(data["se_counts"][ci]),
                 })
 
-    print("\n" + "=" * 80)
-    print(f"PHASE 1: SWT Energy Distribution [{metric_label.upper()}]")
-    print("=" * 80)
-    header = f"{'input_size':>10}  {'level':>5}  {'component':>10}  {'avg_energy':>14}  {'avg_energy_pct':>15}"
+    print("\n" + "=" * 90)
+    print(f"PHASE 1: SWT Energy Distribution & Sample Entropy [{metric_label.upper()}]")
+    print("=" * 90)
+    header = (f"{'input_size':>10}  {'level':>5}  {'component':>10}"
+              f"  {'avg_energy':>14}  {'avg_energy_pct':>15}  {'avg_se':>10}  {'se_n':>6}")
     print(header)
     print("-" * len(header))
     for r in results:
+        se_str = f"{r['avg_se']:>10.6f}" if not np.isnan(r["avg_se"]) else f"{'nan':>10}"
         print(f"{r['input_size']:>10}  {r['level']:>5}  {r['component']:>10}"
-              f"  {r['avg_energy']:>14.6f}  {r['avg_energy_pct']:>14.2f}%")
+              f"  {r['avg_energy']:>14.6f}  {r['avg_energy_pct']:>14.2f}%"
+              f"  {se_str}  {r['se_valid_count']:>6}")
 
     csv_path = os.path.join(out_dir, f"phase1_swt_energy_{metric_label}.csv")
     with open(csv_path, "w") as f:
-        f.write("input_size,level,component,avg_energy,avg_energy_pct\n")
+        f.write("input_size,level,component,avg_energy,avg_energy_pct,avg_se,se_valid_count\n")
         for r in results:
+            se_csv = f"{r['avg_se']:.8f}" if not np.isnan(r["avg_se"]) else "nan"
             f.write(f"{r['input_size']},{r['level']},{r['component']},"
-                    f"{r['avg_energy']:.8f},{r['avg_energy_pct']:.4f}\n")
+                    f"{r['avg_energy']:.8f},{r['avg_energy_pct']:.4f},"
+                    f"{se_csv},{r['se_valid_count']}\n")
     logging.info("  Phase 1 results saved to %s", csv_path)
 
 
@@ -525,6 +543,7 @@ def phase2_svmd_mode_count(
             "p95": float(np.percentile(mc, 95)),
             "min": int(np.min(mc)),
             "max": int(np.max(mc)),
+            "_mode_counts_arr": mc,
         }
         results.append(stats)
 
@@ -543,6 +562,10 @@ def phase2_svmd_mode_count(
         print(f"{r['input_size']:>10}  {r['n_samples']:>10}  {r['avg']:>8.2f}"
               f"  {r['p50']:>6.0f}  {r['p95']:>6.0f}  {r['min']:>4}  {r['max']:>4}")
 
+    # --- mode count histogram per input_size ---
+    hist_bins = list(range(1, 10)) + [10]  # 1..9, 10+
+    hist_labels = [str(b) for b in range(1, 10)] + ["10+"]
+
     csv_path = os.path.join(out_dir, f"phase2_svmd_mode_count_{metric_label}.csv")
     with open(csv_path, "w") as f:
         f.write("input_size,n_samples,avg,p50,p95,min,max\n")
@@ -550,6 +573,29 @@ def phase2_svmd_mode_count(
             f.write(f"{r['input_size']},{r['n_samples']},{r['avg']:.4f},"
                     f"{r['p50']:.1f},{r['p95']:.1f},{r['min']},{r['max']}\n")
     logging.info("  Phase 2 results saved to %s", csv_path)
+
+    # per-input_size histograms collected during the loop above
+    hist_path = os.path.join(out_dir, f"phase2_mode_histogram_{metric_label}.csv")
+    with open(hist_path, "w") as hf:
+        hf.write("input_size,modes,count,pct\n")
+        for r in results:
+            mc = r["_mode_counts_arr"]
+            n = len(mc)
+            print(f"\n  Mode histogram [{metric_label.upper()}] — input_size={r['input_size']} (n={n})")
+            print(f"  {'modes':>6}  {'count':>6}  {'pct':>7}")
+            print(f"  {'-'*6}  {'-'*6}  {'-'*7}")
+            for bi, blabel in enumerate(hist_labels):
+                lo = hist_bins[bi]
+                hi = hist_bins[bi] if bi < len(hist_bins) - 1 else hist_bins[bi]
+                if bi < len(hist_bins) - 1:
+                    cnt = int(np.sum(mc == lo))
+                else:
+                    cnt = int(np.sum(mc >= 10))
+                pct = cnt / n * 100 if n > 0 else 0.0
+                print(f"  {blabel:>6}  {cnt:>6}  {pct:>6.1f}%")
+                hf.write(f"{r['input_size']},{blabel},{cnt},{pct:.2f}\n")
+
+    logging.info("  Phase 2 histogram saved to %s", hist_path)
 
 
 # ---------------------------------------------------------------------------
