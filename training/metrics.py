@@ -1,6 +1,5 @@
 import torch
 import numpy as np
-from scipy.stats import pearsonr
 
 
 def find_max_inference_batch_size(
@@ -127,9 +126,6 @@ def compute_metrics(
 
     naive = _compute_one_step(y_last, y_true[:, -1], y_last)
 
-    corr_0, _ = pearsonr(y_true[:, -1], y_pred[:, -1])
-    corr_1, _ = pearsonr(y_last, y_pred[:, -1])
-
     header = f"=== Evaluation{f': {target_name}' if target_name else ''} ==="
     log_info(f"\n{header}")
     log_info("")
@@ -157,12 +153,6 @@ def compute_metrics(
 
         results[name] = {"last_step": ls, "avg_steps": av, "naive": nv, "delta_pct": d}
 
-    log_info("")
-    log_info(f"{'Correlation (Lag 0)':<26s} {corr_0:>14.8f}")
-    log_info(f"{'Correlation (Lag 1)':<26s} {corr_1:>14.8f}")
     log_info("-" * 82)
-
-    results["Correlation (Lag 0)"] = corr_0
-    results["Correlation (Lag 1)"] = corr_1
 
     return results
