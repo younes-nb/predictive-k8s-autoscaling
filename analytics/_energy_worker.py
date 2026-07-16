@@ -18,35 +18,15 @@ def _log(msg: str) -> None:
     print(msg, file=sys.stderr, flush=True)
 
 
-def _sample_entropy(x: np.ndarray, m: int = 2, r_frac: float = 0.2,
-                    max_samples: int = 1000) -> float:
+def _dispersion_entropy(x: np.ndarray, m: int = 2, c: int = 6) -> float:
     x = np.asarray(x, dtype=np.float64).ravel()
-    if len(x) > max_samples:
-        rng = np.random.default_rng(42)
-        idx = np.sort(rng.choice(len(x), size=max_samples, replace=False))
-        x = x[idx]
-    N = len(x)
-    if N < 2 * (m + 1) + 2:
+    if len(x) < 10:
         return float("nan")
-    r = r_frac * float(np.std(x, ddof=1))
-    if r == 0.0:
+    if float(np.std(x)) == 0.0:
         return float("nan")
-
-    def _count_matches(template_len: int) -> int:
-        templates = np.lib.stride_tricks.sliding_window_view(x, template_len)
-        n_templates = len(templates)
-        count = 0
-        for i in range(n_templates):
-            dists = np.max(np.abs(templates - templates[i]), axis=1)
-            dists[i] = np.inf
-            count += int(np.sum(dists < r))
-        return count
-
-    Bm = _count_matches(m)
-    Am = _count_matches(m + 1)
-    if Bm == 0 or Am == 0:
-        return float("nan")
-    return float(-np.log(Am / Bm))
+    from EntropyHub import DispEn
+    de, _ = DispEn(x, m=m, tau=1, c=c, Typex="ncdf", Norm=True)
+    return float(de)
 
 
 def _adf(x: np.ndarray) -> float:
@@ -100,8 +80,8 @@ def main() -> None:
                 result[key] = {
                     "energies": np.zeros(n_comp, dtype=np.float64),
                     "total": 0.0,
-                    "se_sums": np.zeros(n_comp, dtype=np.float64),
-                    "se_counts": np.zeros(n_comp, dtype=np.int64),
+                    "de_sums": np.zeros(n_comp, dtype=np.float64),
+                    "de_counts": np.zeros(n_comp, dtype=np.int64),
                     "adf_sums": np.zeros(n_comp, dtype=np.float64),
                     "adf_counts": np.zeros(n_comp, dtype=np.int64),
                     "kpss_sums": np.zeros(n_comp, dtype=np.float64),
@@ -120,10 +100,10 @@ def main() -> None:
                 result[key]["count"] += 1
 
                 for ci, c in enumerate(comps):
-                    se_val = _sample_entropy(c)
-                    if not np.isnan(se_val):
-                        result[key]["se_sums"][ci] += se_val
-                        result[key]["se_counts"][ci] += 1
+                    de_val = _dispersion_entropy(c)
+                    if not np.isnan(de_val):
+                        result[key]["de_sums"][ci] += de_val
+                        result[key]["de_counts"][ci] += 1
 
                     adf_val = _adf(c)
                     if not np.isnan(adf_val):
@@ -139,9 +119,9 @@ def main() -> None:
     for (inp_sz, lvl), data in result.items():
         key = f"{inp_sz}_{lvl}"
         n_comp = lvl + 1
-        se_avgs = np.where(
-            data["se_counts"] > 0,
-            data["se_sums"] / data["se_counts"],
+        de_avgs = np.where(
+            data["de_counts"] > 0,
+            data["de_sums"] / data["de_counts"],
             float("nan"),
         )
         adf_avgs = np.where(
@@ -157,8 +137,8 @@ def main() -> None:
         out_json[key] = {
             "energies": data["energies"].tolist(),
             "total": data["total"],
-            "se_avgs": se_avgs.tolist(),
-            "se_counts": data["se_counts"].tolist(),
+            "de_avgs": de_avgs.tolist(),
+            "de_counts": data["de_counts"].tolist(),
             "adf_avgs": adf_avgs.tolist(),
             "adf_counts": data["adf_counts"].tolist(),
             "kpss_avgs": kpss_avgs.tolist(),
