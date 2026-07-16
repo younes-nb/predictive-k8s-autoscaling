@@ -644,6 +644,51 @@ def phase3_svmd_mode_count(
     logging.info("  Phase 3 histogram saved to %s", hist_path)
 
 
+def _cache_phase0_ready(metric_out: str, input_sizes: list[int]) -> bool:
+    svc_idx_path = os.path.join(metric_out, "_svc_to_idx.json")
+    if not os.path.exists(svc_idx_path):
+        return False
+    with open(svc_idx_path) as f:
+        svc_to_idx = json.load(f)
+    services = sorted(svc_to_idx.keys())
+    if not services:
+        return False
+    for sz in input_sizes:
+        win_dir = os.path.join(metric_out, f"windows_{sz}")
+        if not os.path.isdir(win_dir):
+            return False
+        svc_map = [s for s in services if os.path.exists(
+            os.path.join(win_dir, f"service_{svc_to_idx[s]:05d}.npy")
+        )]
+        if not svc_map:
+            return False
+    return True
+
+
+def _cache_phase1_ready(metric_out: str, input_sizes: list[int],
+                        swt_levels: list[int]) -> bool:
+    for sz in input_sizes:
+        for lv in swt_levels:
+            d = os.path.join(metric_out, f"swt_{sz}_lv{lv}")
+            if not os.path.isdir(d):
+                return False
+            if not os.listdir(d):
+                return False
+    return True
+
+
+def _cache_phase2_ready(metric_out: str, metric: str) -> bool:
+    return os.path.isfile(
+        os.path.join(metric_out, f"phase2_swt_metrics_{metric}.csv")
+    )
+
+
+def _cache_phase3_ready(metric_out: str, metric: str) -> bool:
+    return os.path.isfile(
+        os.path.join(metric_out, f"phase3_svmd_mode_count_{metric}.csv")
+    )
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(
         description="SWT energy analysis & SVMD mode count across input sizes.",
@@ -677,11 +722,13 @@ def main() -> None:
                     help="Fraction of CPU cores for workers (default: 0.9).")
 
     ap.add_argument("--skip_window_prep", action="store_true",
-                    help="Skip Phase 0 — reuse cached windows.")
+                    help="Skip Phase 0 if cached — otherwise run it.")
     ap.add_argument("--skip_swt_decompose", action="store_true",
-                    help="Skip Phase 1 — reuse cached SWT components.")
-    ap.add_argument("--skip_phase2", action="store_true")
-    ap.add_argument("--skip_phase3", action="store_true")
+                    help="Skip Phase 1 if cached — otherwise run it.")
+    ap.add_argument("--skip_phase2", action="store_true",
+                    help="Skip Phase 2 if cached — otherwise run it.")
+    ap.add_argument("--skip_phase3", action="store_true",
+                    help="Skip Phase 3 if cached — otherwise run it.")
     ap.add_argument("--seed", type=int, default=42)
 
     args = ap.parse_args()
@@ -695,16 +742,6 @@ def main() -> None:
     logging.info("CPUs: %d | Workers: %d", n_cpus, num_workers)
 
     all_signals_by_metric: dict[str, dict[str, np.ndarray]] = {}
-    if not args.skip_window_prep:
-        logging.info("=" * 60)
-        logging.info("PHASE 0: Loading signals")
-        logging.info("=" * 60)
-        all_signals_by_metric = load_all_signals(
-            args.msresource_dir, args.max_services, metrics=args.metrics,
-        )
-        for m in args.metrics:
-            if not all_signals_by_metric.get(m):
-                logging.error("No %s signals loaded.", m)
 
     for metric in args.metrics:
         metric_out = os.path.join(args.out_dir, metric)
@@ -715,7 +752,22 @@ def main() -> None:
         logging.info("# METRIC: %s", metric.upper())
         logging.info("#" * 60)
 
-        if not args.skip_window_prep:
+        # Phase 0: windows
+        need_phase0 = (
+            not args.skip_window_prep
+            or not _cache_phase0_ready(metric_out, args.input_sizes)
+        )
+        if need_phase0:
+            if not all_signals_by_metric:
+                logging.info("=" * 60)
+                logging.info("PHASE 0: Loading signals")
+                logging.info("=" * 60)
+                all_signals_by_metric = load_all_signals(
+                    args.msresource_dir, args.max_services, metrics=args.metrics,
+                )
+                for m in args.metrics:
+                    if not all_signals_by_metric.get(m):
+                        logging.error("No %s signals loaded.", m)
             logging.info("PHASE 0: Window preparation [%s]", metric)
             sigs = all_signals_by_metric.get(metric, {})
             if not sigs:
@@ -728,11 +780,7 @@ def main() -> None:
         else:
             logging.info("PHASE 0: loading cached windows [%s]", metric)
             window_data = {}
-            svc_idx_path = os.path.join(metric_out, "_svc_to_idx.json")
-            if not os.path.exists(svc_idx_path):
-                logging.warning("  No cached index for %s — skipping.", metric)
-                continue
-            with open(svc_idx_path) as f:
+            with open(os.path.join(metric_out, "_svc_to_idx.json")) as f:
                 svc_to_idx = json.load(f)
             services = sorted(svc_to_idx.keys())
             for sz in args.input_sizes:
@@ -747,25 +795,40 @@ def main() -> None:
                 window_data[sz] = svc_map
                 logging.info("  Loaded %d services for input_size=%d", len(svc_map), sz)
 
-        if not args.skip_swt_decompose:
+        # Phase 1: SWT decomposition
+        need_phase1 = (
+            not args.skip_swt_decompose
+            or not _cache_phase1_ready(metric_out, args.input_sizes, args.swt_levels)
+        )
+        if need_phase1:
             logging.info("PHASE 1: SWT decomposition [%s]", metric)
             phase1_swt_decompose(
                 metric_out, args.swt_levels, args.input_sizes,
                 num_workers=num_workers,
             )
         else:
-            logging.info("PHASE 1: skipped [%s]", metric)
+            logging.info("PHASE 1: cached [%s]", metric)
 
-        if not args.skip_phase2:
+        # Phase 2: SWT metrics
+        need_phase2 = (
+            not args.skip_phase2
+            or not _cache_phase2_ready(metric_out, metric)
+        )
+        if need_phase2:
             logging.info("PHASE 2: SWT Metrics [%s]", metric)
             phase2_swt_metrics(
                 metric_out, args.swt_levels, args.input_sizes, metric,
                 num_workers=num_workers,
             )
         else:
-            logging.info("PHASE 2: skipped [%s]", metric)
+            logging.info("PHASE 2: cached [%s]", metric)
 
-        if not args.skip_phase3:
+        # Phase 3: SVMD mode count
+        need_phase3 = (
+            not args.skip_phase3
+            or not _cache_phase3_ready(metric_out, metric)
+        )
+        if need_phase3:
             logging.info("PHASE 3: SVMD Mode Count [%s]", metric)
             phase3_svmd_mode_count(
                 metric_out, args.input_sizes,
@@ -779,7 +842,7 @@ def main() -> None:
                 num_workers=num_workers,
             )
         else:
-            logging.info("PHASE 3: skipped [%s]", metric)
+            logging.info("PHASE 3: cached [%s]", metric)
 
     logging.info("Done.")
 
