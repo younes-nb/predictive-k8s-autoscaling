@@ -1,12 +1,10 @@
 """
-Decomposition Analysis: SWT Energy Distribution & SVMD Mode Count
+Decomposition Analysis: SWT Energy, Sample Entropy, ADF, KPSS & SVMD Mode Count
 
-Phase 0: Create windows for each input size (16, 32, 64, 128) and cache to disk.
-         Also cache D1 (SWT level=1) for use in Phase 2.
-Phase 1: For 16 cases (4 input sizes x 4 SWT levels), compute energy of every
-         component and average across all samples.
-Phase 2: For each input size, run SWT level=1 to get D1, then run successive VMD
-         (SVMD) on D1. Report mode count statistics (AVG, P50, P95, Min, Max).
+Phase 0: Create windows for each input size and cache to disk.
+Phase 1: Compute SWT decomposition for all (input_size, level) combos, cache components.
+Phase 2: For cached SWT components, compute energy, sample entropy, ADF and KPSS p-values.
+Phase 3: For each input size, load cached D1 and run successive VMD (SVMD). Report mode count.
 
 Both CPU and Memory utilisation are processed independently.
 
@@ -47,6 +45,7 @@ METRIC_COLUMNS = {
 }
 
 _WINDOW_WORKER = os.path.join(THIS_DIR, "_window_worker.py")
+_SWT_WORKER = os.path.join(THIS_DIR, "_swt_worker.py")
 _ENERGY_WORKER = os.path.join(THIS_DIR, "_energy_worker.py")
 _SVMD_WORKER = os.path.join(THIS_DIR, "_svmd_worker.py")
 
@@ -167,7 +166,7 @@ def load_all_signals(
             for m in metrics:
                 col = METRIC_COLUMNS[m]
                 sig = group[col].to_numpy().astype(np.float32)
-                if len(sig) < 16:
+                if len(sig) < 32:
                     all_ok = False
                     break
                 result[m][ms_name] = sig
@@ -192,7 +191,7 @@ def load_all_signals(
 
 
 # ---------------------------------------------------------------------------
-# Phase 0 - Window preparation + D1 caching (parallelised)
+# Phase 0 - Window preparation (parallelised)
 # ---------------------------------------------------------------------------
 
 def phase0_prepare_windows(
@@ -235,7 +234,6 @@ def phase0_prepare_windows(
     worker_args: list[tuple[str, int]] = []
     for svc_name in services:
         idx = svc_to_idx[svc_name]
-        # check if ANY input size is missing windows
         needs_work = False
         for sz in input_sizes:
             win_path = os.path.join(out_dir, f"windows_{sz}", f"service_{idx:05d}.npy")
@@ -281,7 +279,6 @@ def phase0_prepare_windows(
                     status = "ok"
                 else:
                     failed += 1
-                    # extract error message
                     status = "FAILED"
                     for line in out.strip().split("\n"):
                         if line.startswith("RESULT:False:ERROR:"):
@@ -310,17 +307,108 @@ def phase0_prepare_windows(
 
 
 # ---------------------------------------------------------------------------
-# Phase 1 - SWT Energy Analysis
+# Phase 1 - SWT decomposition (parallelised)
 # ---------------------------------------------------------------------------
 
-def phase1_swt_energy(
+def phase1_swt_decompose(
+    out_dir: str,
+    swt_levels: list[int],
+    input_sizes: list[int],
+    num_workers: int = 1,
+) -> None:
+    """Compute SWT components for all (input_size, level) combos and cache to disk.
+
+    Output: ``{out_dir}/swt_{input_size}_lv{level}/service_{idx:05d}.npy``
+    with shape ``(n_windows, level+1, input_size)``.
+    """
+    svc_idx_path = os.path.join(out_dir, "_svc_to_idx.json")
+    with open(svc_idx_path) as f:
+        svc_to_idx = json.load(f)
+    services = sorted(svc_to_idx.keys())
+
+    input_sizes_json = json.dumps(input_sizes)
+    swt_levels_json = json.dumps(swt_levels)
+
+    # --- identify services that need processing ---
+    worker_args: list[tuple[str, int]] = []
+    for svc_name in services:
+        idx = svc_to_idx[svc_name]
+        needs_work = False
+        for sz in input_sizes:
+            for lv in swt_levels:
+                swt_path = os.path.join(out_dir, f"swt_{sz}_lv{lv}",
+                                        f"service_{idx:05d}.npy")
+                if not os.path.exists(swt_path):
+                    win_path = os.path.join(out_dir, f"windows_{sz}",
+                                            f"service_{idx:05d}.npy")
+                    if os.path.exists(win_path):
+                        needs_work = True
+                        break
+            if needs_work:
+                break
+        if needs_work:
+            worker_args.append((svc_name, idx))
+
+    logging.info("  Phase 1: %d services to decompose, %d workers",
+                 len(worker_args), num_workers)
+
+    if not worker_args:
+        logging.info("  All SWT components already cached.")
+        return
+
+    t0 = time.time()
+    done_count = 0
+    failed = 0
+
+    def _run(svc_name: str, idx: int) -> tuple[int, str, str, float]:
+        proc = subprocess.Popen(
+            [sys.executable, _SWT_WORKER, svc_name, str(idx),
+             out_dir, input_sizes_json, swt_levels_json],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env=_worker_env(),
+        )
+        t_start = time.time()
+        stdout, stderr = proc.communicate()
+        return proc.returncode, stdout.decode(), stderr.decode(), time.time() - t_start
+
+    with ThreadPoolExecutor(max_workers=num_workers) as pool:
+        fut_map = {
+            pool.submit(_run, sn, idx): (sn, idx)
+            for sn, idx in worker_args
+        }
+        for future in as_completed(fut_map):
+            svc_name, idx = fut_map[future]
+            rc, out, err, dur = future.result()
+            done_count += 1
+            if rc == 0 and "RESULT:True" in out:
+                status = "ok"
+            else:
+                failed += 1
+                status = "FAILED"
+                for line in out.strip().split("\n"):
+                    if line.startswith("RESULT:False:ERROR:"):
+                        status = line.split(":", 2)[-1].strip()[:120]
+                        break
+            logging.info("  [%s] %d/%d  %s  (%.1fs)",
+                         svc_name, done_count, len(worker_args), status, dur)
+
+    elapsed = time.time() - t0
+    logging.info("  Phase 1 workers done: %d ok, %d failed (%.1fs)",
+                 done_count - failed, failed, elapsed)
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 - SWT Energy, Sample Entropy, ADF, KPSS
+# ---------------------------------------------------------------------------
+
+def phase2_swt_metrics(
     out_dir: str,
     swt_levels: list[int],
     input_sizes: list[int],
     metric_label: str,
     num_workers: int = 1,
 ) -> None:
-    """Compute energy and sample entropy of every SWT component using parallel workers."""
+    """Compute energy, SE, ADF p-value and KPSS p-value for cached SWT components."""
     svc_idx_path = os.path.join(out_dir, "_svc_to_idx.json")
     with open(svc_idx_path) as f:
         svc_to_idx = json.load(f)
@@ -338,10 +426,15 @@ def phase1_swt_energy(
                 "total": 0.0,
                 "se_sums": np.zeros(lv + 1, dtype=np.float64),
                 "se_counts": np.zeros(lv + 1, dtype=np.int64),
+                "adf_sums": np.zeros(lv + 1, dtype=np.float64),
+                "adf_counts": np.zeros(lv + 1, dtype=np.int64),
+                "kpss_sums": np.zeros(lv + 1, dtype=np.float64),
+                "kpss_counts": np.zeros(lv + 1, dtype=np.int64),
                 "count": 0,
             }
 
-    logging.info("  Phase 1: processing %d services with %d workers...", len(services), num_workers)
+    logging.info("  Phase 2: processing %d services with %d workers...",
+                 len(services), num_workers)
     t0 = time.time()
 
     def _run(svc_name: str, idx: int) -> tuple[int, str, str, float]:
@@ -386,6 +479,14 @@ def phase1_swt_energy(
                             se_cnts = np.array(vals["se_counts"][:n_comp], dtype=np.int64)
                             acc[k]["se_sums"] += se_avgs * se_cnts
                             acc[k]["se_counts"] += se_cnts
+                            adf_avgs = np.array(vals["adf_avgs"][:n_comp], dtype=np.float64)
+                            adf_cnts = np.array(vals["adf_counts"][:n_comp], dtype=np.int64)
+                            acc[k]["adf_sums"] += adf_avgs * adf_cnts
+                            acc[k]["adf_counts"] += adf_cnts
+                            kpss_avgs = np.array(vals["kpss_avgs"][:n_comp], dtype=np.float64)
+                            kpss_cnts = np.array(vals["kpss_counts"][:n_comp], dtype=np.int64)
+                            acc[k]["kpss_sums"] += kpss_avgs * kpss_cnts
+                            acc[k]["kpss_counts"] += kpss_cnts
                         break
             else:
                 failed += 1
@@ -395,7 +496,7 @@ def phase1_swt_energy(
                              done_count, len(worker_args), time.time() - t0)
 
     elapsed = time.time() - t0
-    logging.info("  Phase 1 workers done: %d ok, %d failed (%.1fs)",
+    logging.info("  Phase 2 workers done: %d ok, %d failed (%.1fs)",
                  done_count - failed, failed, elapsed)
 
     # --- aggregate and print ---
@@ -417,6 +518,16 @@ def phase1_swt_energy(
                 data["se_sums"] / data["se_counts"],
                 float("nan"),
             )
+            avg_adf = np.where(
+                data["adf_counts"] > 0,
+                data["adf_sums"] / data["adf_counts"],
+                float("nan"),
+            )
+            avg_kpss = np.where(
+                data["kpss_counts"] > 0,
+                data["kpss_sums"] / data["kpss_counts"],
+                float("nan"),
+            )
 
             logging.info("    size=%d  level=%d  windows=%d  E_total=%.4f",
                          input_size, level, n_windows, avg_total)
@@ -431,57 +542,69 @@ def phase1_swt_energy(
                     "avg_energy_pct": float(pct),
                     "avg_se": float(avg_se[ci]),
                     "se_valid_count": int(data["se_counts"][ci]),
+                    "avg_adf_pval": float(avg_adf[ci]),
+                    "avg_kpss_pval": float(avg_kpss[ci]),
                 })
 
-    print("\n" + "=" * 90)
-    print(f"PHASE 1: SWT Energy Distribution & Sample Entropy [{metric_label.upper()}]")
-    print("=" * 90)
+    print("\n" + "=" * 110)
+    print(f"PHASE 2: SWT Energy, Sample Entropy, ADF & KPSS [{metric_label.upper()}]")
+    print("=" * 110)
     header = (f"{'input_size':>10}  {'level':>5}  {'component':>10}"
-              f"  {'avg_energy':>14}  {'avg_energy_pct':>15}  {'avg_se':>10}  {'se_n':>6}")
+              f"  {'avg_energy':>14}  {'avg_energy_pct':>15}"
+              f"  {'avg_se':>10}  {'se_n':>6}"
+              f"  {'adf_pval':>10}  {'kpss_pval':>10}")
     print(header)
     print("-" * len(header))
     for r in results:
         se_str = f"{r['avg_se']:>10.6f}" if not np.isnan(r["avg_se"]) else f"{'nan':>10}"
+        adf_str = f"{r['avg_adf_pval']:>10.6f}" if not np.isnan(r["avg_adf_pval"]) else f"{'nan':>10}"
+        kpss_str = f"{r['avg_kpss_pval']:>10.6f}" if not np.isnan(r["avg_kpss_pval"]) else f"{'nan':>10}"
         print(f"{r['input_size']:>10}  {r['level']:>5}  {r['component']:>10}"
               f"  {r['avg_energy']:>14.6f}  {r['avg_energy_pct']:>14.2f}%"
-              f"  {se_str}  {r['se_valid_count']:>6}")
+              f"  {se_str}  {r['se_valid_count']:>6}"
+              f"  {adf_str}  {kpss_str}")
 
-    csv_path = os.path.join(out_dir, f"phase1_swt_energy_{metric_label}.csv")
+    csv_path = os.path.join(out_dir, f"phase2_swt_metrics_{metric_label}.csv")
     with open(csv_path, "w") as f:
-        f.write("input_size,level,component,avg_energy,avg_energy_pct,avg_se,se_valid_count\n")
+        f.write("input_size,level,component,avg_energy,avg_energy_pct,"
+                "avg_se,se_valid_count,avg_adf_pval,avg_kpss_pval\n")
         for r in results:
             se_csv = f"{r['avg_se']:.8f}" if not np.isnan(r["avg_se"]) else "nan"
+            adf_csv = f"{r['avg_adf_pval']:.8f}" if not np.isnan(r["avg_adf_pval"]) else "nan"
+            kpss_csv = f"{r['avg_kpss_pval']:.8f}" if not np.isnan(r["avg_kpss_pval"]) else "nan"
             f.write(f"{r['input_size']},{r['level']},{r['component']},"
                     f"{r['avg_energy']:.8f},{r['avg_energy_pct']:.4f},"
-                    f"{se_csv},{r['se_valid_count']}\n")
-    logging.info("  Phase 1 results saved to %s", csv_path)
+                    f"{se_csv},{r['se_valid_count']},"
+                    f"{adf_csv},{kpss_csv}\n")
+    logging.info("  Phase 2 results saved to %s", csv_path)
 
 
 # ---------------------------------------------------------------------------
-# Phase 2 - SWT(1) + SVMD Mode Count (parallelised)
+# Phase 3 - SWT(1) + SVMD Mode Count (parallelised)
 # ---------------------------------------------------------------------------
 
-def phase2_svmd_mode_count(
+def phase3_svmd_mode_count(
     out_dir: str,
     input_sizes: list[int],
-    svmd_alpha: float,
+    svmd_max_alpha: float,
     svmd_tau: float,
     svmd_tol: float,
+    svmd_stop_criteria: int,
+    svmd_init_omega: int,
     svmd_max_modes: int,
-    svmd_stop_power_ratio: float,
     metric_label: str,
     num_workers: int = 1,
 ) -> None:
-    """Load cached D1, run SVMD via parallel workers, report mode count statistics."""
+    """Load cached D1 from Phase 1, run SVMD via parallel workers, report mode count statistics."""
     results: list[dict] = []
 
     for input_size in input_sizes:
-        d1_dir = os.path.join(out_dir, f"d1_{input_size}")
-        if not os.path.isdir(d1_dir):
-            logging.warning("  D1 directory not found for input_size=%d — skipping", input_size)
+        swt_d1_dir = os.path.join(out_dir, f"swt_{input_size}_lv1")
+        if not os.path.isdir(swt_d1_dir):
+            logging.warning("  SWT D1 directory not found for input_size=%d — skipping", input_size)
             continue
 
-        npy_files = sorted(f for f in os.listdir(d1_dir) if f.endswith(".npy"))
+        npy_files = sorted(f for f in os.listdir(swt_d1_dir) if f.endswith(".npy"))
         if not npy_files:
             logging.warning("  No D1 files for input_size=%d — skipping", input_size)
             continue
@@ -496,9 +619,10 @@ def phase2_svmd_mode_count(
         def _run_svmd(fname: str) -> tuple[int, str, str, float]:
             svc_idx = int(fname.replace("service_", "").replace(".npy", ""))
             proc = subprocess.Popen(
-                [sys.executable, _SVMD_WORKER, str(svc_idx), d1_dir,
-                 str(input_size), str(svmd_alpha), str(svmd_tau),
-                 str(svmd_tol), str(svmd_max_modes), str(svmd_stop_power_ratio)],
+                [sys.executable, _SVMD_WORKER, str(svc_idx), out_dir,
+                 str(input_size), str(svmd_max_alpha), str(svmd_tau),
+                 str(svmd_tol), str(svmd_stop_criteria), str(svmd_init_omega),
+                 str(svmd_max_modes)],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 env=_worker_env(),
             )
@@ -553,7 +677,7 @@ def phase2_svmd_mode_count(
                      time.time() - t0)
 
     print("\n" + "=" * 80)
-    print(f"PHASE 2: SVMD Mode Count [{metric_label.upper()}] (SWT level=1 -> D1 -> SVMD)")
+    print(f"PHASE 3: SVMD Mode Count [{metric_label.upper()}] (SWT level=1 -> D1 -> SVMD)")
     print("=" * 80)
     header = f"{'input_size':>10}  {'n_samples':>10}  {'avg':>8}  {'p50':>6}  {'p95':>6}  {'min':>4}  {'max':>4}"
     print(header)
@@ -566,16 +690,15 @@ def phase2_svmd_mode_count(
     hist_bins = list(range(1, 10)) + [10]  # 1..9, 10+
     hist_labels = [str(b) for b in range(1, 10)] + ["10+"]
 
-    csv_path = os.path.join(out_dir, f"phase2_svmd_mode_count_{metric_label}.csv")
+    csv_path = os.path.join(out_dir, f"phase3_svmd_mode_count_{metric_label}.csv")
     with open(csv_path, "w") as f:
         f.write("input_size,n_samples,avg,p50,p95,min,max\n")
         for r in results:
             f.write(f"{r['input_size']},{r['n_samples']},{r['avg']:.4f},"
                     f"{r['p50']:.1f},{r['p95']:.1f},{r['min']},{r['max']}\n")
-    logging.info("  Phase 2 results saved to %s", csv_path)
+    logging.info("  Phase 3 results saved to %s", csv_path)
 
-    # per-input_size histograms collected during the loop above
-    hist_path = os.path.join(out_dir, f"phase2_mode_histogram_{metric_label}.csv")
+    hist_path = os.path.join(out_dir, f"phase3_mode_histogram_{metric_label}.csv")
     with open(hist_path, "w") as hf:
         hf.write("input_size,modes,count,pct\n")
         for r in results:
@@ -585,17 +708,15 @@ def phase2_svmd_mode_count(
             print(f"  {'modes':>6}  {'count':>6}  {'pct':>7}")
             print(f"  {'-'*6}  {'-'*6}  {'-'*7}")
             for bi, blabel in enumerate(hist_labels):
-                lo = hist_bins[bi]
-                hi = hist_bins[bi] if bi < len(hist_bins) - 1 else hist_bins[bi]
                 if bi < len(hist_bins) - 1:
-                    cnt = int(np.sum(mc == lo))
+                    cnt = int(np.sum(mc == hist_bins[bi]))
                 else:
                     cnt = int(np.sum(mc >= 10))
                 pct = cnt / n * 100 if n > 0 else 0.0
                 print(f"  {blabel:>6}  {cnt:>6}  {pct:>6.1f}%")
                 hf.write(f"{r['input_size']},{blabel},{cnt},{pct:.2f}\n")
 
-    logging.info("  Phase 2 histogram saved to %s", hist_path)
+    logging.info("  Phase 3 histogram saved to %s", hist_path)
 
 
 # ---------------------------------------------------------------------------
@@ -617,17 +738,22 @@ def main() -> None:
                     help="Metrics to analyse (default: cpu memory).")
 
     # analysis grid
-    ap.add_argument("--input_sizes", type=int, nargs="+", default=[16, 32, 64, 128])
+    ap.add_argument("--input_sizes", type=int, nargs="+", default=[32, 64, 128])
     ap.add_argument("--swt_levels", type=int, nargs="+", default=[1, 2, 3, 4])
     ap.add_argument("--stride", type=int, default=PREPROCESSING.STRIDE,
                     help=f"Window stride (default: {PREPROCESSING.STRIDE}).")
 
     # SVMD parameters
-    ap.add_argument("--svmd_alpha", type=float, default=2000.0)
+    ap.add_argument("--svmd_max_alpha", type=float, default=100.0,
+                    help="Maximum alpha for SVMD (alpha escalates from 10 to this).")
     ap.add_argument("--svmd_tau", type=float, default=0.0)
     ap.add_argument("--svmd_tol", type=float, default=1e-7)
-    ap.add_argument("--svmd_max_modes", type=int, default=20)
-    ap.add_argument("--svmd_stop_power_ratio", type=float, default=1e-6)
+    ap.add_argument("--svmd_stop_criteria", type=int, default=4, choices=[1, 2, 3, 4],
+                    help="Stopping criteria: 1=noise, 2=exact reconstruction, 3=BIC, 4=power-of-last-mode.")
+    ap.add_argument("--svmd_init_omega", type=int, default=0, choices=[0, 1],
+                    help="Center-freq init: 0=from zero, 1=random.")
+    ap.add_argument("--svmd_max_modes", type=int, default=10,
+                    help="Hard cap on number of SVMD modes per window (default 10).")
 
     # parallelism
     ap.add_argument("--num_workers", type=float, default=0.9,
@@ -635,9 +761,11 @@ def main() -> None:
 
     # control
     ap.add_argument("--skip_window_prep", action="store_true",
-                    help="Skip Phase 0 — reuse cached windows and D1.")
-    ap.add_argument("--skip_phase1", action="store_true")
+                    help="Skip Phase 0 — reuse cached windows.")
+    ap.add_argument("--skip_swt_decompose", action="store_true",
+                    help="Skip Phase 1 — reuse cached SWT components.")
     ap.add_argument("--skip_phase2", action="store_true")
+    ap.add_argument("--skip_phase3", action="store_true")
     ap.add_argument("--seed", type=int, default=42)
 
     args = ap.parse_args()
@@ -707,10 +835,10 @@ def main() -> None:
                 logging.info("  Loaded %d services for input_size=%d", len(svc_map), sz)
 
         # Phase 1
-        if not args.skip_phase1:
-            logging.info("PHASE 1: SWT Energy [%s]", metric)
-            phase1_swt_energy(
-                metric_out, args.swt_levels, args.input_sizes, metric,
+        if not args.skip_swt_decompose:
+            logging.info("PHASE 1: SWT decomposition [%s]", metric)
+            phase1_swt_decompose(
+                metric_out, args.swt_levels, args.input_sizes,
                 num_workers=num_workers,
             )
         else:
@@ -718,19 +846,30 @@ def main() -> None:
 
         # Phase 2
         if not args.skip_phase2:
-            logging.info("PHASE 2: SVMD Mode Count [%s]", metric)
-            phase2_svmd_mode_count(
-                metric_out, args.input_sizes,
-                svmd_alpha=args.svmd_alpha,
-                svmd_tau=args.svmd_tau,
-                svmd_tol=args.svmd_tol,
-                svmd_max_modes=args.svmd_max_modes,
-                svmd_stop_power_ratio=args.svmd_stop_power_ratio,
-                metric_label=metric,
+            logging.info("PHASE 2: SWT Metrics [%s]", metric)
+            phase2_swt_metrics(
+                metric_out, args.swt_levels, args.input_sizes, metric,
                 num_workers=num_workers,
             )
         else:
             logging.info("PHASE 2: skipped [%s]", metric)
+
+        # Phase 3
+        if not args.skip_phase3:
+            logging.info("PHASE 3: SVMD Mode Count [%s]", metric)
+            phase3_svmd_mode_count(
+                metric_out, args.input_sizes,
+                svmd_max_alpha=args.svmd_max_alpha,
+                svmd_tau=args.svmd_tau,
+                svmd_tol=args.svmd_tol,
+                svmd_stop_criteria=args.svmd_stop_criteria,
+                svmd_init_omega=args.svmd_init_omega,
+                svmd_max_modes=args.svmd_max_modes,
+                metric_label=metric,
+                num_workers=num_workers,
+            )
+        else:
+            logging.info("PHASE 3: skipped [%s]", metric)
 
     logging.info("Done.")
 

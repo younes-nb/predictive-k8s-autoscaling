@@ -1,4 +1,4 @@
-"""Phase 0 worker: create windows + D1 for a single service across all input sizes."""
+"""Phase 0 worker: create windows for a single service across all input sizes."""
 
 import json
 import os
@@ -21,12 +21,10 @@ def main() -> None:
     svc_name = sys.argv[1]
     idx = int(sys.argv[2])
     out_dir = sys.argv[3]
-    input_sizes_json = sys.argv[4]  # e.g. "[16, 32, 64, 128]"
+    input_sizes_json = sys.argv[4]  # e.g. "[32, 64, 128]"
     stride = int(sys.argv[5])
 
     input_sizes = json.loads(input_sizes_json)
-
-    import pywt
 
     _t0 = _time.time()
 
@@ -39,9 +37,7 @@ def main() -> None:
 
     for input_size in input_sizes:
         win_dir = os.path.join(out_dir, f"windows_{input_size}")
-        d1_dir = os.path.join(out_dir, f"d1_{input_size}")
         os.makedirs(win_dir, exist_ok=True)
-        os.makedirs(d1_dir, exist_ok=True)
 
         win_path = os.path.join(win_dir, f"service_{idx:05d}.npy")
         if os.path.exists(win_path):
@@ -52,21 +48,14 @@ def main() -> None:
 
         T = len(signal) - input_size + 1
         windows = []
-        d1s = []
         for i in range(0, T, stride):
-            w = signal[i: i + input_size].astype(np.float64)
-            windows.append(w.astype(np.float32))
-
-            coeffs = pywt.swt(w, "sym4", level=1, norm=True, trim_approx=True)
-            _, d1 = coeffs
-            d1s.append(d1.astype(np.float32))
+            w = signal[i: i + input_size].astype(np.float32)
+            windows.append(w)
 
         if not windows:
             continue
 
         np.save(win_path, np.stack(windows, axis=0))
-        np.save(os.path.join(d1_dir, f"service_{idx:05d}.npy"),
-                np.stack(d1s, axis=0))
 
     _elapsed = _time.time() - _t0
     _log(f"[{svc_name}] {_elapsed:.0f}s")

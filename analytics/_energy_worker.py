@@ -1,9 +1,12 @@
-"""Phase 1 worker: compute SWT energy and sample entropy for one service."""
+"""Phase 2 worker: compute energy, sample entropy, ADF and KPSS for cached SWT components."""
 
 import json
 import os
 import sys
 import time as _time
+import warnings
+
+warnings.filterwarnings("ignore")
 
 import numpy as np
 
@@ -48,32 +51,52 @@ def _sample_entropy(x: np.ndarray, m: int = 2, r_frac: float = 0.2,
     return float(-np.log(Am / Bm))
 
 
+def _adf(x: np.ndarray) -> float:
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        try:
+            from statsmodels.tsa.stattools import adfuller
+            result = adfuller(x, autolag="AIC")
+            return float(result[1])
+        except Exception:
+            return float("nan")
+
+
+def _kpss_test(x: np.ndarray) -> float:
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        try:
+            from statsmodels.tsa.stattools import kpss
+            result = kpss(x, regression="c", nlags="auto")
+            return float(result[1])
+        except Exception:
+            return float("nan")
+
+
 def main() -> None:
     svc_name = sys.argv[1]
     idx = int(sys.argv[2])
     out_dir = sys.argv[3]
-    input_sizes_json = sys.argv[4]   # e.g. "[16, 32, 64, 128]"
+    input_sizes_json = sys.argv[4]   # e.g. "[32, 64, 128]"
     swt_levels_json = sys.argv[5]    # e.g. "[1, 2, 3, 4]"
 
     input_sizes = json.loads(input_sizes_json)
     swt_levels = json.loads(swt_levels_json)
 
-    import pywt
-
     _t0 = _time.time()
 
-    # {(input_size, level): {"energies": ndarray, "total": float,
-    #                         "se_sums": ndarray, "se_counts": ndarray, "count": int}}
+    # {(input_size, level): {metric: sums, ...}}
     result: dict[tuple[int, int], dict] = {}
 
     for input_size in input_sizes:
-        win_path = os.path.join(out_dir, f"windows_{input_size}", f"service_{idx:05d}.npy")
-        if not os.path.exists(win_path):
-            continue
-
-        win_arr = np.load(win_path).astype(np.float64)
-
         for level in swt_levels:
+            swt_path = os.path.join(
+                out_dir, f"swt_{input_size}_lv{level}",
+                f"service_{idx:05d}.npy",
+            )
+            if not os.path.exists(swt_path):
+                continue
+
             n_comp = level + 1
             key = (input_size, level)
             if key not in result:
@@ -82,35 +105,57 @@ def main() -> None:
                     "total": 0.0,
                     "se_sums": np.zeros(n_comp, dtype=np.float64),
                     "se_counts": np.zeros(n_comp, dtype=np.int64),
+                    "adf_sums": np.zeros(n_comp, dtype=np.float64),
+                    "adf_counts": np.zeros(n_comp, dtype=np.int64),
+                    "kpss_sums": np.zeros(n_comp, dtype=np.float64),
+                    "kpss_counts": np.zeros(n_comp, dtype=np.int64),
                     "count": 0,
                 }
 
-            for wi in range(win_arr.shape[0]):
-                window = win_arr[wi]
-                if np.std(window) < 1e-12:
-                    continue
-
-                coeffs = pywt.swt(window, "sym4", level=level, norm=True, trim_approx=True)
-                energies = np.array([float(np.sum(c ** 2)) for c in coeffs])
+            components = np.load(swt_path).astype(np.float64)
+            for wi in range(components.shape[0]):
+                comps = components[wi]
+                energies = np.array([float(np.sum(c ** 2)) for c in comps])
                 e_total = float(np.sum(energies))
 
                 result[key]["energies"] += energies
                 result[key]["total"] += e_total
                 result[key]["count"] += 1
 
-                for ci, c in enumerate(coeffs):
+                for ci, c in enumerate(comps):
                     se_val = _sample_entropy(c)
                     if not np.isnan(se_val):
                         result[key]["se_sums"][ci] += se_val
                         result[key]["se_counts"][ci] += 1
 
+                    adf_val = _adf(c)
+                    if not np.isnan(adf_val):
+                        result[key]["adf_sums"][ci] += adf_val
+                        result[key]["adf_counts"][ci] += 1
+
+                    kpss_val = _kpss_test(c)
+                    if not np.isnan(kpss_val):
+                        result[key]["kpss_sums"][ci] += kpss_val
+                        result[key]["kpss_counts"][ci] += 1
+
     # Serialize result as JSON
     out_json = {}
     for (inp_sz, lvl), data in result.items():
         key = f"{inp_sz}_{lvl}"
+        n_comp = lvl + 1
         se_avgs = np.where(
             data["se_counts"] > 0,
             data["se_sums"] / data["se_counts"],
+            float("nan"),
+        )
+        adf_avgs = np.where(
+            data["adf_counts"] > 0,
+            data["adf_sums"] / data["adf_counts"],
+            float("nan"),
+        )
+        kpss_avgs = np.where(
+            data["kpss_counts"] > 0,
+            data["kpss_sums"] / data["kpss_counts"],
             float("nan"),
         )
         out_json[key] = {
@@ -118,6 +163,10 @@ def main() -> None:
             "total": data["total"],
             "se_avgs": se_avgs.tolist(),
             "se_counts": data["se_counts"].tolist(),
+            "adf_avgs": adf_avgs.tolist(),
+            "adf_counts": data["adf_counts"].tolist(),
+            "kpss_avgs": kpss_avgs.tolist(),
+            "kpss_counts": data["kpss_counts"].tolist(),
             "count": data["count"],
         }
 
