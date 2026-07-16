@@ -18,7 +18,7 @@ def svmd(
     max_alpha: float = 2000.0,
     tau: float = 0.0,
     tol: float = 1e-6,
-    stop_criteria: int = 2,
+    stop_criteria: int = 4,
     init_omega: int = 0,
     max_modes: int = 20,
     max_inner_iter: int = 300,
@@ -60,6 +60,7 @@ def svmd(
     eps = np.finfo(np.float64).eps
     N = max_inner_iter
     min_alpha = 10.0
+    fs = 1.0 / save_T
 
     # --- Part 1: noise estimation, mirroring, FFT ---
 
@@ -108,6 +109,9 @@ def svmd(
     polm_temp = 0.0
     l = 0
 
+    # n2: counter for omega initialization attempts (MATLAB Part 4/6)
+    n2 = 0
+
     while not SC2:
 
         m_val = 0.0
@@ -115,10 +119,13 @@ def svmd(
 
         while Alpha < max_alpha + 1:
 
+            # --- Initialise omega_L ---
             omega_L = np.zeros(N, dtype=np.float64)
             if init_omega > 0:
                 rng = np.random.default_rng()
-                omega_L[0] = float(np.exp(np.log(eps) + (np.log(0.5) - np.log(eps)) * rng.random()))
+                omega_L[0] = float(np.exp(np.log(fs) + (np.log(0.5) - np.log(fs)) * rng.random()))
+            else:
+                omega_L[0] = 0.0
 
             udiff = tol + eps
             lambda_arr = np.zeros((N, T), dtype=np.complex128)
@@ -130,6 +137,7 @@ def svmd(
             sum_u_hat_i = (np.sum(u_hat_i_list, axis=0)
                            if u_hat_i_list else np.zeros(T, dtype=np.complex128))
 
+            # --- Inner loop: VMD-like optimisation for current alpha ---
             while udiff > tol and n < N - 1:
                 omega_diff = omega_freqs - omega_L[n]
                 od2 = omega_diff ** 2
@@ -143,11 +151,13 @@ def svmd(
                          + sum_h)
                 u_hat_L[n + 1] = numer / denom
 
+                # Update centre frequency
                 upper_abs2 = np.abs(u_hat_L[n + 1, T // 2:]) ** 2
                 s = np.sum(upper_abs2)
                 if s > eps:
                     omega_L[n + 1] = float(np.dot(omega_freqs[T // 2:], upper_abs2) / s)
 
+                # Update lambda (dual ascent)
                 lambda_arr[n + 1] = (
                     lambda_arr[n]
                     + tau * (f_hat_onesided
@@ -160,13 +170,14 @@ def svmd(
                              - sum_u_hat_i)
                 )
 
+                # Convergence check — matches MATLAB exactly
                 diff = u_hat_L[n + 1] - u_hat_L[n]
-                energy_prev = float(np.sum(np.abs(u_hat_L[n]) ** 2))
-                udiff = abs(eps + (float(np.sum(np.abs(diff) ** 2)) / energy_prev
-                                   if energy_prev > eps else float(np.sum(np.abs(diff) ** 2))))
+                udiff = abs(eps
+                            + float(np.sum(np.abs(diff) ** 2)) / T
+                            / max(float(np.sum(np.abs(u_hat_L[n]) ** 2)) / T, eps))
                 n += 1
 
-            # Alpha escalation
+            # --- Alpha escalation (Part 3) ---
             if abs(m_val - np.log(max_alpha)) > 1:
                 m_val += 1
             else:
@@ -185,6 +196,7 @@ def svmd(
                 omega_L_prev = omega_L[n]
                 temp_ud = u_hat_L[n].copy()
 
+                # Reset inner state for next alpha iteration
                 udiff = tol + eps
                 lambda_arr = np.zeros((N, T), dtype=np.complex128)
                 u_hat_L = np.zeros((N, T), dtype=np.complex128)
@@ -200,7 +212,7 @@ def svmd(
             else:
                 break
 
-        # --- Save mode ---
+        # --- Part 4: Save the extracted mode ---
         omega_L_nz = omega_L[omega_L > 0]
         omega_val = float(omega_L_nz[-1]) if len(omega_L_nz) > 0 else float(omega_L[max(0, n)])
 
@@ -209,39 +221,50 @@ def svmd(
         alpha_temp.append(Alpha)
 
         Alpha = min_alpha
+        bf = 0
 
+        # --- Initialise omega_L for next mode (MATLAB Part 4) ---
         if init_omega > 0:
-            rng = np.random.default_rng()
-            for _ in range(300):
-                cand = float(np.exp(np.log(eps) + (np.log(0.5) - np.log(eps)) * rng.random()))
-                if all(abs(cand - od) >= 0.02 for od in omega_d_temp):
-                    break
+            n2 = 0
+            ii = False
+            while not ii and n2 < 300:
+                rng = np.random.default_rng()
+                cand = float(np.exp(np.log(fs) + (np.log(0.5) - np.log(fs)) * rng.random()))
+                checkp = np.abs(np.array(omega_d_temp) - cand)
+                if not np.any(checkp < 0.02):
+                    ii = True
+                n2 += 1
+        else:
+            n2 = 0
 
+        # Accumulate mode and filter (MATLAB Part 4)
         u_hat_i_list.append(u_hat_L[n].copy())
 
         alpha_l = alpha_temp[-1]
         omega_c = omega_d_temp[-1]
-        denom_h = (alpha_l ** 2) * (omega_freqs - omega_c) ** 4
-        denom_h = np.where(np.abs(denom_h) < eps, eps, denom_h)
-        h_hat_list.append(1.0 / denom_h)
+        h_new = 1.0 / ((alpha_l ** 2) * (omega_freqs - omega_c) ** 4)
+        h_hat_list.append(h_new)
 
         l += 1
 
-        # --- Stopping criteria ---
+        # --- Part 5: Stopping criteria ---
         if stop_criteria == 1:
+            # Noise-based — matches MATLAB
             stacked = np.sum(u_hat_i_list, axis=0)
             sigerror = float(np.linalg.norm(f_hat_onesided - stacked, 2) ** 2)
-            if sigerror <= round(noisepe):
+            if n2 >= 300 or sigerror <= round(noisepe):
                 SC2 = True
 
         elif stop_criteria == 2:
+            # Exact reconstruction — matches MATLAB
             sum_u = np.sum(u_hat_temp_list, axis=0)
             normind = (float(np.linalg.norm(sum_u - f_hat_onesided) ** 2)
                        / float(np.linalg.norm(f_hat_onesided) ** 2 + eps))
-            if normind < 0.005:
+            if n2 >= 300 or normind < 0.005:
                 SC2 = True
 
         elif stop_criteria == 3:
+            # BIC — matches MATLAB
             stacked = np.sum(u_hat_i_list, axis=0)
             sigerror = float(np.linalg.norm(f_hat_onesided - stacked, 2) ** 2)
             bic_l = 2 * T * np.log(sigerror + eps) + (3 * l) * np.log(2 * T)
@@ -250,23 +273,26 @@ def svmd(
             polm_list.append(bic_l)
 
         else:
-            # Stop when power of last mode is negligible relative to first
-            H = (4.0 * alpha_temp[-1]
+            # Power of the Last Mode (stop_criteria == 4)
+            # Matches MATLAB exactly: H includes u_hat_i, then dot with conj(u_hat_i)
+            H = (4.0 * alpha_temp[-1] * u_hat_i_list[-1]
                  / (1.0 + 2.0 * alpha_temp[-1] * (omega_freqs - omega_d_temp[-1]) ** 2))
-            polm_l = float(np.abs(np.dot(H, np.abs(u_hat_i_list[-1]) ** 2)))
+            polm_l = float(np.abs(np.dot(H, np.conj(u_hat_i_list[-1]))))
+
             if l <= 1:
-                polm_temp = max(polm_l, eps)
-                polm_normed = 1.0 if polm_l > 0 else 0.0
+                polm_temp = polm_l
+                polm_normed = polm_l / max(polm_l, eps)
             else:
                 polm_normed = polm_l / polm_temp if polm_temp > 0 else 0.0
 
-            if l > 1 and polm_normed < tol:
+            if l > 1 and abs(polm_normed - polm_list[-1]) < 0.001:
                 SC2 = True
+            polm_list.append(polm_normed)
 
         if l >= max_modes:
             SC2 = True
 
-    # --- Reconstruction ---
+    # --- Part 7: Signal reconstruction ---
     L = len(omega_d_temp)
     if L == 0:
         return signal[np.newaxis, :], signal[:, np.newaxis], np.array([0.0])
