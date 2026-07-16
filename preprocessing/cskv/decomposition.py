@@ -46,6 +46,7 @@ def sample_entropy(
     r_frac: float = 0.2,
     max_samples: int = 1000,
 ) -> float:
+    from EntropyHub import SampEn
 
     x = np.asarray(x, dtype=np.float64).ravel()
 
@@ -54,32 +55,21 @@ def sample_entropy(
         idx = np.sort(rng.choice(len(x), size=max_samples, replace=False))
         x = x[idx]
 
-    N = len(x)
-    if N < 2 * (m + 1) + 2:
+    if len(x) < 2 * (m + 1) + 2:
         return float("nan")
 
     r = r_frac * float(np.std(x, ddof=1))
     if r == 0.0:
         return float("nan")
 
-    def _count_matches(template_len: int) -> int:
-
-        templates = np.lib.stride_tricks.sliding_window_view(x, template_len)
-        n_templates = len(templates)
-        count = 0
-        for i in range(n_templates):
-            dists = np.max(np.abs(templates - templates[i]), axis=1)
-            dists[i] = np.inf
-            count += int(np.sum(dists < r))
-        return count
-
-    Bm = _count_matches(m)
-    Am = _count_matches(m + 1)
-
-    if Bm == 0 or Am == 0:
+    try:
+        Samp, A, B = SampEn(x, m=m, r=r)
+        se = float(Samp[-1])
+        if not np.isfinite(se) or B[-1] == 0:
+            return float("nan")
+        return se
+    except Exception:
         return float("nan")
-
-    return float(-np.log(Am / Bm))
 
 def cluster_imfs(
     imfs: np.ndarray,
