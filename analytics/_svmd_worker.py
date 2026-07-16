@@ -1,5 +1,3 @@
-"""Phase 3 worker: run SVMD on D1 windows for a single service, return mode counts."""
-
 import json
 import os
 import sys
@@ -21,7 +19,7 @@ def _log(msg: str) -> None:
 
 def main() -> None:
     svc_idx = int(sys.argv[1])
-    out_dir = sys.argv[2]           # e.g. /dataset/decomp_analysis/cpu
+    out_dir = sys.argv[2]
     input_size = int(sys.argv[3])
     max_alpha = float(sys.argv[4])
     tau = float(sys.argv[5])
@@ -33,8 +31,6 @@ def main() -> None:
 
     _t0 = _time.time()
 
-    # Load D1 from Phase 1 SWT cache: swt_{input_size}_lv1/service_{idx:05d}.npy
-    # Components shape: (n_windows, 2, input_size) — [A1, D1], we want index 1
     d1_path = os.path.join(out_dir, f"swt_{input_size}_lv1", f"service_{svc_idx:05d}.npy")
     if not os.path.exists(d1_path):
         print(f"RESULT:False:ERROR: D1 file not found at {d1_path}")
@@ -43,7 +39,7 @@ def main() -> None:
     components = np.load(d1_path).astype(np.float64)
     mode_counts = []
     for wi in range(components.shape[0]):
-        d1 = components[wi, 1]  # D1 component
+        d1 = components[wi, 1]
         if np.std(d1) < 1e-12:
             continue
 

@@ -1,12 +1,3 @@
-"""
-Successive Variational Mode Decomposition (SVMD).
-
-Pure Python port of the MATLAB reference implementation by Nazari & Sakhaei:
-  M. Nazari, S. M. Sakhaei, "Successive Variational Mode Decomposition,"
-  Signal Processing, Vol. 174, September 2020.
-  https://doi.org/10.1016/j.sigpro.2020.107610
-"""
-
 from __future__ import annotations
 
 import numpy as np
@@ -23,31 +14,6 @@ def svmd(
     max_modes: int = 20,
     max_inner_iter: int = 300,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Successive Variational Mode Decomposition.
-
-    Parameters
-    ----------
-    signal : 1-D array
-        Input time series.
-    max_alpha : float
-        Maximum balancing parameter. Alpha escalates from 10 toward this.
-    tau : float
-        Dual-ascent time-step. 0 for noisy signals.
-    tol : float
-        Convergence tolerance.
-    stop_criteria : int
-        1 = noise, 2 = exact reconstruction, 3 = BIC, 4 = power-of-last-mode.
-    init_omega : int
-        0 = center freq from zero, 1 = random.
-    max_modes : int
-        Hard upper limit on number of modes to extract.
-    max_inner_iter : int
-        Max iterations per alpha value.
-
-    Returns
-    -------
-    modes : (n_modes, save_T), modes_hat : (save_T, n_modes), center_freqs : (n_modes,)
-    """
     signal = np.asarray(signal, dtype=np.float64).ravel()
     save_T = len(signal)
     if save_T < 4:
@@ -61,8 +27,6 @@ def svmd(
     N = max_inner_iter
     min_alpha = 10.0
     fs = 1.0 / save_T
-
-    # --- Part 1: noise estimation, mirroring, FFT ---
 
     sg_window = min(25, save_T if save_T % 2 == 1 else save_T - 1)
     if sg_window < 9:
@@ -95,8 +59,6 @@ def svmd(
     f_hat_n_onesided[:T // 2] = 0.0
     noisepe = float(np.linalg.norm(f_hat_n_onesided, 2) ** 2)
 
-    # --- Part 2+3: main SVMD loop ---
-
     Alpha = min_alpha
     SC2 = False
 
@@ -109,7 +71,6 @@ def svmd(
     polm_temp = 0.0
     l = 0
 
-    # n2: counter for omega initialization attempts (MATLAB Part 4/6)
     n2 = 0
 
     while not SC2:
@@ -119,7 +80,6 @@ def svmd(
 
         while Alpha < max_alpha + 1:
 
-            # --- Initialise omega_L ---
             omega_L = np.zeros(N, dtype=np.float64)
             if init_omega > 0:
                 rng = np.random.default_rng()
@@ -137,7 +97,6 @@ def svmd(
             sum_u_hat_i = (np.sum(u_hat_i_list, axis=0)
                            if u_hat_i_list else np.zeros(T, dtype=np.complex128))
 
-            # --- Inner loop: VMD-like optimisation for current alpha ---
             while udiff > tol and n < N - 1:
                 omega_diff = omega_freqs - omega_L[n]
                 od2 = omega_diff ** 2
@@ -151,13 +110,11 @@ def svmd(
                          + sum_h)
                 u_hat_L[n + 1] = numer / denom
 
-                # Update centre frequency
                 upper_abs2 = np.abs(u_hat_L[n + 1, T // 2:]) ** 2
                 s = np.sum(upper_abs2)
                 if s > eps:
                     omega_L[n + 1] = float(np.dot(omega_freqs[T // 2:], upper_abs2) / s)
 
-                # Update lambda (dual ascent)
                 lambda_arr[n + 1] = (
                     lambda_arr[n]
                     + tau * (f_hat_onesided
@@ -170,14 +127,12 @@ def svmd(
                              - sum_u_hat_i)
                 )
 
-                # Convergence check — matches MATLAB exactly
                 diff = u_hat_L[n + 1] - u_hat_L[n]
                 udiff = abs(eps
                             + float(np.sum(np.abs(diff) ** 2)) / T
                             / max(float(np.sum(np.abs(u_hat_L[n]) ** 2)) / T, eps))
                 n += 1
 
-            # --- Alpha escalation (Part 3) ---
             if abs(m_val - np.log(max_alpha)) > 1:
                 m_val += 1
             else:
@@ -196,7 +151,6 @@ def svmd(
                 omega_L_prev = omega_L[n]
                 temp_ud = u_hat_L[n].copy()
 
-                # Reset inner state for next alpha iteration
                 udiff = tol + eps
                 lambda_arr = np.zeros((N, T), dtype=np.complex128)
                 u_hat_L = np.zeros((N, T), dtype=np.complex128)
@@ -212,7 +166,6 @@ def svmd(
             else:
                 break
 
-        # --- Part 4: Save the extracted mode ---
         omega_L_nz = omega_L[omega_L > 0]
         omega_val = float(omega_L_nz[-1]) if len(omega_L_nz) > 0 else float(omega_L[max(0, n)])
 
@@ -223,7 +176,6 @@ def svmd(
         Alpha = min_alpha
         bf = 0
 
-        # --- Initialise omega_L for next mode (MATLAB Part 4) ---
         if init_omega > 0:
             n2 = 0
             ii = False
@@ -237,7 +189,6 @@ def svmd(
         else:
             n2 = 0
 
-        # Accumulate mode and filter (MATLAB Part 4)
         u_hat_i_list.append(u_hat_L[n].copy())
 
         alpha_l = alpha_temp[-1]
@@ -247,16 +198,13 @@ def svmd(
 
         l += 1
 
-        # --- Part 5: Stopping criteria ---
         if stop_criteria == 1:
-            # Noise-based — matches MATLAB
             stacked = np.sum(u_hat_i_list, axis=0)
             sigerror = float(np.linalg.norm(f_hat_onesided - stacked, 2) ** 2)
             if n2 >= 300 or sigerror <= round(noisepe):
                 SC2 = True
 
         elif stop_criteria == 2:
-            # Exact reconstruction — matches MATLAB
             sum_u = np.sum(u_hat_temp_list, axis=0)
             normind = (float(np.linalg.norm(sum_u - f_hat_onesided) ** 2)
                        / float(np.linalg.norm(f_hat_onesided) ** 2 + eps))
@@ -264,7 +212,6 @@ def svmd(
                 SC2 = True
 
         elif stop_criteria == 3:
-            # BIC — matches MATLAB
             stacked = np.sum(u_hat_i_list, axis=0)
             sigerror = float(np.linalg.norm(f_hat_onesided - stacked, 2) ** 2)
             bic_l = 2 * T * np.log(sigerror + eps) + (3 * l) * np.log(2 * T)
@@ -273,8 +220,6 @@ def svmd(
             polm_list.append(bic_l)
 
         else:
-            # Power of the Last Mode (stop_criteria == 4)
-            # Matches MATLAB exactly: H includes u_hat_i, then dot with conj(u_hat_i)
             H = (4.0 * alpha_temp[-1] * u_hat_i_list[-1]
                  / (1.0 + 2.0 * alpha_temp[-1] * (omega_freqs - omega_d_temp[-1]) ** 2))
             polm_l = float(np.abs(np.dot(H, np.conj(u_hat_i_list[-1]))))
@@ -292,7 +237,6 @@ def svmd(
         if l >= max_modes:
             SC2 = True
 
-    # --- Part 7: Signal reconstruction ---
     L = len(omega_d_temp)
     if L == 0:
         return signal[np.newaxis, :], signal[:, np.newaxis], np.array([0.0])

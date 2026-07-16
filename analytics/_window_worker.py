@@ -1,5 +1,3 @@
-"""Phase 0 worker: create windows for a single service across all input sizes."""
-
 import json
 import os
 import sys
@@ -21,7 +19,7 @@ def main() -> None:
     svc_name = sys.argv[1]
     idx = int(sys.argv[2])
     out_dir = sys.argv[3]
-    input_sizes_json = sys.argv[4]  # e.g. "[32, 64, 128]"
+    input_sizes_json = sys.argv[4]
     stride = int(sys.argv[5])
 
     input_sizes = json.loads(input_sizes_json)

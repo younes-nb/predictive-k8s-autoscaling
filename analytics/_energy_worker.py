@@ -1,5 +1,3 @@
-"""Phase 2 worker: compute energy, sample entropy, ADF and KPSS for cached SWT components."""
-
 import json
 import os
 import sys
@@ -77,15 +75,14 @@ def main() -> None:
     svc_name = sys.argv[1]
     idx = int(sys.argv[2])
     out_dir = sys.argv[3]
-    input_sizes_json = sys.argv[4]   # e.g. "[32, 64, 128]"
-    swt_levels_json = sys.argv[5]    # e.g. "[1, 2, 3, 4]"
+    input_sizes_json = sys.argv[4]
+    swt_levels_json = sys.argv[5]
 
     input_sizes = json.loads(input_sizes_json)
     swt_levels = json.loads(swt_levels_json)
 
     _t0 = _time.time()
 
-    # {(input_size, level): {metric: sums, ...}}
     result: dict[tuple[int, int], dict] = {}
 
     for input_size in input_sizes:
@@ -138,7 +135,6 @@ def main() -> None:
                         result[key]["kpss_sums"][ci] += kpss_val
                         result[key]["kpss_counts"][ci] += 1
 
-    # Serialize result as JSON
     out_json = {}
     for (inp_sz, lvl), data in result.items():
         key = f"{inp_sz}_{lvl}"

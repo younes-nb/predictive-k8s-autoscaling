@@ -1,5 +1,3 @@
-"""Phase 1 worker: compute SWT decomposition for one service, cache all components."""
-
 import json
 import os
 import sys
@@ -21,8 +19,8 @@ def main() -> None:
     svc_name = sys.argv[1]
     idx = int(sys.argv[2])
     out_dir = sys.argv[3]
-    input_sizes_json = sys.argv[4]   # e.g. "[32, 64, 128]"
-    swt_levels_json = sys.argv[5]    # e.g. "[1, 2, 3, 4]"
+    input_sizes_json = sys.argv[4]
+    swt_levels_json = sys.argv[5]
 
     input_sizes = json.loads(input_sizes_json)
     swt_levels = json.loads(swt_levels_json)

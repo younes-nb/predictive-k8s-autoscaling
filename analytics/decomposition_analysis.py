@@ -1,22 +1,3 @@
-"""
-Decomposition Analysis: SWT Energy, Sample Entropy, ADF, KPSS & SVMD Mode Count
-
-Phase 0: Create windows for each input size and cache to disk.
-Phase 1: Compute SWT decomposition for all (input_size, level) combos, cache components.
-Phase 2: For cached SWT components, compute energy, sample entropy, ADF and KPSS p-values.
-Phase 3: For each input size, load cached D1 and run successive VMD (SVMD). Report mode count.
-
-Both CPU and Memory utilisation are processed independently.
-
-Parallelisation follows the same subprocess-worker pattern as
-``preprocessing/sv/preprocess.py``: ``ThreadPoolExecutor`` + ``subprocess.Popen``
-with 90 % of CPU cores by default.
-
-SVMD implementation based on:
-  Nazari & Sakhaei, "Successive variational mode decomposition",
-  Signal Processing 174 (2020) 107610.
-"""
-
 import argparse
 import json
 import logging
@@ -50,10 +31,6 @@ _ENERGY_WORKER = os.path.join(THIS_DIR, "_energy_worker.py")
 _SVMD_WORKER = os.path.join(THIS_DIR, "_svmd_worker.py")
 
 
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
-
 class _TehranFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         ts = datetime.now(ZoneInfo("Asia/Tehran")).strftime("%Y-%m-%d %H:%M:%S")
@@ -78,7 +55,6 @@ def setup_logging(out_dir: str) -> None:
 
 
 def _worker_env() -> dict[str, str]:
-    """Environment that pins each subprocess to a single thread."""
     env = os.environ.copy()
     for var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",
                 "VECLIB_MAXIMUM_THREADS", "NUMEXPR_NUM_THREADS",
@@ -87,20 +63,10 @@ def _worker_env() -> dict[str, str]:
     return env
 
 
-# ---------------------------------------------------------------------------
-# Data loading
-# ---------------------------------------------------------------------------
-
 def load_all_signals(
     msresource_dir: str, max_services: int = 0,
     metrics: list[str] | None = None,
 ) -> dict[str, dict[str, np.ndarray]]:
-    """Load signals from parquet for requested metrics.
-
-    Returns
-    -------
-    dict mapping metric_key ("cpu" / "memory") -> {service_name: ndarray}.
-    """
     if metrics is None:
         metrics = ["cpu"]
 
@@ -190,10 +156,6 @@ def load_all_signals(
     return result
 
 
-# ---------------------------------------------------------------------------
-# Phase 0 - Window preparation (parallelised)
-# ---------------------------------------------------------------------------
-
 def phase0_prepare_windows(
     all_signals: dict[str, np.ndarray],
     out_dir: str,
@@ -201,16 +163,6 @@ def phase0_prepare_windows(
     stride: int = PREPROCESSING.STRIDE,
     num_workers: int = 1,
 ) -> dict[int, dict[str, np.ndarray]]:
-    """Create windows for each input size using parallel subprocess workers.
-
-    1. Save raw signals to ``{out_dir}/original/``.
-    2. Dispatch ``_window_worker.py`` per service via ThreadPoolExecutor.
-    3. Wait for completion, verify outputs.
-
-    Returns
-    -------
-    dict mapping input_size -> {service_name: ndarray(n_windows, input_size)}
-    """
     services = sorted(all_signals.keys())
     svc_to_idx = {name: i for i, name in enumerate(services)}
 
@@ -220,7 +172,6 @@ def phase0_prepare_windows(
     names_path = os.path.join(out_dir, "_service_names.npy")
     np.save(names_path, np.array(services, dtype=object))
 
-    # --- save signals to disk ---
     orig_dir = os.path.join(out_dir, "original")
     os.makedirs(orig_dir, exist_ok=True)
     for svc_name in services:
@@ -229,7 +180,6 @@ def phase0_prepare_windows(
         if not os.path.exists(npy_path):
             np.save(npy_path, all_signals[svc_name])
 
-    # --- identify which services still need processing ---
     input_sizes_json = json.dumps(input_sizes)
     worker_args: list[tuple[str, int]] = []
     for svc_name in services:
@@ -291,7 +241,6 @@ def phase0_prepare_windows(
         logging.info("  Phase 0 workers done: %d ok, %d failed (%.1fs)",
                      done_count - failed, failed, elapsed)
 
-    # --- load results into memory ---
     result: dict[int, dict[str, np.ndarray]] = {sz: {} for sz in input_sizes}
     for svc_name in services:
         idx = svc_to_idx[svc_name]
@@ -306,21 +255,12 @@ def phase0_prepare_windows(
     return result
 
 
-# ---------------------------------------------------------------------------
-# Phase 1 - SWT decomposition (parallelised)
-# ---------------------------------------------------------------------------
-
 def phase1_swt_decompose(
     out_dir: str,
     swt_levels: list[int],
     input_sizes: list[int],
     num_workers: int = 1,
 ) -> None:
-    """Compute SWT components for all (input_size, level) combos and cache to disk.
-
-    Output: ``{out_dir}/swt_{input_size}_lv{level}/service_{idx:05d}.npy``
-    with shape ``(n_windows, level+1, input_size)``.
-    """
     svc_idx_path = os.path.join(out_dir, "_svc_to_idx.json")
     with open(svc_idx_path) as f:
         svc_to_idx = json.load(f)
@@ -329,7 +269,6 @@ def phase1_swt_decompose(
     input_sizes_json = json.dumps(input_sizes)
     swt_levels_json = json.dumps(swt_levels)
 
-    # --- identify services that need processing ---
     worker_args: list[tuple[str, int]] = []
     for svc_name in services:
         idx = svc_to_idx[svc_name]
@@ -397,10 +336,6 @@ def phase1_swt_decompose(
                  done_count - failed, failed, elapsed)
 
 
-# ---------------------------------------------------------------------------
-# Phase 2 - SWT Energy, Sample Entropy, ADF, KPSS
-# ---------------------------------------------------------------------------
-
 def phase2_swt_metrics(
     out_dir: str,
     swt_levels: list[int],
@@ -408,7 +343,6 @@ def phase2_swt_metrics(
     metric_label: str,
     num_workers: int = 1,
 ) -> None:
-    """Compute energy, SE, ADF p-value and KPSS p-value for cached SWT components."""
     svc_idx_path = os.path.join(out_dir, "_svc_to_idx.json")
     with open(svc_idx_path) as f:
         svc_to_idx = json.load(f)
@@ -417,7 +351,6 @@ def phase2_swt_metrics(
     input_sizes_json = json.dumps(input_sizes)
     swt_levels_json = json.dumps(swt_levels)
 
-    # accumulators keyed by (input_size, level)
     acc: dict[tuple[int, int], dict] = {}
     for sz in input_sizes:
         for lv in swt_levels:
@@ -499,7 +432,6 @@ def phase2_swt_metrics(
     logging.info("  Phase 2 workers done: %d ok, %d failed (%.1fs)",
                  done_count - failed, failed, elapsed)
 
-    # --- aggregate and print ---
     results: list[dict] = []
     for input_size in input_sizes:
         for level in swt_levels:
@@ -579,10 +511,6 @@ def phase2_swt_metrics(
     logging.info("  Phase 2 results saved to %s", csv_path)
 
 
-# ---------------------------------------------------------------------------
-# Phase 3 - SWT(1) + SVMD Mode Count (parallelised)
-# ---------------------------------------------------------------------------
-
 def phase3_svmd_mode_count(
     out_dir: str,
     input_sizes: list[int],
@@ -595,7 +523,6 @@ def phase3_svmd_mode_count(
     metric_label: str,
     num_workers: int = 1,
 ) -> None:
-    """Load cached D1 from Phase 1, run SVMD via parallel workers, report mode count statistics."""
     results: list[dict] = []
 
     for input_size in input_sizes:
@@ -613,7 +540,6 @@ def phase3_svmd_mode_count(
                      input_size, len(npy_files), num_workers)
         t0 = time.time()
 
-        # --- dispatch SVMD workers ---
         mode_counts: list[int] = []
 
         def _run_svmd(fname: str) -> tuple[int, str, str, float]:
@@ -686,8 +612,7 @@ def phase3_svmd_mode_count(
         print(f"{r['input_size']:>10}  {r['n_samples']:>10}  {r['avg']:>8.2f}"
               f"  {r['p50']:>6.0f}  {r['p95']:>6.0f}  {r['min']:>4}  {r['max']:>4}")
 
-    # --- mode count histogram per input_size ---
-    hist_bins = list(range(1, 10)) + [10]  # 1..9, 10+
+    hist_bins = list(range(1, 10)) + [10]
     hist_labels = [str(b) for b in range(1, 10)] + ["10+"]
 
     csv_path = os.path.join(out_dir, f"phase3_svmd_mode_count_{metric_label}.csv")
@@ -719,16 +644,11 @@ def phase3_svmd_mode_count(
     logging.info("  Phase 3 histogram saved to %s", hist_path)
 
 
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
-
 def main() -> None:
     ap = argparse.ArgumentParser(
         description="SWT energy analysis & SVMD mode count across input sizes.",
     )
 
-    # data
     ap.add_argument("--msresource_dir", default=PATHS.PARQUET_MSRESOURCE)
     ap.add_argument("--out_dir", default="/dataset/decomp_analysis")
     ap.add_argument("--max_services", type=int, default=0,
@@ -737,13 +657,11 @@ def main() -> None:
                     choices=list(METRIC_COLUMNS.keys()),
                     help="Metrics to analyse (default: cpu memory).")
 
-    # analysis grid
     ap.add_argument("--input_sizes", type=int, nargs="+", default=[32, 64, 128])
     ap.add_argument("--swt_levels", type=int, nargs="+", default=[1, 2, 3, 4])
     ap.add_argument("--stride", type=int, default=PREPROCESSING.STRIDE,
                     help=f"Window stride (default: {PREPROCESSING.STRIDE}).")
 
-    # SVMD parameters
     ap.add_argument("--svmd_max_alpha", type=float, default=100.0,
                     help="Maximum alpha for SVMD (alpha escalates from 10 to this).")
     ap.add_argument("--svmd_tau", type=float, default=0.0)
@@ -755,11 +673,9 @@ def main() -> None:
     ap.add_argument("--svmd_max_modes", type=int, default=10,
                     help="Hard cap on number of SVMD modes per window (default 10).")
 
-    # parallelism
     ap.add_argument("--num_workers", type=float, default=0.9,
                     help="Fraction of CPU cores for workers (default: 0.9).")
 
-    # control
     ap.add_argument("--skip_window_prep", action="store_true",
                     help="Skip Phase 0 — reuse cached windows.")
     ap.add_argument("--skip_swt_decompose", action="store_true",
@@ -778,7 +694,6 @@ def main() -> None:
     logging.info("Args: %s", vars(args))
     logging.info("CPUs: %d | Workers: %d", n_cpus, num_workers)
 
-    # ---- Phase 0: load signals for all requested metrics ----
     all_signals_by_metric: dict[str, dict[str, np.ndarray]] = {}
     if not args.skip_window_prep:
         logging.info("=" * 60)
@@ -791,7 +706,6 @@ def main() -> None:
             if not all_signals_by_metric.get(m):
                 logging.error("No %s signals loaded.", m)
 
-    # ---- process each metric ----
     for metric in args.metrics:
         metric_out = os.path.join(args.out_dir, metric)
         os.makedirs(metric_out, exist_ok=True)
@@ -801,7 +715,6 @@ def main() -> None:
         logging.info("# METRIC: %s", metric.upper())
         logging.info("#" * 60)
 
-        # Phase 0
         if not args.skip_window_prep:
             logging.info("PHASE 0: Window preparation [%s]", metric)
             sigs = all_signals_by_metric.get(metric, {})
@@ -834,7 +747,6 @@ def main() -> None:
                 window_data[sz] = svc_map
                 logging.info("  Loaded %d services for input_size=%d", len(svc_map), sz)
 
-        # Phase 1
         if not args.skip_swt_decompose:
             logging.info("PHASE 1: SWT decomposition [%s]", metric)
             phase1_swt_decompose(
@@ -844,7 +756,6 @@ def main() -> None:
         else:
             logging.info("PHASE 1: skipped [%s]", metric)
 
-        # Phase 2
         if not args.skip_phase2:
             logging.info("PHASE 2: SWT Metrics [%s]", metric)
             phase2_swt_metrics(
@@ -854,7 +765,6 @@ def main() -> None:
         else:
             logging.info("PHASE 2: skipped [%s]", metric)
 
-        # Phase 3
         if not args.skip_phase3:
             logging.info("PHASE 3: SVMD Mode Count [%s]", metric)
             phase3_svmd_mode_count(
