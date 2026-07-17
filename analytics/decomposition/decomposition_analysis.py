@@ -11,9 +11,10 @@ from zoneinfo import ZoneInfo
 
 import numpy as np
 import polars as pl
+from tqdm import tqdm
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, ".."))
+REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, "../.."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
@@ -221,21 +222,26 @@ def phase0_prepare_windows(
                 pool.submit(_run, sn, idx): (sn, idx)
                 for sn, idx in worker_args
             }
-            for future in as_completed(fut_map):
-                svc_name, idx = fut_map[future]
-                rc, out, err, dur = future.result()
-                done_count += 1
-                if rc == 0 and "RESULT:True" in out:
-                    status = "ok"
-                else:
-                    failed += 1
-                    status = "FAILED"
-                    for line in out.strip().split("\n"):
-                        if line.startswith("RESULT:False:ERROR:"):
-                            status = line.split(":", 2)[-1].strip()[:120]
-                            break
-                logging.info("  [%s] %d/%d  %s  (%.1fs)",
-                             svc_name, done_count, len(worker_args), status, dur)
+            with tqdm(total=len(worker_args), desc="Phase 0", unit="svc",
+                      bar_format=("{desc}: {percentage:5.1f}%|{bar}| "
+                                   "{n_fmt}/{total_fmt} [{elapsed}<{remaining}, "
+                                   "{rate_fmt}]")) as pbar:
+                for future in as_completed(fut_map):
+                    svc_name, idx = fut_map[future]
+                    rc, out, err, dur = future.result()
+                    done_count += 1
+                    if rc == 0 and "RESULT:True" in out:
+                        status = "ok"
+                    else:
+                        failed += 1
+                        status = "FAILED"
+                        for line in out.strip().split("\n"):
+                            if line.startswith("RESULT:False:ERROR:"):
+                                status = line.split(":", 2)[-1].strip()[:120]
+                                break
+                        tqdm.write(f"  [{svc_name}] FAILED: {status}")
+                    pbar.set_postfix_str(svc_name)
+                    pbar.update(1)
 
         elapsed = time.time() - t0
         logging.info("  Phase 0 workers done: %d ok, %d failed (%.1fs)",
@@ -315,21 +321,26 @@ def phase1_swt_decompose(
             pool.submit(_run, sn, idx): (sn, idx)
             for sn, idx in worker_args
         }
-        for future in as_completed(fut_map):
-            svc_name, idx = fut_map[future]
-            rc, out, err, dur = future.result()
-            done_count += 1
-            if rc == 0 and "RESULT:True" in out:
-                status = "ok"
-            else:
-                failed += 1
-                status = "FAILED"
-                for line in out.strip().split("\n"):
-                    if line.startswith("RESULT:False:ERROR:"):
-                        status = line.split(":", 2)[-1].strip()[:120]
-                        break
-            logging.info("  [%s] %d/%d  %s  (%.1fs)",
-                         svc_name, done_count, len(worker_args), status, dur)
+        with tqdm(total=len(worker_args), desc="Phase 1", unit="svc",
+                  bar_format=("{desc}: {percentage:5.1f}%|{bar}| "
+                               "{n_fmt}/{total_fmt} [{elapsed}<{remaining}, "
+                               "{rate_fmt}]")) as pbar:
+            for future in as_completed(fut_map):
+                svc_name, idx = fut_map[future]
+                rc, out, err, dur = future.result()
+                done_count += 1
+                if rc == 0 and "RESULT:True" in out:
+                    status = "ok"
+                else:
+                    failed += 1
+                    status = "FAILED"
+                    for line in out.strip().split("\n"):
+                        if line.startswith("RESULT:False:ERROR:"):
+                            status = line.split(":", 2)[-1].strip()[:120]
+                            break
+                    tqdm.write(f"  [{svc_name}] FAILED: {status}")
+                pbar.set_postfix_str(svc_name)
+                pbar.update(1)
 
     elapsed = time.time() - t0
     logging.info("  Phase 1 workers done: %d ok, %d failed (%.1fs)",
@@ -370,6 +381,48 @@ def phase2_swt_metrics(
                  len(services), num_workers)
     t0 = time.time()
 
+    def _accumulate(data: dict) -> None:
+        for key_str, vals in data.items():
+            parts = key_str.split("_")
+            inp_sz, lvl = int(parts[0]), int(parts[1])
+            k = (inp_sz, lvl)
+            n_comp = lvl + 1
+            acc[k]["energies"] += np.array(vals["energies"][:n_comp], dtype=np.float64)
+            acc[k]["total"] += vals["total"]
+            acc[k]["count"] += vals["count"]
+            de_avgs = np.array(vals["de_avgs"][:n_comp], dtype=np.float64)
+            de_cnts = np.array(vals["de_counts"][:n_comp], dtype=np.int64)
+            acc[k]["de_sums"] += de_avgs * de_cnts
+            acc[k]["de_counts"] += de_cnts
+            adf_avgs = np.array(vals["adf_avgs"][:n_comp], dtype=np.float64)
+            adf_cnts = np.array(vals["adf_counts"][:n_comp], dtype=np.int64)
+            acc[k]["adf_sums"] += adf_avgs * adf_cnts
+            acc[k]["adf_counts"] += adf_cnts
+            kpss_avgs = np.array(vals["kpss_avgs"][:n_comp], dtype=np.float64)
+            kpss_cnts = np.array(vals["kpss_counts"][:n_comp], dtype=np.int64)
+            acc[k]["kpss_sums"] += kpss_avgs * kpss_cnts
+            acc[k]["kpss_counts"] += kpss_cnts
+
+    cache_dir = os.path.join(out_dir, "phase2_cache")
+    os.makedirs(cache_dir, exist_ok=True)
+
+    cached_count = 0
+    worker_args: list[tuple[str, int]] = []
+    for svc_name in services:
+        idx = svc_to_idx[svc_name]
+        cache_path = os.path.join(cache_dir, f"service_{idx:05d}.json")
+        if os.path.exists(cache_path):
+            with open(cache_path) as f:
+                data = json.load(f)
+            _accumulate(data)
+            cached_count += 1
+        else:
+            worker_args.append((svc_name, idx))
+
+    if cached_count:
+        logging.info("  Phase 2: loaded %d cached services, %d to compute",
+                     cached_count, len(worker_args))
+
     def _run(svc_name: str, idx: int) -> tuple[int, str, str, float]:
         proc = subprocess.Popen(
             [sys.executable, _ENERGY_WORKER, svc_name, str(idx),
@@ -381,52 +434,37 @@ def phase2_swt_metrics(
         stdout, stderr = proc.communicate()
         return proc.returncode, stdout.decode(), stderr.decode(), time.time() - t_start
 
-    worker_args = [(svc_name, svc_to_idx[svc_name]) for svc_name in services]
     done_count = 0
     failed = 0
 
-    with ThreadPoolExecutor(max_workers=num_workers) as pool:
-        fut_map = {
-            pool.submit(_run, sn, idx): (sn, idx)
-            for sn, idx in worker_args
-        }
-        for future in as_completed(fut_map):
-            svc_name, idx = fut_map[future]
-            rc, out, err, dur = future.result()
-            done_count += 1
+    if worker_args:
+        with ThreadPoolExecutor(max_workers=num_workers) as pool:
+            fut_map = {
+                pool.submit(_run, sn, idx): (sn, idx)
+                for sn, idx in worker_args
+            }
+            with tqdm(total=len(worker_args), desc="Phase 2", unit="svc",
+                      bar_format=("{desc}: {percentage:5.1f}%|{bar}| "
+                                   "{n_fmt}/{total_fmt} [{elapsed}<{remaining}, "
+                                   "{rate_fmt}]")) as pbar:
+                for future in as_completed(fut_map):
+                    svc_name, idx = fut_map[future]
+                    rc, out, err, dur = future.result()
+                    done_count += 1
 
-            if rc == 0 and "RESULT:True" in out:
-                for line in out.strip().split("\n"):
-                    if line.startswith("RESULT:True:"):
-                        payload = line.split(":", 2)[-1]
-                        data = json.loads(payload)
-                        for key_str, vals in data.items():
-                            parts = key_str.split("_")
-                            inp_sz, lvl = int(parts[0]), int(parts[1])
-                            k = (inp_sz, lvl)
-                            n_comp = lvl + 1
-                            acc[k]["energies"] += np.array(vals["energies"][:n_comp], dtype=np.float64)
-                            acc[k]["total"] += vals["total"]
-                            acc[k]["count"] += vals["count"]
-                            de_avgs = np.array(vals["de_avgs"][:n_comp], dtype=np.float64)
-                            de_cnts = np.array(vals["de_counts"][:n_comp], dtype=np.int64)
-                            acc[k]["de_sums"] += de_avgs * de_cnts
-                            acc[k]["de_counts"] += de_cnts
-                            adf_avgs = np.array(vals["adf_avgs"][:n_comp], dtype=np.float64)
-                            adf_cnts = np.array(vals["adf_counts"][:n_comp], dtype=np.int64)
-                            acc[k]["adf_sums"] += adf_avgs * adf_cnts
-                            acc[k]["adf_counts"] += adf_cnts
-                            kpss_avgs = np.array(vals["kpss_avgs"][:n_comp], dtype=np.float64)
-                            kpss_cnts = np.array(vals["kpss_counts"][:n_comp], dtype=np.int64)
-                            acc[k]["kpss_sums"] += kpss_avgs * kpss_cnts
-                            acc[k]["kpss_counts"] += kpss_cnts
-                        break
-            else:
-                failed += 1
+                    if rc == 0 and "RESULT:True" in out:
+                        for line in out.strip().split("\n"):
+                            if line.startswith("RESULT:True:"):
+                                payload = line.split(":", 2)[-1]
+                                data = json.loads(payload)
+                                _accumulate(data)
+                                break
+                    else:
+                        failed += 1
+                        tqdm.write(f"  [{svc_name}] worker failed")
 
-            if done_count % max(1, len(worker_args) // 10) == 0 or done_count == len(worker_args):
-                logging.info("    %d/%d services done (%.1fs)",
-                             done_count, len(worker_args), time.time() - t0)
+                    pbar.set_postfix_str(svc_name)
+                    pbar.update(1)
 
     elapsed = time.time() - t0
     logging.info("  Phase 2 workers done: %d ok, %d failed (%.1fs)",
@@ -562,23 +600,27 @@ def phase3_svmd_mode_count(
                 pool.submit(_run_svmd, fname): fname
                 for fname in npy_files
             }
-            for future in as_completed(fut_map):
-                fname = fut_map[future]
-                rc, out, err, dur = future.result()
-                done_count += 1
-                if rc == 0 and "RESULT:True" in out:
-                    for line in out.strip().split("\n"):
-                        if line.startswith("RESULT:True:"):
-                            payload = line.split(":", 2)[-1]
-                            data = json.loads(payload)
-                            mode_counts.extend(data["counts"])
-                            break
-                else:
-                    logging.warning("  [%s] worker failed (exit=%d)", fname, rc)
+            with tqdm(total=len(npy_files),
+                      desc=f"Phase 3 (size={input_size})", unit="svc",
+                      bar_format=("{desc}: {percentage:5.1f}%|{bar}| "
+                                   "{n_fmt}/{total_fmt} [{elapsed}<{remaining}, "
+                                   "{rate_fmt}]")) as pbar:
+                for future in as_completed(fut_map):
+                    fname = fut_map[future]
+                    rc, out, err, dur = future.result()
+                    done_count += 1
+                    if rc == 0 and "RESULT:True" in out:
+                        for line in out.strip().split("\n"):
+                            if line.startswith("RESULT:True:"):
+                                payload = line.split(":", 2)[-1]
+                                data = json.loads(payload)
+                                mode_counts.extend(data["counts"])
+                                break
+                    else:
+                        tqdm.write(f"  [{fname}] worker failed (exit={rc})")
 
-                if done_count % max(1, len(npy_files) // 10) == 0 or done_count == len(npy_files):
-                    logging.info("    %d/%d services done (%.1fs)",
-                                 done_count, len(npy_files), time.time() - t0)
+                    pbar.set_postfix_str(fname)
+                    pbar.update(1)
 
         if not mode_counts:
             logging.warning("  No valid D1 windows for input_size=%d", input_size)

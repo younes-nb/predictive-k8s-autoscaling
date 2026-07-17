@@ -9,9 +9,12 @@ warnings.filterwarnings("ignore")
 import numpy as np
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, ".."))
+REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, "../.."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
+
+from EntropyHub import DispEn
+from statsmodels.tsa.stattools import kpss, mackinnonp
 
 
 def _log(msg: str) -> None:
@@ -22,33 +25,76 @@ def _dispersion_entropy(x: np.ndarray, m: int = 2, c: int = 6) -> float:
     x = np.asarray(x, dtype=np.float64).ravel()
     if len(x) < 10:
         return float("nan")
-    if float(np.std(x)) == 0.0:
+    if np.ptp(x) == 0.0:
         return float("nan")
-    from EntropyHub import DispEn
     de, _ = DispEn(x, m=m, tau=1, c=c, Typex="ncdf", Norm=True)
     return float(de)
 
 
 def _adf(x: np.ndarray) -> float:
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        try:
-            from statsmodels.tsa.stattools import adfuller
-            result = adfuller(x, autolag="AIC")
-            return float(result[1])
-        except Exception:
+    try:
+        y = np.asarray(x, dtype=np.float64).ravel()
+        N = len(y)
+        if N < 6:
             return float("nan")
+
+        dy = np.diff(y)
+        n = len(dy)
+        maxlag = int(np.ceil(12.0 * (N / 100.0) ** 0.25))
+        maxlag = min(maxlag, n - 3)
+
+        best_aic = np.inf
+        best_tstat = 0.0
+
+        for p in range(0, maxlag + 1):
+            k = n - p
+            if k < p + 3:
+                break
+
+            dy_t = dy[p:]
+            y_lag = y[p : N - 1]
+
+            if p == 0:
+                X = np.column_stack([np.ones(k), y_lag])
+            else:
+                lag_cols = np.column_stack(
+                    [dy[p - j : p - j + k] for j in range(1, p + 1)]
+                )
+                X = np.column_stack([np.ones(k), y_lag, lag_cols])
+
+            XtX = X.T @ X
+            Xty = X.T @ dy_t
+            try:
+                beta = np.linalg.solve(XtX, Xty)
+            except np.linalg.LinAlgError:
+                continue
+
+            resid = dy_t - X @ beta
+            rss = float(np.sum(resid ** 2))
+            m = X.shape[1]
+
+            aic = k * np.log(rss / k + 1e-30) + 2 * m
+
+            if aic < best_aic:
+                best_aic = aic
+                try:
+                    sigma2 = rss / (k - m)
+                    se = np.sqrt(sigma2 * np.linalg.inv(XtX)[1, 1])
+                    best_tstat = beta[1] / se if se > 0 else 0.0
+                except np.linalg.LinAlgError:
+                    best_tstat = 0.0
+
+        return float(mackinnonp(best_tstat, regression="c", N=1))
+    except Exception:
+        return float("nan")
 
 
 def _kpss_test(x: np.ndarray) -> float:
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        try:
-            from statsmodels.tsa.stattools import kpss
-            result = kpss(x, regression="c", nlags="auto")
-            return float(result[1])
-        except Exception:
-            return float("nan")
+    try:
+        result = kpss(x, regression="c", nlags="auto")
+        return float(result[1])
+    except Exception:
+        return float("nan")
 
 
 def main() -> None:
@@ -60,6 +106,15 @@ def main() -> None:
 
     input_sizes = json.loads(input_sizes_json)
     swt_levels = json.loads(swt_levels_json)
+
+    cache_dir = os.path.join(out_dir, "phase2_cache")
+    os.makedirs(cache_dir, exist_ok=True)
+    cache_path = os.path.join(cache_dir, f"service_{idx:05d}.json")
+    if os.path.exists(cache_path):
+        with open(cache_path) as f:
+            cached = f.read()
+        print(f"RESULT:True:{cached}")
+        sys.exit(0)
 
     _t0 = _time.time()
 
@@ -89,10 +144,10 @@ def main() -> None:
                     "count": 0,
                 }
 
-            components = np.load(swt_path).astype(np.float64)
+            components = np.load(swt_path)
             for wi in range(components.shape[0]):
                 comps = components[wi]
-                energies = np.array([float(np.sum(c ** 2)) for c in comps])
+                energies = np.sum(comps ** 2, axis=1)
                 e_total = float(np.sum(energies))
 
                 result[key]["energies"] += energies
@@ -148,7 +203,10 @@ def main() -> None:
 
     _elapsed = _time.time() - _t0
     _log(f"[{svc_name}] {_elapsed:.1f}s")
-    print(f"RESULT:True:{json.dumps(out_json)}")
+    payload = json.dumps(out_json)
+    with open(cache_path, "w") as f:
+        f.write(payload)
+    print(f"RESULT:True:{payload}")
     sys.exit(0)
 
 
