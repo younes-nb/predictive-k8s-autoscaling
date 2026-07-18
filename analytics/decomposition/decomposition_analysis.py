@@ -820,22 +820,8 @@ def main() -> None:
                 stride=args.stride, num_workers=num_workers,
             )
         else:
-            logging.info("PHASE 0: loading cached windows [%s]", metric)
+            logging.info("PHASE 0: cached [%s] — skipping window load", metric)
             window_data = {}
-            with open(os.path.join(metric_out, "_svc_to_idx.json")) as f:
-                svc_to_idx = json.load(f)
-            services = sorted(svc_to_idx.keys())
-            for sz in args.input_sizes:
-                win_dir = os.path.join(metric_out, f"windows_{sz}")
-                svc_map: dict[str, np.ndarray] = {}
-                if os.path.isdir(win_dir):
-                    for svc_name in services:
-                        idx = svc_to_idx[svc_name]
-                        wpath = os.path.join(win_dir, f"service_{idx:05d}.npy")
-                        if os.path.exists(wpath):
-                            svc_map[svc_name] = np.load(wpath)
-                window_data[sz] = svc_map
-                logging.info("  Loaded %d services for input_size=%d", len(svc_map), sz)
 
         # Phase 1: SWT decomposition
         need_phase1 = (
