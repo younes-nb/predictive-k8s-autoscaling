@@ -1,3 +1,4 @@
+import gc
 import json
 import os
 import sys
@@ -169,6 +170,8 @@ def main() -> None:
                     if not np.isnan(kpss_val):
                         result[key]["kpss_sums"][ci] += kpss_val
                         result[key]["kpss_counts"][ci] += 1
+            del components
+        gc.collect()
 
     out_json = {}
     for (inp_sz, lvl), data in result.items():
