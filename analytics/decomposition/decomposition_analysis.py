@@ -28,7 +28,7 @@ METRIC_COLUMNS = {
 
 _WINDOW_WORKER = os.path.join(THIS_DIR, "_window_worker.py")
 _SWT_WORKER = os.path.join(THIS_DIR, "_swt_worker.py")
-_ENERGY_WORKER = os.path.join(THIS_DIR, "_energy_worker.py")
+_DE_WORKER = os.path.join(THIS_DIR, "_de_worker.py")
 _SVMD_WORKER = os.path.join(THIS_DIR, "_svmd_worker.py")
 
 
@@ -366,14 +366,8 @@ def phase2_swt_metrics(
     for sz in input_sizes:
         for lv in swt_levels:
             acc[(sz, lv)] = {
-                "energies": np.zeros(lv + 1, dtype=np.float64),
-                "total": 0.0,
                 "de_sums": np.zeros(lv + 1, dtype=np.float64),
                 "de_counts": np.zeros(lv + 1, dtype=np.int64),
-                "adf_sums": np.zeros(lv + 1, dtype=np.float64),
-                "adf_counts": np.zeros(lv + 1, dtype=np.int64),
-                "kpss_sums": np.zeros(lv + 1, dtype=np.float64),
-                "kpss_counts": np.zeros(lv + 1, dtype=np.int64),
                 "count": 0,
             }
 
@@ -387,21 +381,11 @@ def phase2_swt_metrics(
             inp_sz, lvl = int(parts[0]), int(parts[1])
             k = (inp_sz, lvl)
             n_comp = lvl + 1
-            acc[k]["energies"] += np.array(vals["energies"][:n_comp], dtype=np.float64)
-            acc[k]["total"] += vals["total"]
             acc[k]["count"] += vals["count"]
             de_avgs = np.array(vals["de_avgs"][:n_comp], dtype=np.float64)
             de_cnts = np.array(vals["de_counts"][:n_comp], dtype=np.int64)
             acc[k]["de_sums"] += de_avgs * de_cnts
             acc[k]["de_counts"] += de_cnts
-            adf_avgs = np.array(vals["adf_avgs"][:n_comp], dtype=np.float64)
-            adf_cnts = np.array(vals["adf_counts"][:n_comp], dtype=np.int64)
-            acc[k]["adf_sums"] += adf_avgs * adf_cnts
-            acc[k]["adf_counts"] += adf_cnts
-            kpss_avgs = np.array(vals["kpss_avgs"][:n_comp], dtype=np.float64)
-            kpss_cnts = np.array(vals["kpss_counts"][:n_comp], dtype=np.int64)
-            acc[k]["kpss_sums"] += kpss_avgs * kpss_cnts
-            acc[k]["kpss_counts"] += kpss_cnts
 
     cache_dir = os.path.join(out_dir, "phase2_cache")
     os.makedirs(cache_dir, exist_ok=True)
@@ -425,7 +409,7 @@ def phase2_swt_metrics(
 
     def _run(svc_name: str, idx: int) -> tuple[int, str, str, float]:
         proc = subprocess.Popen(
-            [sys.executable, _ENERGY_WORKER, svc_name, str(idx),
+            [sys.executable, _DE_WORKER, svc_name, str(idx),
              out_dir, input_sizes_json, swt_levels_json],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             env=_worker_env(),
@@ -480,72 +464,43 @@ def phase2_swt_metrics(
                 continue
 
             comp_names = [f"A{level}"] + [f"D{i}" for i in range(level, 0, -1)]
-            n_comp = level + 1
-            avg_energies = data["energies"] / n_windows
-            avg_total = data["total"] / n_windows
             avg_de = np.where(
                 data["de_counts"] > 0,
                 data["de_sums"] / data["de_counts"],
                 float("nan"),
             )
-            avg_adf = np.where(
-                data["adf_counts"] > 0,
-                data["adf_sums"] / data["adf_counts"],
-                float("nan"),
-            )
-            avg_kpss = np.where(
-                data["kpss_counts"] > 0,
-                data["kpss_sums"] / data["kpss_counts"],
-                float("nan"),
-            )
 
-            logging.info("    size=%d  level=%d  windows=%d  E_total=%.4f",
-                         input_size, level, n_windows, avg_total)
+            logging.info("    size=%d  level=%d  windows=%d",
+                         input_size, level, n_windows)
 
             for ci, cname in enumerate(comp_names):
-                pct = avg_energies[ci] / avg_total * 100 if avg_total > 0 else 0
                 results.append({
                     "input_size": input_size,
                     "level": level,
                     "component": cname,
-                    "avg_energy": float(avg_energies[ci]),
-                    "avg_energy_pct": float(pct),
                     "avg_de": float(avg_de[ci]),
                     "de_valid_count": int(data["de_counts"][ci]),
-                    "avg_adf_pval": float(avg_adf[ci]),
-                    "avg_kpss_pval": float(avg_kpss[ci]),
                 })
 
-    print("\n" + "=" * 110)
-    print(f"PHASE 2: SWT Energy, Dispersion Entropy, ADF & KPSS [{metric_label.upper()}]")
-    print("=" * 110)
+    print("\n" + "=" * 60)
+    print(f"PHASE 2: SWT Dispersion Entropy [{metric_label.upper()}]")
+    print("=" * 60)
     header = (f"{'input_size':>10}  {'level':>5}  {'component':>10}"
-              f"  {'avg_energy':>14}  {'avg_energy_pct':>15}"
-              f"  {'avg_de':>10}  {'de_n':>6}"
-              f"  {'adf_pval':>10}  {'kpss_pval':>10}")
+              f"  {'avg_de':>10}  {'de_n':>6}")
     print(header)
     print("-" * len(header))
     for r in results:
         de_str = f"{r['avg_de']:>10.6f}" if not np.isnan(r["avg_de"]) else f"{'nan':>10}"
-        adf_str = f"{r['avg_adf_pval']:>10.6f}" if not np.isnan(r["avg_adf_pval"]) else f"{'nan':>10}"
-        kpss_str = f"{r['avg_kpss_pval']:>10.6f}" if not np.isnan(r["avg_kpss_pval"]) else f"{'nan':>10}"
         print(f"{r['input_size']:>10}  {r['level']:>5}  {r['component']:>10}"
-              f"  {r['avg_energy']:>14.6f}  {r['avg_energy_pct']:>14.2f}%"
-              f"  {de_str}  {r['de_valid_count']:>6}"
-              f"  {adf_str}  {kpss_str}")
+              f"  {de_str}  {r['de_valid_count']:>6}")
 
     csv_path = os.path.join(out_dir, f"phase2_swt_metrics_{metric_label}.csv")
     with open(csv_path, "w") as f:
-        f.write("input_size,level,component,avg_energy,avg_energy_pct,"
-                "avg_de,de_valid_count,avg_adf_pval,avg_kpss_pval\n")
+        f.write("input_size,level,component,avg_de,de_valid_count\n")
         for r in results:
             de_csv = f"{r['avg_de']:.8f}" if not np.isnan(r["avg_de"]) else "nan"
-            adf_csv = f"{r['avg_adf_pval']:.8f}" if not np.isnan(r["avg_adf_pval"]) else "nan"
-            kpss_csv = f"{r['avg_kpss_pval']:.8f}" if not np.isnan(r["avg_kpss_pval"]) else "nan"
             f.write(f"{r['input_size']},{r['level']},{r['component']},"
-                    f"{r['avg_energy']:.8f},{r['avg_energy_pct']:.4f},"
-                    f"{de_csv},{r['de_valid_count']},"
-                    f"{adf_csv},{kpss_csv}\n")
+                    f"{de_csv},{r['de_valid_count']}\n")
     logging.info("  Phase 2 results saved to %s", csv_path)
 
 
