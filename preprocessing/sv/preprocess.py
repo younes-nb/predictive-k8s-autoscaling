@@ -20,10 +20,7 @@ if REPO_ROOT not in sys.path:
 
 from shared.config_paths import PATHS
 from shared.config_preprocessing_defaults import PREPROCESSING
-from preprocessing.sv.config import CFG
-
-CHANNEL_DIRS = [f"vmd_mode_{k}" for k in range(10)] + ["D2", "A2"]
-MEM_CHANNEL_DIRS = [f"mem_vmd_mode_{k}" for k in range(10)] + ["mem_D2", "mem_A2"]
+from preprocessing.sv.config import CFG, channel_dirs_for
 
 
 class _TehranFormatter(logging.Formatter):
@@ -89,6 +86,10 @@ def main() -> None:
     ap.add_argument("--max_services", type=int, default=0, help="Max services (0 = all)")
     ap.add_argument("--feature_set", default="cpu",
                     help="Feature set: 'cpu' for CPU only, 'cpu_mem_both' for CPU + memory")
+    ap.add_argument("--swt_level", type=int, default=CFG.SWT_LEVEL,
+                    help=f"SWT decomposition level for CPU (default: {CFG.SWT_LEVEL})")
+    ap.add_argument("--mem_swt_level", type=int, default=CFG.MEM_SWT_LEVEL,
+                    help=f"SWT decomposition level for memory (default: {CFG.MEM_SWT_LEVEL})")
     ap.add_argument("--num_workers", type=float, default=0.9,
                     help="Fraction of CPU cores to use (default: 0.9)")
     ap.add_argument("--batch_size", type=int, default=512,
@@ -96,7 +97,9 @@ def main() -> None:
     args = ap.parse_args()
 
     has_mem = args.feature_set == "cpu_mem_both"
-    all_channel_dirs = CHANNEL_DIRS + (MEM_CHANNEL_DIRS if has_mem else [])
+    cpu_channel_dirs = channel_dirs_for(args.swt_level, CFG.VMD_K, prefix="")
+    mem_channel_dirs = channel_dirs_for(args.mem_swt_level, CFG.VMD_K, prefix="mem_")
+    all_channel_dirs = cpu_channel_dirs + (mem_channel_dirs if has_mem else [])
 
     n_cpus = os.cpu_count() or 1
     num_workers = max(1, int(n_cpus * args.num_workers))
@@ -252,7 +255,7 @@ def main() -> None:
 
     pre_done = 0
     for i in range(total):
-        dm = os.path.join(args.out_dir, CHANNEL_DIRS[0], f"service_{i:05d}.done")
+        dm = os.path.join(args.out_dir, cpu_channel_dirs[0], f"service_{i:05d}.done")
         if os.path.exists(dm):
             if all(
                 os.path.exists(os.path.join(args.out_dir, d, f"service_{i:05d}.npy"))
@@ -312,7 +315,7 @@ def main() -> None:
                 mem_out = os.path.join(args.out_dir, "mem_original", f"service_{idx:05d}.npy")
                 if not os.path.exists(mem_out):
                     np.save(mem_out, mem_batch[ms_name])
-            done_marker = os.path.join(args.out_dir, CHANNEL_DIRS[0], f"service_{idx:05d}.done")
+            done_marker = os.path.join(args.out_dir, cpu_channel_dirs[0], f"service_{idx:05d}.done")
             if os.path.exists(done_marker):
                 files_exist = all(
                     os.path.exists(os.path.join(args.out_dir, d, f"service_{idx:05d}.npy"))
@@ -327,7 +330,7 @@ def main() -> None:
             if ms_name not in cpu_batch:
                 idx = svc_to_idx.get(ms_name, -1)
                 if idx >= 0:
-                    dm = os.path.join(args.out_dir, CHANNEL_DIRS[0], f"service_{idx:05d}.done")
+                    dm = os.path.join(args.out_dir, cpu_channel_dirs[0], f"service_{idx:05d}.done")
                     if not os.path.exists(dm):
                         skipped += 1
                     else:
@@ -358,7 +361,7 @@ def main() -> None:
             worker_env["JOBLIB_NUM_THREADS"] = "1"
             proc = subprocess.Popen(
                 [sys.executable, worker_script, ms_name, str(idx), args.out_dir,
-                 args.feature_set],
+                 args.feature_set, str(args.swt_level), str(args.mem_swt_level)],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 env=worker_env,
             )

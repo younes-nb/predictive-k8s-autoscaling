@@ -10,14 +10,10 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from preprocessing.sv.config import CFG as SV_CFG
+from preprocessing.sv.config import CFG as SV_CFG, channel_dirs_for
 from shared.config_preprocessing_defaults import PREPROCESSING
 
 logger = logging.getLogger(__name__)
-
-CPU_CHANNEL_DIRS = [f"vmd_mode_{k}" for k in range(10)] + ["D2", "A2"]
-MEM_CHANNEL_DIRS = [f"mem_vmd_mode_{k}" for k in range(10)] + ["mem_D2", "mem_A2"]
-CPU_N_CHANNELS = len(CPU_CHANNEL_DIRS)
 
 
 def _load_service_windows(
@@ -137,6 +133,8 @@ class SvDataset(Dataset):
         num_workers: int = 0,
         max_services: int = 0,
         feature_set: str = "cpu",
+        swt_level: int = SV_CFG.SWT_LEVEL,
+        mem_swt_level: int = SV_CFG.MEM_SWT_LEVEL,
     ):
         assert split in ("train", "val", "test"), f"Unknown split: {split}"
         self.split = split
@@ -144,7 +142,9 @@ class SvDataset(Dataset):
         self.pred_horizon = pred_horizon
 
         self.has_mem = feature_set == "cpu_mem_both"
-        self.channel_dirs = CPU_CHANNEL_DIRS + (MEM_CHANNEL_DIRS if self.has_mem else [])
+        cpu_channel_dirs = channel_dirs_for(swt_level, SV_CFG.VMD_K, prefix="")
+        mem_channel_dirs = channel_dirs_for(mem_swt_level, SV_CFG.VMD_K, prefix="mem_")
+        self.channel_dirs = cpu_channel_dirs + (mem_channel_dirs if self.has_mem else [])
         self.n_channels = len(self.channel_dirs)
 
         svc_to_idx_path = os.path.join(preprocess_dir, "_svc_to_idx.json")
@@ -259,7 +259,8 @@ class SvDataset(Dataset):
 
 
 def _smoke_check(preprocess_dir: str, split: str, num_workers: int = 0,
-                  feature_set: str = "cpu") -> None:
+                  feature_set: str = "cpu", swt_level: int = SV_CFG.SWT_LEVEL,
+                  mem_swt_level: int = SV_CFG.MEM_SWT_LEVEL) -> None:
     from preprocessing.sv.config import CFG
     from shared.config_preprocessing_defaults import PREPROCESSING
 
@@ -273,6 +274,8 @@ def _smoke_check(preprocess_dir: str, split: str, num_workers: int = 0,
         val_frac=PREPROCESSING.VAL_FRAC,
         num_workers=num_workers,
         feature_set=feature_set,
+        swt_level=swt_level,
+        mem_swt_level=mem_swt_level,
     )
     assert len(ds) > 0, "Dataset has no windows"
     x, y, last = ds[0]
@@ -300,6 +303,9 @@ if __name__ == "__main__":
     ap.add_argument("--split", choices=("train", "val", "test"), default="train")
     ap.add_argument("--num_workers", type=int, default=0)
     ap.add_argument("--feature_set", default="cpu")
+    ap.add_argument("--swt_level", type=int, default=SV_CFG.SWT_LEVEL)
+    ap.add_argument("--mem_swt_level", type=int, default=SV_CFG.MEM_SWT_LEVEL)
     args = ap.parse_args()
     _smoke_check(args.preprocess_dir, args.split, num_workers=args.num_workers,
-                 feature_set=args.feature_set)
+                 feature_set=args.feature_set, swt_level=args.swt_level,
+                 mem_swt_level=args.mem_swt_level)
