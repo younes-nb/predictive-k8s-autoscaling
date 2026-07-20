@@ -17,9 +17,12 @@ class CnnBiLSTM(nn.Module):
         conv1_out_ch: int = 32,
         conv2_out_ch: int = 64,
         bilstm_hidden: tuple = (32, 64, 128),
+        num_targets: int = 1,
     ):
         super().__init__()
         del input_len
+        self.pred_horizon = pred_horizon
+        self.num_targets = num_targets
         K = len(kernel_sizes)
 
         self.conv_set1 = nn.ModuleList([
@@ -45,7 +48,7 @@ class CnnBiLSTM(nn.Module):
         self.bilstm2 = nn.LSTM(h[0] * 2, h[1], batch_first=True, bidirectional=True)
         self.bilstm3 = nn.LSTM(h[1] * 2, h[2], batch_first=True, bidirectional=True)
 
-        self.fc = nn.Linear(h[2] * 2, pred_horizon)
+        self.fc = nn.Linear(h[2] * 2, pred_horizon * num_targets)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if x.dim() == 2:
@@ -63,4 +66,7 @@ class CnnBiLSTM(nn.Module):
         o3, _ = self.bilstm3(o2)
 
         last = o3[:, -1, :]
-        return self.fc(last)
+        out = self.fc(last)
+        if self.num_targets > 1:
+            return out.view(-1, self.pred_horizon, self.num_targets)
+        return out

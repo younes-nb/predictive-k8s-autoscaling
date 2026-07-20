@@ -26,4 +26,5 @@ def build_model(hyperparams, input_size, args, num_targets, device):
         conv1_out_ch=hyperparams["conv1_out_ch"],
         conv2_out_ch=hyperparams["conv2_out_ch"],
         bilstm_hidden=(h0, h0 * 2, h0 * 4),
+        num_targets=num_targets,
     ).to(device)
