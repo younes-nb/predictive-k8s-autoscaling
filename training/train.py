@@ -36,7 +36,7 @@ from training.sfoa_search import run_sfoa_search
 from training.sfoa_configs import get_config
 
 
-MODEL_TYPES = ("lstm", "gru", "bilstm", "bigrue", "cnn_bilstm", "tcn_bigru")
+MODEL_TYPES = ("lstm", "gru", "bilstm", "bigrue", "cnn_bilstm", "tcn_bigru", "tcn")
 PREPROCESS_APPROACHES = ("none", "smoothing", "sv", "cskv")
 
 
@@ -513,7 +513,7 @@ def main():
         "--model_type",
         default="lstm",
         choices=list(MODEL_TYPES),
-        help="Model architecture: lstm, gru, bilstm, bigrue, cnn_bilstm, tcn_bigru",
+        help="Model architecture: lstm, gru, bilstm, bigrue, cnn_bilstm, tcn_bigru, tcn",
     )
     p.add_argument(
         "--preprocess_approach",

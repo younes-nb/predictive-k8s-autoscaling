@@ -29,7 +29,7 @@ from training.train_helpers import head_slice_dataset_by_pct
 from training.sfoa_configs import get_config
 
 
-MODEL_TYPES = ("lstm", "gru", "bilstm", "bigrue", "cnn_bilstm", "tcn_bigru")
+MODEL_TYPES = ("lstm", "gru", "bilstm", "bigrue", "cnn_bilstm", "tcn_bigru", "tcn")
 PREPROCESS_APPROACHES = ("none", "smoothing", "sv", "cskv")
 
 
