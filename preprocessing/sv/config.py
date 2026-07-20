@@ -10,6 +10,7 @@ class TsdpConfig:
     TRAIN_FRAC: float = 0.70
     VAL_FRAC: float = 0.10
 
+    SWT_LEVEL: int = 2
     VMD_K: int = 10
     VMD_ALPHA: int = 2000
     VMD_TAU: float = 0.0

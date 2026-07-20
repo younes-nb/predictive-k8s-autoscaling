@@ -65,9 +65,10 @@ def decompose_window(window: np.ndarray, cfg) -> np.ndarray:
         )
         return np.zeros((cfg.TOTAL_CHANNELS, cfg.INPUT_LEN), dtype=np.float32)
 
-    swt_coeffs = pywt.swt(window, 'sym4', level=2, norm=True, trim_approx=True)
+    swt_coeffs = pywt.swt(window, 'sym4', level=cfg.SWT_LEVEL, norm=True, trim_approx=True)
 
-    A2_ts, D2_ts, D1_ts = swt_coeffs
+    A_ts = swt_coeffs[0]
+    D1_ts = swt_coeffs[-1]
 
     vmd_modes = vmd_decompose(
         D1_ts, K=cfg.VMD_K, alpha=cfg.VMD_ALPHA,
@@ -78,12 +79,14 @@ def decompose_window(window: np.ndarray, cfg) -> np.ndarray:
     channels = []
     for k in range(vmd_modes.shape[0]):
         channels.append(vmd_modes[k].astype(np.float32))
-    channels.append(D2_ts.astype(np.float32))
-    channels.append(A2_ts.astype(np.float32))
+    for d in swt_coeffs[1:-1]:
+        channels.append(d.astype(np.float32))
+    channels.append(A_ts.astype(np.float32))
 
     result = np.stack(channels, axis=0)
-    assert result.shape == (cfg.TOTAL_CHANNELS, cfg.INPUT_LEN), (
-        f"Expected ({cfg.TOTAL_CHANNELS}, {cfg.INPUT_LEN}), got {result.shape}"
+    expected_channels = cfg.VMD_K + cfg.SWT_LEVEL
+    assert result.shape == (expected_channels, cfg.INPUT_LEN), (
+        f"Expected ({expected_channels}, {cfg.INPUT_LEN}), got {result.shape}"
     )
     return result
 
@@ -103,7 +106,8 @@ if __name__ == "__main__":
 
     result = decompose_window(signal, CFG)
     print(f"Output shape: {result.shape}")
-    assert result.shape == (CFG.TOTAL_CHANNELS, CFG.INPUT_LEN), "Shape mismatch"
+    expected = CFG.VMD_K + CFG.SWT_LEVEL
+    assert result.shape == (expected, CFG.INPUT_LEN), "Shape mismatch"
 
     reconstruct = result.sum(axis=0)
     rec_error = np.max(np.abs(reconstruct - signal.astype(np.float32)))
