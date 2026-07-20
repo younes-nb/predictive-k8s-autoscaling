@@ -33,6 +33,54 @@ MODEL_TYPES = ("lstm", "gru", "bilstm", "bigrue", "cnn_bilstm", "tcn_bigru")
 PREPROCESS_APPROACHES = ("none", "smoothing", "sv", "cskv")
 
 
+def _preprocess_raw_window(x_np, preprocess_approach):
+    if preprocess_approach == "none":
+        return x_np
+    elif preprocess_approach == "smoothing":
+        from preprocessing.smooth_windows import smooth_array
+        return smooth_array(x_np, window_size=5)
+    elif preprocess_approach == "sv":
+        from preprocessing.sv.decomposition import decompose_window
+        from preprocessing.sv.config import CFG as SV_CFG
+        channels = []
+        for f in range(x_np.shape[1]):
+            ch = decompose_window(x_np[:, f].astype(np.float64), SV_CFG)
+            channels.append(ch)
+        stacked = np.concatenate(channels, axis=0)
+        return stacked.T
+    elif preprocess_approach == "cskv":
+        from preprocessing.cskv.decomposition import (
+            ceemdan_decompose, cluster_imfs, vmd_decompose,
+        )
+        from preprocessing.cskv.config import CFG as CSKV_CFG
+        sig = x_np[:, 0].astype(np.float64)
+        imfs, residue = ceemdan_decompose(
+            sig, CSKV_CFG.CEEMDAN_EPSILON, CSKV_CFG.CEEMDAN_TRIALS,
+        )
+        co_imfs = cluster_imfs(
+            imfs, residue,
+            m=CSKV_CFG.SE_M,
+            r_frac=CSKV_CFG.SE_R_FRAC,
+            max_se_samples=CSKV_CFG.SE_MAX_SAMPLES,
+            n_clusters=CSKV_CFG.N_CLUSTERS,
+        )
+        vmd_modes = vmd_decompose(
+            co_imfs[0],
+            K=CSKV_CFG.VMD_K,
+            alpha=CSKV_CFG.VMD_ALPHA,
+            tau=CSKV_CFG.VMD_TAU,
+            DC=CSKV_CFG.VMD_DC,
+            init=CSKV_CFG.VMD_INIT,
+            tol=CSKV_CFG.VMD_TOL,
+        )
+        channel_list = [vmd_modes[k].astype(np.float32) for k in range(vmd_modes.shape[0])]
+        for k in range(1, CSKV_CFG.N_CLUSTERS):
+            channel_list.append(np.asarray(co_imfs[k], dtype=np.float32))
+        return np.stack(channel_list, axis=1)
+    else:
+        raise ValueError(f"Unknown preprocess_approach: {preprocess_approach}")
+
+
 def _build_model_from_checkpoint(checkpoint, input_size, device):
     ckpt_args = checkpoint.get("args", {})
     model_type = checkpoint.get("model_type", "lstm")
@@ -97,6 +145,70 @@ def _load_test_dataset(args, ckpt_args, device, log_info, feature_set_name="cpu"
         return test_ds, input_size
     else:
         raise ValueError(f"Unknown preprocess_approach: {preprocess_approach}")
+
+
+def _benchmark_single_sample_inference(model, accelerator, args, ckpt_args, device, log_info):
+    input_len = ckpt_args.get("input_len", PREPROCESSING.INPUT_LEN)
+    horizon = ckpt_args.get("pred_horizon", PREPROCESSING.PRED_HORIZON)
+    preprocess_approach = ckpt_args.get("preprocess_approach", "none")
+    n_bench = getattr(args, "inference_bench_samples", 0)
+
+    raw_ds = ShardedWindowsDataset(
+        args.windows_dir, "test", input_len, horizon, use_weights=False,
+    )
+    if len(raw_ds) == 0:
+        log_info("No raw windows found for inference latency benchmark.")
+        return
+
+    if n_bench <= 0:
+        indices = list(range(len(raw_ds)))
+    else:
+        n_samples = min(n_bench, len(raw_ds))
+        rng = random.Random(42)
+        indices = rng.sample(range(len(raw_ds)), n_samples)
+
+    raw_model = accelerator.unwrap_model(model)
+    raw_model.eval()
+
+    latencies = []
+    n_total = len(indices)
+    progress_step = max(1, n_total // 10)
+
+    for i, idx in enumerate(indices):
+        x_raw, *_ = raw_ds[idx]
+        x_np = x_raw.numpy()
+
+        t0 = time.perf_counter()
+
+        x_processed = _preprocess_raw_window(x_np, preprocess_approach)
+        x_tensor = torch.from_numpy(x_processed).float().unsqueeze(0).to(device)
+
+        with torch.no_grad():
+            _ = raw_model(x_tensor)
+
+        if device.type == "cuda":
+            torch.cuda.synchronize()
+
+        t1 = time.perf_counter()
+        latencies.append((t1 - t0) * 1000.0)
+
+        if (i + 1) % progress_step == 0:
+            print(
+                f"Benchmark {i+1}/{n_total} processed...", end="\r", flush=True,
+            )
+
+    print(" " * 50, end="\r")
+
+    latencies = np.array(latencies)
+
+    log_info("\n=== Single-Sample Inference Latency Benchmark ===")
+    log_info(f"Preprocessing:       {preprocess_approach}")
+    log_info(f"Samples Benchmarked: {len(latencies)}")
+    log_info(f"Min:     {np.min(latencies):.3f} ms")
+    log_info(f"P50:     {np.percentile(latencies, 50):.3f} ms")
+    log_info(f"P95:     {np.percentile(latencies, 95):.3f} ms")
+    log_info(f"Max:     {np.max(latencies):.3f} ms")
+    log_info(f"Average: {np.mean(latencies):.3f} ms")
 
 
 def evaluate(args):
@@ -184,6 +296,11 @@ def evaluate(args):
 
     model, test_loader = accelerator.prepare(model, test_loader)
 
+    if accelerator.is_local_main_process:
+        _benchmark_single_sample_inference(
+            model, accelerator, args, ckpt_args, device, log_info,
+        )
+
     log_info("\n--- Starting Inference ---")
 
     all_preds = []
@@ -265,6 +382,11 @@ def main():
     )
     p.add_argument("--preprocess_dir", default=None, help="Decomposition output dir (for sv/cskv)")
     p.add_argument("--seed", type=int, default=TRAINING.SEED, help="Random seed for reproducibility")
+    p.add_argument(
+        "--inference_bench_samples", type=int, default=0,
+        help="Number of raw windows for single-sample latency benchmark. "
+             "0 or negative means use all test windows.",
+    )
 
     try:
         evaluate(p.parse_args())
