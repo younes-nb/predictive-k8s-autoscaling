@@ -26,6 +26,7 @@ from core.dataset import ShardedWindowsDataset
 
 from training.metrics import compute_metrics, find_max_inference_batch_size
 from training.train_helpers import head_slice_dataset_by_pct
+from types import SimpleNamespace
 from training.sfoa_configs import get_config
 
 
@@ -88,7 +89,7 @@ def _build_model_from_checkpoint(checkpoint, input_size, device):
 
     cfg = get_config(model_type)
     hyperparams = checkpoint.get("hyperparams", cfg.DEFAULTS)
-    return cfg.build_model(hyperparams, input_size, ckpt_args, num_targets, device)
+    return cfg.build_model(hyperparams, input_size, SimpleNamespace(**ckpt_args), num_targets, device)
 
 
 def _load_test_dataset(args, ckpt_args, device, log_info, feature_set_name="cpu"):
