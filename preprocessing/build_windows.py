@@ -14,6 +14,7 @@ if REPO_ROOT not in sys.path:
 
 import polars as pl
 import numpy as np
+from tqdm import tqdm
 
 from core.utils import windowize_multivariate
 
@@ -146,24 +147,25 @@ def main():
     os.makedirs(args.out_dir, exist_ok=True)
     total_batches = (len(all_services_list) + args.batch_size - 1) // args.batch_size
 
+    pbar = tqdm(total=total_batches, desc="Building windows", unit="batch",
+                bar_format=("{desc}: {percentage:5.1f}%|{bar}| "
+                             "{n_fmt}/{total_fmt} [{elapsed}<{remaining}, "
+                             "{rate_fmt}]"))
+
     for batch_idx in range(total_batches):
         gc.collect()
 
         done_marker = os.path.join(args.out_dir, f"part-{batch_idx:04d}.done")
         if os.path.exists(done_marker):
-            print(
-                f"\n=== Skipping Global Batch {batch_idx+1}/{total_batches} (Already completed) ==="
-            )
+            pbar.set_postfix_str(f"batch {batch_idx+1} cached")
+            pbar.update(1)
             continue
 
         start_idx = batch_idx * args.batch_size
         end_idx = start_idx + args.batch_size
         current_batch_ids = all_services_list[start_idx:end_idx]
 
-        print(
-            f"\n=== Global Batch {batch_idx+1}/{total_batches} ({len(current_batch_ids)} services) ==="
-        )
-
+        pbar.set_postfix_str(f"{len(current_batch_ids)} services")
         batch_start_time = time.time()
 
         load_ids = sorted(set(current_batch_ids))
@@ -320,9 +322,9 @@ def main():
         del joined, shard_data
         gc.collect()
 
-        batch_duration = time.time() - batch_start_time
-        print(f"--> Batch {batch_idx+1} completed in {batch_duration:.2f} seconds")
+        pbar.update(1)
 
+    pbar.close()
     print("\nAll global batches processed.")
 
 

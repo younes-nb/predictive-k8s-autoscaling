@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
 import polars as pl
+from tqdm import tqdm
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, "..", ".."))
@@ -235,6 +236,31 @@ def main() -> None:
     if pre_done:
         logging.info("Pre-existing completed services: %d", pre_done)
 
+    def _run_worker(ms_name: str, idx: int) -> tuple[int, str, str, float]:
+        worker_env = os.environ.copy()
+        worker_env["OMP_NUM_THREADS"] = "1"
+        worker_env["MKL_NUM_THREADS"] = "1"
+        worker_env["OPENBLAS_NUM_THREADS"] = "1"
+        worker_env["VECLIB_MAXIMUM_THREADS"] = "1"
+        worker_env["NUMEXPR_NUM_THREADS"] = "1"
+        worker_env["LOKY_MAX_CPU_COUNT"] = "1"
+        worker_env["JOBLIB_NUM_THREADS"] = "1"
+        proc = subprocess.Popen(
+            [sys.executable, worker_script, ms_name, str(idx), args.out_dir, "1" if args.no_clustering else "0"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env=worker_env,
+        )
+        t0 = time.time()
+        stdout, stderr = proc.communicate()
+        duration = time.time() - t0
+        return proc.returncode, stdout.decode(), stderr.decode(), duration
+
+    pbar = tqdm(total=total, desc="CSKV Decomposition", unit="svc",
+                initial=pre_done,
+                bar_format=("{desc}: {percentage:5.1f}%|{bar}| "
+                             "{n_fmt}/{total_fmt} [{elapsed}<{remaining}, "
+                             "{rate_fmt}]"))
+
     for batch_idx in range(n_batches):
         batch_services = services[batch_idx * batch_size: (batch_idx + 1) * batch_size]
 
@@ -266,6 +292,7 @@ def main() -> None:
                         for k in range(CFG.N_CLUSTERS)
                     )
                 if files_exist:
+                    pbar.update(1)
                     continue
                 os.remove(done_marker)
             worker_args.append((ms_name, idx))
@@ -290,41 +317,13 @@ def main() -> None:
                             skipped += 1
 
         if not worker_args:
-            logging.info("  Batch %d/%d: no valid services.", batch_idx + 1, n_batches)
             continue
-
-        n_submitted = len(worker_args)
-        logging.info("  Batch %d/%d: submitting %d services to %d workers...",
-                     batch_idx + 1, n_batches, n_submitted, num_workers)
-
-        def _run_worker(ms_name: str, idx: int) -> tuple[int, str, str, float]:
-            worker_env = os.environ.copy()
-            worker_env["OMP_NUM_THREADS"] = "1"
-            worker_env["MKL_NUM_THREADS"] = "1"
-            worker_env["OPENBLAS_NUM_THREADS"] = "1"
-            worker_env["VECLIB_MAXIMUM_THREADS"] = "1"
-            worker_env["NUMEXPR_NUM_THREADS"] = "1"
-            worker_env["LOKY_MAX_CPU_COUNT"] = "1"
-            worker_env["JOBLIB_NUM_THREADS"] = "1"
-            proc = subprocess.Popen(
-                [sys.executable, worker_script, ms_name, str(idx), args.out_dir, "1" if args.no_clustering else "0"],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                env=worker_env,
-            )
-            t0 = time.time()
-            stdout, stderr = proc.communicate()
-            duration = time.time() - t0
-            return proc.returncode, stdout.decode(), stderr.decode(), duration
 
         with ThreadPoolExecutor(max_workers=num_workers) as executor:
             fut_to_meta = {
                 executor.submit(_run_worker, ms_name, idx): (ms_name, idx)
                 for ms_name, idx in worker_args
             }
-
-            batch_done = 0
-            batch_start_t = time.time()
-            log_every = max(1, n_submitted // 10)
 
             for future in as_completed(fut_to_meta):
                 ms_name, idx = fut_to_meta[future]
@@ -337,8 +336,6 @@ def main() -> None:
                         result_line = line
                         break
 
-                done_count = pre_done + processed + skipped + 1
-
                 if returncode == 0 and result_line:
                     parts = result_line.split(":", 2)
                     success = parts[1] == "True" if len(parts) >= 2 else True
@@ -350,18 +347,13 @@ def main() -> None:
                             skipped += 1
                         else:
                             processed += 1
-                        batch_done += 1
                     else:
                         skipped += 1
-                        batch_done += 1
-                        logging.error(
-                            "  [%s] ERROR — %s",
-                            ms_name, message,
-                        )
+                        tqdm.write(f"  [{ms_name}] ERROR — {message}")
+                        pbar.update(1)
                         continue
                 else:
                     skipped += 1
-                    batch_done += 1
                     err_msg_short = ""
                     for line in r_msg_lines:
                         if line.startswith("RESULT:False:ERROR:"):
@@ -371,41 +363,14 @@ def main() -> None:
                         err_msg_short = err_msg.strip()[:200] if err_msg else ""
                     if not err_msg_short:
                         err_msg_short = "unknown"
-                    logging.error(
-                        "  [%s] CRASHED (exit=%d): %s",
-                        ms_name, returncode, err_msg_short,
-                    )
+                    tqdm.write(f"  [{ms_name}] CRASHED (exit={returncode}): {err_msg_short}")
+                    pbar.update(1)
                     continue
 
-                # Show per-service completion with name and timing
-                pct = f" ({done_count*100//total}%)" if total else ""
-                logging.info(
-                    "  [%s] done (%d/%d%s, batch %d/%d, %.1fs)",
-                    ms_name, done_count, total, pct,
-                    batch_idx + 1, n_batches, duration,
-                )
+                pbar.set_postfix_str(ms_name)
+                pbar.update(1)
 
-                # Periodic batch-level progress with ETA
-                if batch_done % log_every == 0 or batch_done == n_submitted:
-                    elapsed_batch = time.time() - batch_start_t
-                    rate = batch_done / elapsed_batch if elapsed_batch > 0 else 0
-                    remaining = n_submitted - batch_done
-                    eta = remaining / rate if rate > 0 else 0
-                    total_elapsed = time.time() - t_start
-                    total_rate = done_count / total_elapsed if total_elapsed > 0 else 0
-                    total_remaining = total - done_count
-                    total_eta = total_remaining / total_rate if total_rate > 0 else 0
-                    logging.info(
-                        "  batch %d/%d: %d/%d services, %.1f/s, batch ETA=%.0fs, overall ETA=%.0fs",
-                        batch_idx + 1, n_batches, batch_done, n_submitted,
-                        rate, eta, total_eta,
-                    )
-
-        batch_elapsed = time.time() - batch_start_t
-        logging.info("  Batch %d/%d done — %d services (%.1f/s), %.1fs elapsed, %.0fs total.",
-                     batch_idx + 1, n_batches, n_submitted,
-                     n_submitted / batch_elapsed if batch_elapsed > 0 else 0,
-                     batch_elapsed, time.time() - t_start)
+    pbar.close()
 
     elapsed = time.time() - t_start
     logging.info(
