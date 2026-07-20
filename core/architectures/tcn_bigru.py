@@ -63,8 +63,11 @@ class TcnBiGru(nn.Module):
         tcn_dilations: tuple = (1, 2, 4),
         tcn_dropout: float = 0.2,
         bigru_hidden: tuple = (64, 128),
+        num_targets: int = 1,
     ):
         super().__init__()
+        self.pred_horizon = pred_horizon
+        self.num_targets = num_targets
 
         tcn_layers = []
         tcn_in = in_channels
@@ -99,7 +102,7 @@ class TcnBiGru(nn.Module):
             )
             gru_out = (bigru_hidden[1] if len(bigru_hidden) > 1 else bigru_hidden[0]) * 2
 
-        self.fc = nn.Linear(gru_out + tcn_filters[-1], pred_horizon)
+        self.fc = nn.Linear(gru_out + tcn_filters[-1], pred_horizon * num_targets)
 
     def forward(self, x):
         tcn_feat = self.tcn(x.transpose(1, 2))[:, :, -1]
@@ -112,4 +115,6 @@ class TcnBiGru(nn.Module):
             o, _ = self.bigru(x)
             gru_feat = o[:, -1, :]
 
-        return self.fc(torch.cat([tcn_feat, gru_feat], dim=1))
+        return self.fc(torch.cat([tcn_feat, gru_feat], dim=1)).view(
+            -1, self.pred_horizon, self.num_targets
+        ) if self.num_targets > 1 else self.fc(torch.cat([tcn_feat, gru_feat], dim=1))

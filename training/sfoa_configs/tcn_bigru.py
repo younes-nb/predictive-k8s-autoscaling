@@ -26,4 +26,5 @@ def build_model(hyperparams, input_size, args, num_targets, device):
         tcn_dilations=(1, 2, 4, 8, 16),
         tcn_dropout=hyperparams["tcn_dropout"],
         bigru_hidden=(h0, h0 * 2),
+        num_targets=num_targets,
     ).to(device)
