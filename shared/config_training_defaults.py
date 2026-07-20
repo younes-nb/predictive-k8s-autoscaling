@@ -18,6 +18,12 @@ class TrainingDefaults:
     HYPERPARAM_SAMPLE_ATTEMPTS: int = 5000
     HYPERPARAM_CHECK_INTERVAL: int = 50
     LOSS_CHANGE_THRESHOLD: float = 1e-5
+    EARLY_STOP_PATIENCE: int = 15
+    EARLY_STOP_MIN_DELTA: float = 1e-6
+    LR_SCHEDULER: str = "ReduceLROnPlateau"
+    LR_REDUCE_PATIENCE: int = 7
+    LR_REDUCE_FACTOR: float = 0.5
+    LR_MIN: float = 1e-6
     GRAD_CLIP: float = 1.0
     WEIGHT_DECAY: float = 1e-4
     UNDER_PENALTY: float = 8.0
@@ -43,7 +49,6 @@ class TrainingDefaults:
     TRAIN_PCT: float = 100.0
     VAL_PCT: float = 100.0
     TEST_PCT: float = 100.0
-    NO_CHANGE_EPOCHS_LIMIT: int = 50
 
 
 TRAINING = TrainingDefaults()

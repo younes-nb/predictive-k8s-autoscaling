@@ -1000,10 +1000,10 @@ def run_sfoa_search(
         "epoch",
         "model_state_dict",
         "optimizer_state_dict",
+        "scheduler_state_dict",
         "log_path",
-        "best_score",
-        "last_train_loss",
-        "no_change_streak",
+        "best_val_loss",
+        "patience_counter",
         "hyperparams",
         "sfoa_hyperparams",
     )

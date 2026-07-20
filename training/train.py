@@ -152,14 +152,13 @@ def train(args):
         log_path = setup_logging("train")
 
     start_epoch = resume_state.get("epoch", 0) + 1 if resume_state else 1
-    best_score = (
-        resume_state.get("best_score", float("inf")) if resume_state else float("inf")
+    best_val_loss = (
+        resume_state.get("best_val_loss", float("inf"))
+        if resume_state
+        else float("inf")
     )
-    last_train_loss = resume_state.get("last_train_loss") if resume_state else None
-    no_change_streak = (
-        resume_state.get("no_change_streak", 0)
-        if resume_state and last_train_loss is not None
-        else 0
+    patience_counter = (
+        resume_state.get("patience_counter", 0) if resume_state else 0
     )
 
     if resume_state:
@@ -323,6 +322,16 @@ def train(args):
         model, optimizer, train_loader, val_loader
     )
 
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode="min",
+        factor=TRAINING.LR_REDUCE_FACTOR,
+        patience=TRAINING.LR_REDUCE_PATIENCE,
+        min_lr=TRAINING.LR_MIN,
+    )
+    if resume_state and "scheduler_state_dict" in resume_state:
+        scheduler.load_state_dict(resume_state["scheduler_state_dict"])
+
     if accelerator.mixed_precision == "fp16":
         log_info("AMP (FP16 mixed precision) enabled via Accelerate")
 
@@ -394,15 +403,19 @@ def train(args):
 
         epoch_duration = (datetime.now() - start_time).total_seconds()
 
+        current_lr = optimizer.param_groups[0]["lr"]
         log_msg = (
             f"Epoch {epoch}/{args.epochs} | "
             f"Train Loss: {avg_train_loss:.6f} | "
             f"Val Loss: {avg_val_loss:.6f} | "
+            f"LR: {current_lr:.2e} | "
+            f"Patience: {patience_counter}/{TRAINING.EARLY_STOP_PATIENCE} | "
             f"Time: {epoch_duration:.1f}s"
         )
 
-        if avg_val_loss < best_score:
-            best_score = avg_val_loss
+        if avg_val_loss < best_val_loss - TRAINING.EARLY_STOP_MIN_DELTA:
+            best_val_loss = avg_val_loss
+            patience_counter = 0
             if accelerator.is_local_main_process:
                 os.makedirs(os.path.dirname(args.checkpoint_path), exist_ok=True)
 
@@ -411,7 +424,7 @@ def train(args):
                     "model_state_dict": unwrapped_model.state_dict(),
                     "args": vars(args),
                     "input_size": input_size,
-                    "best_val_loss": best_score,
+                    "best_val_loss": best_val_loss,
                     "model_type": model_type,
                     "preprocess_approach": preprocess_approach,
                     "hyperparams": current_hyperparams,
@@ -419,29 +432,18 @@ def train(args):
 
                 torch.save(ckpt_payload, args.checkpoint_path)
             log_msg += " [Checkpoint Saved]"
+        else:
+            patience_counter += 1
 
         log_info(log_msg)
 
-        delta = None
-        if last_train_loss is not None:
-            delta = abs(avg_train_loss - last_train_loss)
-            if delta < TRAINING.LOSS_CHANGE_THRESHOLD:
-                no_change_streak += 1
-            else:
-                no_change_streak = 0
+        scheduler.step(avg_val_loss)
 
-        last_train_loss = avg_train_loss
-        delta_display = f"{delta:.4f}" if delta is not None else "N/A"
-        if no_change_streak > 0 and (delta is None or delta >= TRAINING.LOSS_CHANGE_THRESHOLD):
-            log_info(
-                f"Train loss change above threshold for epoch {epoch} (Δ={delta_display}). "
-                f"No-change streak reset ({no_change_streak}/{TRAINING.NO_CHANGE_EPOCHS_LIMIT})."
-            )
-        elif no_change_streak >= TRAINING.NO_CHANGE_EPOCHS_LIMIT:
+        if patience_counter >= TRAINING.EARLY_STOP_PATIENCE:
             log_info(
                 "\n=== Early Stopping ===\n"
-                f"Train loss has not changed by at least {TRAINING.LOSS_CHANGE_THRESHOLD} "
-                f"for {no_change_streak} consecutive epochs."
+                f"Val loss has not improved by more than {TRAINING.EARLY_STOP_MIN_DELTA} "
+                f"for {patience_counter} consecutive epochs (patience={TRAINING.EARLY_STOP_PATIENCE})."
             )
             break
 
@@ -454,16 +456,16 @@ def train(args):
                     current_hyperparams if hyperparam_optimizer == "sfoa" else None
                 ),
                 "sfoa_done": sfoa_done,
-                "best_score": best_score,
-                "last_train_loss": last_train_loss,
-                "no_change_streak": no_change_streak,
+                "best_val_loss": best_val_loss,
+                "patience_counter": patience_counter,
                 "model_state_dict": accelerator.unwrap_model(model).state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
+                "scheduler_state_dict": scheduler.state_dict(),
             }
             save_resume_state(PATHS.RESUME_STATE_FILE, resume_payload)
 
     log_info("\n--- Training Completed ---")
-    log_info(f"Best Validation Loss: {best_score:.4f}")
+    log_info(f"Best Validation Loss: {best_val_loss:.6f}")
     log_info(f"Final Model Saved to: {args.checkpoint_path}")
     if log_path:
         log_info(f"Full Log Saved to:    {log_path}")
