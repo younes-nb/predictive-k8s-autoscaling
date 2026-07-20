@@ -60,19 +60,11 @@ def _load_datasets(args, preprocess_approach):
         train_ds = SvDataset(
             args.preprocess_dir, "train",
             input_len=PREPROCESSING.INPUT_LEN, pred_horizon=PREPROCESSING.PRED_HORIZON,
-            stride=PREPROCESSING.STRIDE,
-            train_frac=PREPROCESSING.TRAIN_FRAC, val_frac=PREPROCESSING.VAL_FRAC,
-            num_workers=args.dataset_workers,
-            max_services=getattr(args, "max_services", 0),
             feature_set=args.feature_set,
         )
         val_ds = SvDataset(
             args.preprocess_dir, "val",
             input_len=PREPROCESSING.INPUT_LEN, pred_horizon=PREPROCESSING.PRED_HORIZON,
-            stride=PREPROCESSING.STRIDE,
-            train_frac=PREPROCESSING.TRAIN_FRAC, val_frac=PREPROCESSING.VAL_FRAC,
-            num_workers=args.dataset_workers,
-            max_services=getattr(args, "max_services", 0),
             feature_set=args.feature_set,
         )
         return train_ds, val_ds
@@ -82,14 +74,10 @@ def _load_datasets(args, preprocess_approach):
         train_ds = CskvDataset(
             args.preprocess_dir, "train",
             input_len=PREPROCESSING.INPUT_LEN, pred_horizon=PREPROCESSING.PRED_HORIZON,
-            stride=PREPROCESSING.STRIDE,
-            train_frac=PREPROCESSING.TRAIN_FRAC, val_frac=PREPROCESSING.VAL_FRAC,
         )
         val_ds = CskvDataset(
             args.preprocess_dir, "val",
             input_len=PREPROCESSING.INPUT_LEN, pred_horizon=PREPROCESSING.PRED_HORIZON,
-            stride=PREPROCESSING.STRIDE,
-            train_frac=PREPROCESSING.TRAIN_FRAC, val_frac=PREPROCESSING.VAL_FRAC,
         )
         return train_ds, val_ds
     else:

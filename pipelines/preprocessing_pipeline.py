@@ -120,10 +120,10 @@ def main():
             run(cmd_smooth, "Step 3b: Smoothing")
         elif args.preprocess_approach == "sv":
             sv_out = os.path.join(args.windows_dir, "sv")
-            cmd_sv = [sys.executable, sv_script, "--out_dir", sv_out,
+            cmd_sv = [sys.executable, sv_script,
+                      "--windows_dir", args.windows_dir,
+                      "--out_dir", sv_out,
                       "--feature_set", args.feature_set]
-            if args.max_services is not None:
-                cmd_sv.extend(["--max_services", str(args.max_services)])
             if args.swt_level is not None:
                 cmd_sv.extend(["--swt_level", str(args.swt_level)])
             if args.mem_swt_level is not None:
@@ -131,9 +131,9 @@ def main():
             run(cmd_sv, "Step 3b: SV Decomposition")
         elif args.preprocess_approach == "cskv":
             cskv_out = os.path.join(args.windows_dir, "cskv")
-            cmd_cskv = [sys.executable, cskv_script, "--out_dir", cskv_out]
-            if args.max_services is not None:
-                cmd_cskv.extend(["--max_services", str(args.max_services)])
+            cmd_cskv = [sys.executable, cskv_script,
+                        "--windows_dir", args.windows_dir,
+                        "--out_dir", cskv_out]
             run(cmd_cskv, "Step 3b: CSKV Decomposition")
     else:
         print("\n=== Skipping windows ===")
