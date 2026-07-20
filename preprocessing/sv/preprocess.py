@@ -19,6 +19,7 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from shared.config_paths import PATHS
+from shared.config_preprocessing_defaults import PREPROCESSING
 from preprocessing.sv.config import CFG
 
 CHANNEL_DIRS = [f"vmd_mode_{k}" for k in range(10)] + ["D2", "A2"]
@@ -64,7 +65,7 @@ def _load_batch_signals(
         .sort("msname", "timestamp")
         .collect(engine="streaming")
     )
-    min_len = CFG.INPUT_LEN + CFG.PRED_HORIZON
+    min_len = PREPROCESSING.INPUT_LEN + PREPROCESSING.PRED_HORIZON
     cpu_signals: dict[str, np.ndarray] = {}
     mem_signals: dict[str, np.ndarray] = {} if load_memory else None
     for key, group in df.group_by("msname", maintain_order=True):
@@ -158,7 +159,7 @@ def main() -> None:
     all_mem_signals: dict[str, np.ndarray] = {} if has_mem else None
 
     need = args.max_services or len(all_services)
-    min_len = CFG.INPUT_LEN + CFG.PRED_HORIZON
+    min_len = PREPROCESSING.INPUT_LEN + PREPROCESSING.PRED_HORIZON
     for ms_name in all_services:
         if len(all_cpu_signals) >= need:
             break

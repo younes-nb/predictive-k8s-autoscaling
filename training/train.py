@@ -59,18 +59,18 @@ def _load_datasets(args, preprocess_approach):
         from preprocessing.sv.config import CFG as SV_CFG
         train_ds = SvDataset(
             args.preprocess_dir, "train",
-            input_len=SV_CFG.INPUT_LEN, pred_horizon=SV_CFG.PRED_HORIZON,
-            stride=SV_CFG.STRIDE,
-            train_frac=SV_CFG.TRAIN_FRAC, val_frac=SV_CFG.VAL_FRAC,
+            input_len=PREPROCESSING.INPUT_LEN, pred_horizon=PREPROCESSING.PRED_HORIZON,
+            stride=PREPROCESSING.STRIDE,
+            train_frac=PREPROCESSING.TRAIN_FRAC, val_frac=PREPROCESSING.VAL_FRAC,
             num_workers=args.dataset_workers,
             max_services=getattr(args, "max_services", 0),
             feature_set=args.feature_set,
         )
         val_ds = SvDataset(
             args.preprocess_dir, "val",
-            input_len=SV_CFG.INPUT_LEN, pred_horizon=SV_CFG.PRED_HORIZON,
-            stride=SV_CFG.STRIDE,
-            train_frac=SV_CFG.TRAIN_FRAC, val_frac=SV_CFG.VAL_FRAC,
+            input_len=PREPROCESSING.INPUT_LEN, pred_horizon=PREPROCESSING.PRED_HORIZON,
+            stride=PREPROCESSING.STRIDE,
+            train_frac=PREPROCESSING.TRAIN_FRAC, val_frac=PREPROCESSING.VAL_FRAC,
             num_workers=args.dataset_workers,
             max_services=getattr(args, "max_services", 0),
             feature_set=args.feature_set,
@@ -81,15 +81,15 @@ def _load_datasets(args, preprocess_approach):
         from preprocessing.cskv.config import CFG as CSKV_CFG
         train_ds = CskvDataset(
             args.preprocess_dir, "train",
-            input_len=CSKV_CFG.INPUT_LEN, pred_horizon=CSKV_CFG.PRED_HORIZON,
-            stride=CSKV_CFG.STRIDE,
-            train_frac=CSKV_CFG.TRAIN_FRAC, val_frac=CSKV_CFG.VAL_FRAC,
+            input_len=PREPROCESSING.INPUT_LEN, pred_horizon=PREPROCESSING.PRED_HORIZON,
+            stride=PREPROCESSING.STRIDE,
+            train_frac=PREPROCESSING.TRAIN_FRAC, val_frac=PREPROCESSING.VAL_FRAC,
         )
         val_ds = CskvDataset(
             args.preprocess_dir, "val",
-            input_len=CSKV_CFG.INPUT_LEN, pred_horizon=CSKV_CFG.PRED_HORIZON,
-            stride=CSKV_CFG.STRIDE,
-            train_frac=CSKV_CFG.TRAIN_FRAC, val_frac=CSKV_CFG.VAL_FRAC,
+            input_len=PREPROCESSING.INPUT_LEN, pred_horizon=PREPROCESSING.PRED_HORIZON,
+            stride=PREPROCESSING.STRIDE,
+            train_frac=PREPROCESSING.TRAIN_FRAC, val_frac=PREPROCESSING.VAL_FRAC,
         )
         return train_ds, val_ds
     else:

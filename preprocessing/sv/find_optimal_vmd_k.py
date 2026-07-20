@@ -28,6 +28,7 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from preprocessing.sv.config import CFG
+from shared.config_preprocessing_defaults import PREPROCESSING
 
 logger = logging.getLogger(__name__)
 
@@ -325,7 +326,7 @@ def main():
     os.makedirs(json_dir, exist_ok=True)
 
     logger.info("Services: %d | Workers: %d | Max K: %d | INPUT_LEN: %d | STRIDE: %d",
-                total, num_workers, args.max_k, CFG.INPUT_LEN, CFG.STRIDE)
+                total, num_workers, args.max_k, PREPROCESSING.INPUT_LEN, PREPROCESSING.STRIDE)
 
     n_batches = (total + args.batch_size - 1) // args.batch_size
     t_start = time.time()

@@ -19,6 +19,8 @@ from preprocessing.sv.config import CFG as SV_CFG
 from preprocessing.sv.decomposition import decompose_window
 from preprocessing.cskv.config import CFG as CSKV_CFG, set_seed
 from preprocessing.cskv.decomposition import decompose_service_signal
+from shared.config_preprocessing_defaults import PREPROCESSING
+from shared.config_training_defaults import TRAINING
 
 
 def generate_windows(n: int, length: int, rng: np.random.Generator) -> np.ndarray:
@@ -58,7 +60,7 @@ def benchmark_sv(windows: np.ndarray, cfg) -> list[float]:
 
 
 def benchmark_cskv(windows: np.ndarray, cfg) -> list[float]:
-    set_seed(cfg.SEED)
+    set_seed(TRAINING.SEED)
     times = []
     for i in range(len(windows)):
         t0 = time.perf_counter()
@@ -118,11 +120,9 @@ def main():
     sv_g.add_argument("--sv_swt_level", type=int, default=None)
     sv_g.add_argument("--sv_vmd_k", type=int, default=None)
     sv_g.add_argument("--sv_vmd_alpha", type=int, default=None)
-    sv_g.add_argument("--sv_total_channels", type=int, default=None)
 
     cskv_g = parser.add_argument_group("CSKV config overrides")
     cskv_g.add_argument("--cskv_input_len", type=int, default=None)
-    cskv_g.add_argument("--cskv_seed", type=int, default=None)
     cskv_g.add_argument("--cskv_pred_horizon", type=int, default=None)
     cskv_g.add_argument("--cskv_n_clusters", type=int, default=None)
     cskv_g.add_argument("--cskv_ceemdan_trials", type=int, default=None)
@@ -144,13 +144,9 @@ def main():
         sv_overrides["VMD_K"] = args.sv_vmd_k
     if args.sv_vmd_alpha is not None:
         sv_overrides["VMD_ALPHA"] = args.sv_vmd_alpha
-    if args.sv_total_channels is not None:
-        sv_overrides["TOTAL_CHANNELS"] = args.sv_total_channels
 
     if args.cskv_input_len is not None:
         cskv_overrides["INPUT_LEN"] = args.cskv_input_len
-    if args.cskv_seed is not None:
-        cskv_overrides["SEED"] = args.cskv_seed
     if args.cskv_pred_horizon is not None:
         cskv_overrides["PRED_HORIZON"] = args.cskv_pred_horizon
     if args.cskv_n_clusters is not None:
@@ -165,7 +161,7 @@ def main():
     rng = np.random.default_rng(args.seed)
 
     if args.use_synthetic:
-        synth_len = sv_overrides.get("INPUT_LEN", SV_CFG.INPUT_LEN)
+        synth_len = sv_overrides.get("INPUT_LEN", PREPROCESSING.INPUT_LEN)
         windows = generate_windows(args.n_windows, synth_len, rng)
         window_len = synth_len
     else:

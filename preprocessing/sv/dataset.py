@@ -11,6 +11,7 @@ import torch
 from torch.utils.data import Dataset
 
 from preprocessing.sv.config import CFG as SV_CFG
+from shared.config_preprocessing_defaults import PREPROCESSING
 
 logger = logging.getLogger(__name__)
 
@@ -260,28 +261,29 @@ class SvDataset(Dataset):
 def _smoke_check(preprocess_dir: str, split: str, num_workers: int = 0,
                   feature_set: str = "cpu") -> None:
     from preprocessing.sv.config import CFG
+    from shared.config_preprocessing_defaults import PREPROCESSING
 
     ds = SvDataset(
         preprocess_dir,
         split,
-        input_len=CFG.INPUT_LEN,
-        pred_horizon=CFG.PRED_HORIZON,
-        stride=CFG.STRIDE,
-        train_frac=CFG.TRAIN_FRAC,
-        val_frac=CFG.VAL_FRAC,
+        input_len=PREPROCESSING.INPUT_LEN,
+        pred_horizon=PREPROCESSING.PRED_HORIZON,
+        stride=PREPROCESSING.STRIDE,
+        train_frac=PREPROCESSING.TRAIN_FRAC,
+        val_frac=PREPROCESSING.VAL_FRAC,
         num_workers=num_workers,
         feature_set=feature_set,
     )
     assert len(ds) > 0, "Dataset has no windows"
     x, y, last = ds[0]
-    expected_x_shape = (CFG.INPUT_LEN, ds.n_channels)
+    expected_x_shape = (PREPROCESSING.INPUT_LEN, ds.n_channels)
     assert tuple(x.shape) == expected_x_shape, \
         f"Bad x shape: {tuple(x.shape)} expected {expected_x_shape}"
     if ds.has_mem:
-        expected_y_shape = (CFG.PRED_HORIZON, 2)
+        expected_y_shape = (PREPROCESSING.PRED_HORIZON, 2)
         expected_last_shape = (2,)
     else:
-        expected_y_shape = (CFG.PRED_HORIZON,)
+        expected_y_shape = (PREPROCESSING.PRED_HORIZON,)
         expected_last_shape = ()
     assert tuple(y.shape) == expected_y_shape, \
         f"Bad y shape: {tuple(y.shape)} expected {expected_y_shape}"

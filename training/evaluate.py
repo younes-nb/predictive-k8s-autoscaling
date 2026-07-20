@@ -122,9 +122,9 @@ def _load_test_dataset(args, ckpt_args, device, log_info, feature_set_name="cpu"
         from preprocessing.sv.config import CFG as SV_CFG
         test_ds = SvDataset(
             preprocess_dir, "test",
-            input_len=SV_CFG.INPUT_LEN, pred_horizon=SV_CFG.PRED_HORIZON,
-            stride=SV_CFG.STRIDE,
-            train_frac=SV_CFG.TRAIN_FRAC, val_frac=SV_CFG.VAL_FRAC,
+            input_len=PREPROCESSING.INPUT_LEN, pred_horizon=PREPROCESSING.PRED_HORIZON,
+            stride=PREPROCESSING.STRIDE,
+            train_frac=PREPROCESSING.TRAIN_FRAC, val_frac=PREPROCESSING.VAL_FRAC,
             feature_set=feature_set_name,
         )
         input_size = test_ds.n_channels
@@ -137,9 +137,9 @@ def _load_test_dataset(args, ckpt_args, device, log_info, feature_set_name="cpu"
         from preprocessing.cskv.config import CFG as CSKV_CFG
         test_ds = CskvDataset(
             preprocess_dir, "test",
-            input_len=CSKV_CFG.INPUT_LEN, pred_horizon=CSKV_CFG.PRED_HORIZON,
-            stride=CSKV_CFG.STRIDE,
-            train_frac=CSKV_CFG.TRAIN_FRAC, val_frac=CSKV_CFG.VAL_FRAC,
+            input_len=PREPROCESSING.INPUT_LEN, pred_horizon=PREPROCESSING.PRED_HORIZON,
+            stride=PREPROCESSING.STRIDE,
+            train_frac=PREPROCESSING.TRAIN_FRAC, val_frac=PREPROCESSING.VAL_FRAC,
         )
         input_size = test_ds.total_channels
         return test_ds, input_size

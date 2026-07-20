@@ -4,7 +4,7 @@ from typing import Tuple, Optional
 
 @dataclass(frozen=True)
 class PreprocessingDefaults:
-    INPUT_LEN: int = 60
+    INPUT_LEN: int = 64
     PRED_HORIZON: int = 5
     STRIDE: int = 5
     TRAIN_FRAC: float = 0.7

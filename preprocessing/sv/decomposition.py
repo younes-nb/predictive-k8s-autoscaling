@@ -10,6 +10,8 @@ REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, "..", ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
+from shared.config_preprocessing_defaults import PREPROCESSING
+
 logger = logging.getLogger(__name__)
 
 
@@ -58,12 +60,12 @@ def decompose_window(window: np.ndarray, cfg) -> np.ndarray:
     window = np.asarray(window, dtype=np.float64)
     n = len(window)
 
-    if n < cfg.INPUT_LEN or np.std(window) < 1e-12:
+    if n < PREPROCESSING.INPUT_LEN or np.std(window) < 1e-12:
         logger.warning(
             "Degenerate window (std=%.2e); returning zeros.",
             float(np.std(window)),
         )
-        return np.zeros((cfg.TOTAL_CHANNELS, cfg.INPUT_LEN), dtype=np.float32)
+        return np.zeros((cfg.VMD_K + cfg.SWT_LEVEL, PREPROCESSING.INPUT_LEN), dtype=np.float32)
 
     swt_coeffs = pywt.swt(window, 'sym4', level=cfg.SWT_LEVEL, norm=True, trim_approx=True)
 
@@ -85,8 +87,8 @@ def decompose_window(window: np.ndarray, cfg) -> np.ndarray:
 
     result = np.stack(channels, axis=0)
     expected_channels = cfg.VMD_K + cfg.SWT_LEVEL
-    assert result.shape == (expected_channels, cfg.INPUT_LEN), (
-        f"Expected ({expected_channels}, {cfg.INPUT_LEN}), got {result.shape}"
+    assert result.shape == (expected_channels, PREPROCESSING.INPUT_LEN), (
+        f"Expected ({expected_channels}, {PREPROCESSING.INPUT_LEN}), got {result.shape}"
     )
     return result
 
@@ -100,14 +102,14 @@ if __name__ == "__main__":
     print("=" * 60)
 
     rng = np.random.default_rng(42)
-    t = np.linspace(0, 4 * np.pi, CFG.INPUT_LEN)
+    t = np.linspace(0, 4 * np.pi, PREPROCESSING.INPUT_LEN)
     signal = np.sin(2 * np.pi * t / 15) + 0.5 * np.sin(2 * np.pi * t / 5)
-    signal += 0.1 * rng.standard_normal(CFG.INPUT_LEN)
+    signal += 0.1 * rng.standard_normal(PREPROCESSING.INPUT_LEN)
 
     result = decompose_window(signal, CFG)
     print(f"Output shape: {result.shape}")
     expected = CFG.VMD_K + CFG.SWT_LEVEL
-    assert result.shape == (expected, CFG.INPUT_LEN), "Shape mismatch"
+    assert result.shape == (expected, PREPROCESSING.INPUT_LEN), "Shape mismatch"
 
     reconstruct = result.sum(axis=0)
     rec_error = np.max(np.abs(reconstruct - signal.astype(np.float32)))

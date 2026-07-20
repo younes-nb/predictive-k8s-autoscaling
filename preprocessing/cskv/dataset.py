@@ -317,21 +317,22 @@ class CskvDataset(Dataset):
 
 def _smoke_check(preprocess_dir: str, split: str) -> None:
     from preprocessing.cskv.config import CFG
+    from shared.config_preprocessing_defaults import PREPROCESSING
 
     ds = CskvDataset(
         preprocess_dir,
         split,
-        input_len=CFG.INPUT_LEN,
-        pred_horizon=CFG.PRED_HORIZON,
-        stride=CFG.STRIDE,
-        train_frac=CFG.TRAIN_FRAC,
-        val_frac=CFG.VAL_FRAC,
+        input_len=PREPROCESSING.INPUT_LEN,
+        pred_horizon=PREPROCESSING.PRED_HORIZON,
+        stride=PREPROCESSING.STRIDE,
+        train_frac=PREPROCESSING.TRAIN_FRAC,
+        val_frac=PREPROCESSING.VAL_FRAC,
     )
     assert len(ds) > 0, "Dataset has no windows"
     x, y, last = ds[0]
-    expected_x_shape = (CFG.INPUT_LEN, ds.total_channels)
+    expected_x_shape = (PREPROCESSING.INPUT_LEN, ds.total_channels)
     assert tuple(x.shape) == expected_x_shape, f"Bad x shape: {tuple(x.shape)} expected {expected_x_shape}"
-    assert tuple(y.shape) == (CFG.PRED_HORIZON,), f"Bad y shape: {tuple(y.shape)}"
+    assert tuple(y.shape) == (PREPROCESSING.PRED_HORIZON,), f"Bad y shape: {tuple(y.shape)}"
     assert last.dim() == 0, f"Bad last shape: {tuple(last.shape)}"
     print(f"Dataset windows: {len(ds)}")
     print(f"x={tuple(x.shape)} y={tuple(y.shape)} last_dim={last.dim()} channels={ds.total_channels}")

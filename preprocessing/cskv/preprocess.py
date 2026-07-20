@@ -20,6 +20,8 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from shared.config_paths import PATHS
+from shared.config_preprocessing_defaults import PREPROCESSING
+from shared.config_training_defaults import TRAINING
 from preprocessing.cskv.config import CFG, set_seed
 from preprocessing.cskv._decompose_worker import MAX_IMFS
 
@@ -62,7 +64,7 @@ def _load_batch_signals(
     for key, group in df.group_by("msname", maintain_order=True):
         ms_name = key[0] if isinstance(key, tuple) else key
         sig = group["cpu_utilization"].to_numpy().astype(np.float32)
-        if len(sig) >= CFG.INPUT_LEN + CFG.PRED_HORIZON:
+        if len(sig) >= PREPROCESSING.INPUT_LEN + PREPROCESSING.PRED_HORIZON:
             signals[ms_name] = sig
     return signals
 
@@ -81,7 +83,7 @@ def main() -> None:
                     help="Skip Sample Entropy, K-Means, and VMD; use raw IMFs only.")
     args = ap.parse_args()
 
-    set_seed(CFG.SEED)
+    set_seed(TRAINING.SEED)
 
     # Compute worker count as a fraction of available CPU cores (default 90%).
     n_cpus = os.cpu_count() or 1
@@ -162,7 +164,7 @@ def main() -> None:
             continue
         try:
             sig = np.load(path).astype(np.float32)
-            if len(sig) >= CFG.INPUT_LEN + CFG.PRED_HORIZON:
+            if len(sig) >= PREPROCESSING.INPUT_LEN + PREPROCESSING.PRED_HORIZON:
                 all_signals[ms_name] = sig
         except Exception:
             pass
@@ -242,7 +244,7 @@ def main() -> None:
             path = os.path.join(args.out_dir, "original", f"service_{idx:05d}.npy")
             if os.path.exists(path):
                 sig = np.load(path).astype(np.float32)
-                if len(sig) >= CFG.INPUT_LEN + CFG.PRED_HORIZON:
+                if len(sig) >= PREPROCESSING.INPUT_LEN + PREPROCESSING.PRED_HORIZON:
                     signals[ms_name] = sig
                     continue
             if ms_name in all_signals:

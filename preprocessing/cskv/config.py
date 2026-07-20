@@ -17,18 +17,7 @@ def set_seed(seed: int = 42) -> None:
 
 
 @dataclass(frozen=True)
-
-class CvcbmConfig:
-
-    SEED: int = 42
-
-    INPUT_LEN: int = 60
-    PRED_HORIZON: int = 5
-
-    LEARNING_RATE: float = 0.001
-    BATCH_SIZE: int = 16384
-    EPOCHS: int = 100
-
+class CskvConfig:
     KERNEL_SIZES: tuple = (2, 4, 8)
     CONV1_OUT_CH: int = 32
     CONV2_OUT_CH: int = 64
@@ -52,8 +41,4 @@ class CvcbmConfig:
     VMD_INIT: int = 1
     VMD_TOL: float = 1e-7
 
-    TRAIN_FRAC: float = 0.70
-    VAL_FRAC: float = 0.10
-    STRIDE: int = 5
-
-CFG = CvcbmConfig()
+CFG = CskvConfig()

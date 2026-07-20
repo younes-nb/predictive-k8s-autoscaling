@@ -11,6 +11,7 @@ if REPO_ROOT not in sys.path:
 
 from preprocessing.sv.config import CFG
 from preprocessing.sv.decomposition import decompose_window
+from shared.config_preprocessing_defaults import PREPROCESSING
 
 
 def _log(msg: str) -> None:
@@ -26,24 +27,24 @@ def _decompose_and_save(
     signal: np.ndarray, channel_dirs: list[str], out_dir: str, idx: int,
     prefix: str, ms_name: str,
 ) -> None:
-    T = len(signal) - CFG.INPUT_LEN - CFG.PRED_HORIZON + 1
+    T = len(signal) - PREPROCESSING.INPUT_LEN - PREPROCESSING.PRED_HORIZON + 1
     if T <= 0:
         _log(f"[{ms_name}/{prefix}] too short ({len(signal)} steps)")
         return
 
-    n_windows = len(range(0, T, CFG.STRIDE))
+    n_windows = len(range(0, T, PREPROCESSING.STRIDE))
     _log(f"[{ms_name}/{prefix}] {len(signal)} steps, {n_windows} windows")
 
     accum = [[] for _ in range(N_CHANNELS)]
     _last_pct = 0
     _t0 = _time.time()
-    for wi, i in enumerate(range(0, T, CFG.STRIDE)):
+    for wi, i in enumerate(range(0, T, PREPROCESSING.STRIDE)):
         pct = (wi + 1) * 100 // n_windows
         if pct >= _last_pct + 10:
             _last_pct = pct - (pct % 10)
             _log(f"[{ms_name}/{prefix}] {_last_pct}% ({wi+1}/{n_windows}, {_time.time()-_t0:.0f}s)")
 
-        window = signal[i: i + CFG.INPUT_LEN]
+        window = signal[i: i + PREPROCESSING.INPUT_LEN]
         channels = decompose_window(window, CFG)
         for c in range(N_CHANNELS):
             accum[c].append(channels[c])
@@ -95,7 +96,7 @@ def main() -> None:
             sys.exit(1)
         cpu_signal = np.load(cpu_path).astype(np.float32)
 
-        cpu_T = len(cpu_signal) - CFG.INPUT_LEN - CFG.PRED_HORIZON + 1
+        cpu_T = len(cpu_signal) - PREPROCESSING.INPUT_LEN - PREPROCESSING.PRED_HORIZON + 1
         if cpu_T <= 0:
             print(f"RESULT:True:too short ({len(cpu_signal)})")
             sys.exit(0)
@@ -108,7 +109,7 @@ def main() -> None:
                 print(f"RESULT:False:ERROR: memory signal not found at {mem_path}")
                 sys.exit(1)
             mem_signal = np.load(mem_path).astype(np.float32)
-            mem_T = len(mem_signal) - CFG.INPUT_LEN - CFG.PRED_HORIZON + 1
+            mem_T = len(mem_signal) - PREPROCESSING.INPUT_LEN - PREPROCESSING.PRED_HORIZON + 1
             if mem_T <= 0:
                 _log(f"[{ms_name}] memory signal too short ({len(mem_signal)}), writing zeros")
                 mem_signal = np.zeros_like(cpu_signal)

@@ -12,6 +12,8 @@ if REPO_ROOT not in sys.path:
 
 from preprocessing.cskv.config import CFG, set_seed
 from preprocessing.cskv.decomposition import decompose_service_signal
+from shared.config_preprocessing_defaults import PREPROCESSING
+from shared.config_training_defaults import TRAINING
 
 def _log(msg: str) -> None:
     print(msg, file=sys.stderr, flush=True)
@@ -19,7 +21,7 @@ def _log(msg: str) -> None:
 MAX_IMFS = 3
 
 def main() -> None:
-    set_seed(CFG.SEED)
+    set_seed(TRAINING.SEED)
     ms_name = sys.argv[1]
     idx = int(sys.argv[2])
     out_dir = sys.argv[3]
@@ -49,26 +51,26 @@ def main() -> None:
 
         # Split signal into sliding windows of INPUT_LEN; each window is decomposed independently.
         # T = number of valid starting positions for which a target (next value) also exists.
-        T = len(signal) - CFG.INPUT_LEN - CFG.PRED_HORIZON + 1
+        T = len(signal) - PREPROCESSING.INPUT_LEN - PREPROCESSING.PRED_HORIZON + 1
         if T <= 0:
             print(f"RESULT:True:too short ({len(signal)})")
             sys.exit(0)
 
-        n_windows = len(range(0, T, CFG.STRIDE))
+        n_windows = len(range(0, T, PREPROCESSING.STRIDE))
         _log(f"[{ms_name}] {len(signal)} steps, {n_windows} windows, "
-             f"INPUT_LEN={CFG.INPUT_LEN}, STRIDE={CFG.STRIDE}")
+             f"INPUT_LEN={PREPROCESSING.INPUT_LEN}, STRIDE={PREPROCESSING.STRIDE}")
 
         window_imfs = [[] for _ in range(20)]
         window_vmd_modes = [[] for _ in range(CFG.VMD_K)]
         windows = []
         _last_pct = 0
-        for wi, i in enumerate(range(0, T, CFG.STRIDE)):
+        for wi, i in enumerate(range(0, T, PREPROCESSING.STRIDE)):
             pct = (wi + 1) * 100 // n_windows
             if pct >= _last_pct + 10:
                 _last_pct = pct - (pct % 10)
                 _log(f"[{ms_name}] {_last_pct}% ({wi+1}/{n_windows}, {_time.time()-_t0:.0f}s)")
 
-            window = signal[i : i + CFG.INPUT_LEN]
+            window = signal[i : i + PREPROCESSING.INPUT_LEN]
             windows.append(window)
             decomposed = decompose_service_signal(window.astype(np.float64), CFG, return_raw_imfs=no_clustering)
             if no_clustering:
@@ -89,7 +91,7 @@ def main() -> None:
         for k in range(n_actual):
             n_present = len(window_imfs[k])
             if n_present < n_windows:
-                pad_shape = (CFG.INPUT_LEN,) if n_present > 0 else (CFG.INPUT_LEN,)
+                pad_shape = (PREPROCESSING.INPUT_LEN,) if n_present > 0 else (PREPROCESSING.INPUT_LEN,)
                 template = window_imfs[k][0] if n_present > 0 else np.zeros(pad_shape, dtype=np.float32)
                 pad_cnt = n_windows - n_present
                 window_imfs[k].extend([np.zeros_like(template) for _ in range(pad_cnt)])
@@ -103,7 +105,7 @@ def main() -> None:
                     if len(window_vmd_modes[mode_k]) > 0:
                         vmd_arr = np.stack(window_vmd_modes[mode_k], axis=0)
                     else:
-                        vmd_arr = np.zeros((n_windows, CFG.INPUT_LEN), dtype=np.float32)
+                        vmd_arr = np.zeros((n_windows, PREPROCESSING.INPUT_LEN), dtype=np.float32)
                     vmd_path = os.path.join(out_dir, f"co_imf_0", f"vmd_mode_{mode_k}_service_{idx:05d}.npy")
                     for attempt in range(3):
                         try:
@@ -121,7 +123,7 @@ def main() -> None:
             if len(window_imfs[k]) > 0:
                 arr = np.stack(window_imfs[k], axis=0)
             else:
-                arr = np.zeros((n_windows, CFG.INPUT_LEN), dtype=np.float32)
+                arr = np.zeros((n_windows, PREPROCESSING.INPUT_LEN), dtype=np.float32)
             stacked.append(arr)
             imf_path = os.path.join(out_dir, f"{dir_prefix}_{k}", f"service_{idx:05d}.npy")
             for attempt in range(3):
