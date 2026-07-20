@@ -41,8 +41,8 @@ PREPROCESS_APPROACHES = ("none", "smoothing", "sv", "cskv")
 
 
 def _build_model(model_type, input_size, args, num_targets, hyperparams, device):
-    _, _, build_fn = get_config(model_type)
-    return build_fn(hyperparams, input_size, args, num_targets, device)
+    cfg = get_config(model_type)
+    return cfg.build_model(hyperparams, input_size, args, num_targets, device)
 
 
 def _load_datasets(args, preprocess_approach):
@@ -396,8 +396,8 @@ def train(args):
 
         log_msg = (
             f"Epoch {epoch}/{args.epochs} | "
-            f"Train Loss: {avg_train_loss:.4f} | "
-            f"Val Loss: {avg_val_loss:.4f} | "
+            f"Train Loss: {avg_train_loss:.6f} | "
+            f"Val Loss: {avg_val_loss:.6f} | "
             f"Time: {epoch_duration:.1f}s"
         )
 

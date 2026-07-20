@@ -17,7 +17,7 @@ class TrainingDefaults:
     LR_RANGE: Tuple[float, float] = (5e-4, 5e-3)
     HYPERPARAM_SAMPLE_ATTEMPTS: int = 5000
     HYPERPARAM_CHECK_INTERVAL: int = 50
-    LOSS_CHANGE_THRESHOLD: float = 1e-4
+    LOSS_CHANGE_THRESHOLD: float = 1e-5
     GRAD_CLIP: float = 1.0
     WEIGHT_DECAY: float = 1e-4
     UNDER_PENALTY: float = 8.0
