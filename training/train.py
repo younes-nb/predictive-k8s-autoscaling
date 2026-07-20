@@ -89,7 +89,7 @@ def train(args):
     preprocess_approach = args.preprocess_approach
 
     timeout_kwargs = InitProcessGroupKwargs(timeout=timedelta(seconds=14400))
-    mixed_precision = "fp16" if not args.cpu and torch.cuda.is_available() else "no"
+    mixed_precision = "no"
     accelerator = Accelerator(cpu=args.cpu, mixed_precision=mixed_precision, kwargs_handlers=[timeout_kwargs])
     device = accelerator.device
 
@@ -263,6 +263,7 @@ def train(args):
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+    torch.use_deterministic_algorithms(True)
     log_info(f"Seed set: {seed}")
 
     model = _build_model(model_type, input_size, args, num_targets, current_hyperparams, device)
