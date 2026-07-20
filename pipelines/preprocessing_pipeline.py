@@ -45,6 +45,8 @@ def main():
     )
     ap.add_argument("--smooth_window", type=int, default=5, help="Smoothing window size (for 'smoothing' approach)")
     ap.add_argument("--dataset_workers", type=int, default=0, help="Workers for sv/cskv decomposition")
+    ap.add_argument("--swt_level", type=int, default=None, help="SWT level for CPU (sv only, default: config)")
+    ap.add_argument("--mem_swt_level", type=int, default=None, help="SWT level for memory (sv only, default: config)")
     ap.add_argument("--subset_seed", type=int, default=42, help="Seed for service subsampling in build_windows")
 
     args = ap.parse_args()
@@ -122,6 +124,10 @@ def main():
                       "--feature_set", args.feature_set]
             if args.max_services is not None:
                 cmd_sv.extend(["--max_services", str(args.max_services)])
+            if args.swt_level is not None:
+                cmd_sv.extend(["--swt_level", str(args.swt_level)])
+            if args.mem_swt_level is not None:
+                cmd_sv.extend(["--mem_swt_level", str(args.mem_swt_level)])
             run(cmd_sv, "Step 3b: SV Decomposition")
         elif args.preprocess_approach == "cskv":
             cskv_out = os.path.join(args.windows_dir, "cskv")

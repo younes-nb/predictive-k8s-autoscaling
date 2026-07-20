@@ -71,6 +71,8 @@ def main():
     )
     ap.add_argument("--smooth_window", type=int, default=5, help="Moving average window size for 'smoothing' approach (default: %(default)s)")
     ap.add_argument("--dataset_workers", type=int, default=0, help="Dataloader workers for sv/cskv datasets (default: %(default)s)")
+    ap.add_argument("--swt_level", type=int, default=None, help="SWT level for CPU (sv only, default: config)")
+    ap.add_argument("--mem_swt_level", type=int, default=None, help="SWT level for memory (sv only, default: config)")
     ap.add_argument(
         "--train_pct",
         type=float,
@@ -133,6 +135,10 @@ def main():
         cmd_pre.extend(["--preprocess_approach", args.preprocess_approach])
         cmd_pre.extend(["--smooth_window", str(args.smooth_window)])
         cmd_pre.extend(["--subset_seed", str(args.seed)])
+        if args.swt_level is not None:
+            cmd_pre.extend(["--swt_level", str(args.swt_level)])
+        if args.mem_swt_level is not None:
+            cmd_pre.extend(["--mem_swt_level", str(args.mem_swt_level)])
 
         total_times["preprocessing"] = run(cmd_pre, "Step 1: Preprocessing")
 

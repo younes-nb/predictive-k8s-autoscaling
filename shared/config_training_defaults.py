@@ -9,7 +9,7 @@ class TrainingDefaults:
     DROPOUT: float = 0.5
     BATCH_SIZE: int = 16384
     NUM_WORKERS: int = 12
-    EPOCHS: int = 300
+    EPOCHS: int = 1000
     LR: float = 0.0005
     HIDDEN_SIZE_OPTIONS: Tuple[int, ...] = (32, 64, 128, 256)
     NUM_LAYERS_OPTIONS: Tuple[int, ...] = (1, 2, 3, 4)
