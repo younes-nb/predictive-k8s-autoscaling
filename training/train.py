@@ -440,6 +440,9 @@ def train(args):
 
         scheduler.step(avg_val_loss)
 
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+
         if patience_counter >= TRAINING.EARLY_STOP_PATIENCE:
             log_info(
                 "\n=== Early Stopping ===\n"

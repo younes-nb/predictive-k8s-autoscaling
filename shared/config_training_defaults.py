@@ -7,7 +7,7 @@ class TrainingDefaults:
     HIDDEN_SIZE: int = 64
     NUM_LAYERS: int = 3
     DROPOUT: float = 0.5
-    BATCH_SIZE: int = 16384
+    BATCH_SIZE: int = 8192
     NUM_WORKERS: int = 12
     EPOCHS: int = 1000
     LR: float = 0.0005
