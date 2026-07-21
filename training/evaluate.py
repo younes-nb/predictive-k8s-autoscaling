@@ -41,11 +41,15 @@ def _preprocess_raw_window(x_np, preprocess_approach):
         from preprocessing.smooth_windows import smooth_array
         return smooth_array(x_np, window_size=5)
     elif preprocess_approach == "sv":
+        from dataclasses import replace
         from preprocessing.sv.decomposition import decompose_window
         from preprocessing.sv.config import CFG as SV_CFG
+        cpu_cfg = SV_CFG
+        mem_cfg = replace(SV_CFG, SWT_LEVEL=SV_CFG.MEM_SWT_LEVEL)
         channels = []
         for f in range(x_np.shape[1]):
-            ch = decompose_window(x_np[:, f].astype(np.float64), SV_CFG)
+            cfg = mem_cfg if f == 1 else cpu_cfg
+            ch = decompose_window(x_np[:, f].astype(np.float64), cfg)
             channels.append(ch)
         stacked = np.concatenate(channels, axis=0)
         return stacked.T

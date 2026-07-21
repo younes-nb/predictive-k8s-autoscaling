@@ -99,7 +99,10 @@ METRIC_NAMES = [
 PCT_METRICS = {"MAPE (%)", "MDA (%)", "Under-Pred Rate (%)", "Over-Pred Rate (%)"}
 
 
-def _delta_pct(model_val, naive_val):
+def _delta_pct(model_val, naive_val, is_pct_metric=False):
+    if is_pct_metric:
+        diff = model_val - naive_val
+        return f"{diff:+.1f}"
     denom = abs(naive_val)
     if denom < 1e-12:
         return "N/A"
@@ -140,7 +143,7 @@ def compute_metrics(
         ls = last_step[name]
         av = avg_steps[name]
         nv = naive[name]
-        d = _delta_pct(ls, nv)
+        d = _delta_pct(ls, nv, is_pct_metric=(name in PCT_METRICS))
 
         if name in PCT_METRICS:
             log_info(
