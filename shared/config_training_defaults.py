@@ -18,7 +18,7 @@ class TrainingDefaults:
     HYPERPARAM_SAMPLE_ATTEMPTS: int = 5000
     HYPERPARAM_CHECK_INTERVAL: int = 50
     LOSS_CHANGE_THRESHOLD: float = 1e-5
-    EARLY_STOP_PATIENCE: int = 15
+    EARLY_STOP_PATIENCE: int = 20
     EARLY_STOP_MIN_DELTA: float = 1e-6
     LR_SCHEDULER: str = "ReduceLROnPlateau"
     LR_REDUCE_PATIENCE: int = 7
