@@ -55,7 +55,6 @@ class DualPathwayTcn(nn.Module):
             self.mem_attn_mlp = nn.Sequential(
                 nn.Linear(128, 64), nn.Tanh(), nn.Linear(64, 1),
             )
-            self.shared_fc = nn.Sequential(nn.Linear(256, 128), nn.ReLU())
             self.cpu_head = nn.Linear(128, pred_horizon)
             self.mem_head = nn.Linear(128, pred_horizon)
         else:
@@ -113,9 +112,8 @@ class DualPathwayTcn(nn.Module):
                 self.mem_micro_tcn, self.mem_macro_tcn,
                 self.mem_fusion, self.mem_attn_mlp,
             )
-            shared = self.shared_fc(torch.cat([cpu_vec, mem_vec], dim=1))
             return torch.stack(
-                [self.cpu_head(shared), self.mem_head(shared)], dim=-1,
+                [self.cpu_head(cpu_vec), self.mem_head(mem_vec)], dim=-1,
             )
         else:
             cpu_vec = self._forward_metric(
