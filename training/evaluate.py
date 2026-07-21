@@ -16,6 +16,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from accelerate import Accelerator
+from tqdm import tqdm
 
 from shared.config_paths import PATHS
 from shared.config_training_defaults import TRAINING
@@ -172,10 +173,8 @@ def _benchmark_single_sample_inference(model, accelerator, args, ckpt_args, devi
     raw_model.eval()
 
     latencies = []
-    n_total = len(indices)
-    progress_step = max(1, n_total // 10)
 
-    for i, idx in enumerate(indices):
+    for i, idx in enumerate(tqdm(indices, desc="Benchmark", unit="sample")):
         x_raw, *_ = raw_ds[idx]
         x_np = x_raw.numpy()
 
@@ -192,13 +191,6 @@ def _benchmark_single_sample_inference(model, accelerator, args, ckpt_args, devi
 
         t1 = time.perf_counter()
         latencies.append((t1 - t0) * 1000.0)
-
-        if (i + 1) % progress_step == 0:
-            print(
-                f"Benchmark {i+1}/{n_total} processed...", end="\r", flush=True,
-            )
-
-    print(" " * 50, end="\r")
 
     latencies = np.array(latencies)
 
@@ -310,9 +302,8 @@ def evaluate(args):
 
     model.eval()
     start_time = time.time()
-    total_batches = len(test_loader)
 
-    for i, batch in enumerate(test_loader):
+    for i, batch in enumerate(tqdm(test_loader, desc="Inference", unit="batch")):
         x, y = batch[0], batch[1]
 
         with torch.no_grad():
@@ -332,12 +323,10 @@ def evaluate(args):
             all_preds.append(gathered_mu.cpu().numpy())
             all_trues.append(gathered_y.cpu().numpy())
             all_lasts.append(y_last)
-            print(f"Batch {i+1}/{total_batches} processed...", end="\r", flush=True)
 
     if not accelerator.is_local_main_process:
         return
 
-    print(" " * 50, end="\r")
     inference_time = time.time() - start_time
 
     y_pred = np.concatenate(all_preds, axis=0)
