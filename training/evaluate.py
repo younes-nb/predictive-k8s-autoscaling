@@ -294,8 +294,6 @@ def evaluate(args):
             model, accelerator, args, ckpt_args, device, log_info,
         )
 
-    log_info("\n--- Starting Inference ---")
-
     all_preds = []
     all_trues = []
     all_lasts = []
