@@ -348,18 +348,36 @@ def evaluate(args):
 
     total_samples = y_pred.shape[0]
 
+    input_len = ckpt_args.get("input_len", PREPROCESSING.INPUT_LEN)
+    horizon = ckpt_args.get("pred_horizon", PREPROCESSING.PRED_HORIZON)
+    raw_test_ds = ShardedWindowsDataset(
+        args.windows_dir, "test", input_len, horizon, use_weights=False
+    )
+    raw_test_ds = head_slice_dataset_by_pct(raw_test_ds, args.test_pct)
+    raw_second_lasts = []
+    for idx in range(len(raw_test_ds)):
+        x_raw, *_ = raw_test_ds[idx]
+        raw_second_lasts.append(x_raw[-2, :].numpy())
+    y_second_last_all = np.stack(raw_second_lasts, axis=0)
+    if y_second_last_all.ndim == 1:
+        y_second_last_all = y_second_last_all[:, np.newaxis]
+
     log_info("\n=== Inference Summary ===")
     log_info(f"Model: {model_type}")
 
     for t_idx, t_name in zip(target_idxs_in_features, target_features):
         y_last_t = y_last_all[:, t_idx]
+        y_second_last_t = y_second_last_all[:, t_idx]
         if num_targets > 1:
             y_pred_t = y_pred[:, :, t_idx]
             y_true_t = y_true[:, :, t_idx]
         else:
             y_pred_t = y_pred
             y_true_t = y_true
-        compute_metrics(y_pred_t, y_true_t, y_last_t, horizon, total_samples, log_info, target_name=t_name)
+        compute_metrics(
+            y_pred_t, y_true_t, y_last_t, horizon, total_samples, log_info,
+            target_name=t_name, y_second_last=y_second_last_t,
+        )
 
     avg_inference_time_ms = (inference_time / max(1, total_samples)) * 1000.0
     log_info(f"Total Inference Time:  {inference_time:.2f}s")

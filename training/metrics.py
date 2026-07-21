@@ -28,7 +28,7 @@ def find_max_inference_batch_size(
     raise RuntimeError("Could not find a batch size that fits in memory.")
 
 
-def _compute_one_step(y_pred_step, y_true_step, y_last):
+def _compute_one_step(y_pred_step, y_true_step, y_last, y_second_last=None):
     err = y_pred_step - y_true_step
     abs_err = np.abs(err)
 
@@ -53,7 +53,10 @@ def _compute_one_step(y_pred_step, y_true_step, y_last):
         mape = 0.0
 
     actual_dir = np.sign(y_true_step - y_last)
-    pred_dir = np.sign(y_pred_step - y_last)
+    if y_second_last is not None:
+        pred_dir = np.sign(y_last - y_second_last)
+    else:
+        pred_dir = np.sign(y_pred_step - y_last)
     mda = float(np.mean(actual_dir == pred_dir))
 
     under_rate = (n_under / n * 100.0) if n > 0 else 0.0
@@ -111,7 +114,8 @@ def _delta_pct(model_val, naive_val, is_pct_metric=False):
 
 
 def compute_metrics(
-    y_pred, y_true, y_last, horizon, total_samples, log_info, target_name=None
+    y_pred, y_true, y_last, horizon, total_samples, log_info,
+    target_name=None, y_second_last=None,
 ):
     if total_samples == 0:
         log_info("No samples found in test set.")
@@ -127,7 +131,7 @@ def compute_metrics(
             vals.append(step_metrics[name])
         avg_steps[name] = float(np.mean(vals))
 
-    naive = _compute_one_step(y_last, y_true[:, -1], y_last)
+    naive = _compute_one_step(y_last, y_true[:, -1], y_last, y_second_last=y_second_last)
 
     header = f"=== Evaluation{f': {target_name}' if target_name else ''} ==="
     log_info(f"\n{header}")
