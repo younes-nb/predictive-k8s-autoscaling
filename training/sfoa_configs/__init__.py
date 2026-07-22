@@ -4,6 +4,7 @@ from .bilstm import SEARCH_SPACE as BILSTM_SEARCH_SPACE, DEFAULTS as BILSTM_DEFA
 from .cnn_bilstm import SEARCH_SPACE as CNN_SEARCH_SPACE, DEFAULTS as CNN_DEFAULTS, build_model as cnn_build_model
 from .tcn_bigru import SEARCH_SPACE as TCN_SEARCH_SPACE, DEFAULTS as TCN_DEFAULTS, build_model as tcn_build_model
 from .tcn import SEARCH_SPACE as TCN_DUAL_SEARCH_SPACE, DEFAULTS as TCN_DUAL_DEFAULTS, build_model as tcn_dual_build_model
+from .hfm import SEARCH_SPACE as HFM_SEARCH_SPACE, DEFAULTS as HFM_DEFAULTS, build_model as hfm_build_model
 
 _REGISTRY = {
     "lstm":       ("rnn", RNN_SEARCH_SPACE, RNN_DEFAULTS, rnn_build_model),
@@ -13,6 +14,7 @@ _REGISTRY = {
     "cnn_bilstm": ("cnn_bilstm", CNN_SEARCH_SPACE, CNN_DEFAULTS, cnn_build_model),
     "tcn_bigru":  ("tcn_bigru", TCN_SEARCH_SPACE, TCN_DEFAULTS, tcn_build_model),
     "tcn":        ("tcn", TCN_DUAL_SEARCH_SPACE, TCN_DUAL_DEFAULTS, tcn_dual_build_model),
+    "hfm":        ("hfm", HFM_SEARCH_SPACE, HFM_DEFAULTS, hfm_build_model),
 }
 
 
