@@ -5,6 +5,7 @@ import argparse
 import logging
 import time
 import math
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, os.pardir))
@@ -31,7 +32,7 @@ from types import SimpleNamespace
 from training.sfoa_configs import get_config
 
 
-MODEL_TYPES = ("lstm", "gru", "bilstm", "bigrue", "cnn_bilstm")
+MODEL_TYPES = ("lstm", "gru", "bilstm", "bigrue", "cnn_bilstm", "freq_cnn_bilstm")
 PREPROCESS_APPROACHES = ("none", "smoothing", "sv", "cskv")
 
 
@@ -85,6 +86,25 @@ def _preprocess_raw_window(x_np, preprocess_approach):
         return np.stack(channel_list, axis=1)
     else:
         raise ValueError(f"Unknown preprocess_approach: {preprocess_approach}")
+
+
+def _benchmark_worker(idx, raw_ds, model, preprocess_approach, device):
+    x_raw, *_ = raw_ds[idx]
+    x_np = x_raw.numpy()
+
+    t0 = time.perf_counter()
+
+    x_processed = _preprocess_raw_window(x_np, preprocess_approach)
+    x_tensor = torch.from_numpy(x_processed).float().unsqueeze(0).to(device)
+
+    with torch.no_grad():
+        _ = model(x_tensor)
+
+    if device.type == "cuda":
+        torch.cuda.synchronize()
+
+    t1 = time.perf_counter()
+    return (t1 - t0) * 1000.0
 
 
 def _build_model_from_checkpoint(checkpoint, input_size, device):
@@ -172,25 +192,34 @@ def _benchmark_single_sample_inference(model, accelerator, args, ckpt_args, devi
     raw_model = accelerator.unwrap_model(model)
     raw_model.eval()
 
+    bench_workers = getattr(args, "bench_workers", 0)
+    use_parallel = device.type == "cpu"
+    if use_parallel:
+        if bench_workers <= 0:
+            bench_workers = max(1, int(0.9 * (os.cpu_count() or 1)))
+        log_info(f"Parallel benchmark: {bench_workers} worker threads")
+
     latencies = []
 
-    for i, idx in enumerate(tqdm(indices, desc="Benchmark", unit="sample")):
-        x_raw, *_ = raw_ds[idx]
-        x_np = x_raw.numpy()
-
-        t0 = time.perf_counter()
-
-        x_processed = _preprocess_raw_window(x_np, preprocess_approach)
-        x_tensor = torch.from_numpy(x_processed).float().unsqueeze(0).to(device)
-
-        with torch.no_grad():
-            _ = raw_model(x_tensor)
-
-        if device.type == "cuda":
-            torch.cuda.synchronize()
-
-        t1 = time.perf_counter()
-        latencies.append((t1 - t0) * 1000.0)
+    if use_parallel and bench_workers > 1:
+        with ThreadPoolExecutor(max_workers=bench_workers) as executor:
+            futures = {
+                executor.submit(
+                    _benchmark_worker, idx, raw_ds, raw_model,
+                    preprocess_approach, device,
+                ): idx
+                for idx in indices
+            }
+            for future in tqdm(
+                as_completed(futures), total=len(futures),
+                desc="Benchmark", unit="sample",
+            ):
+                latencies.append(future.result())
+    else:
+        for idx in tqdm(indices, desc="Benchmark", unit="sample"):
+            latencies.append(
+                _benchmark_worker(idx, raw_ds, raw_model, preprocess_approach, device)
+            )
 
     latencies = np.array(latencies)
 
@@ -392,6 +421,11 @@ def main():
         "--inference_bench_samples", type=int, default=0,
         help="Number of raw windows for single-sample latency benchmark. "
              "0 or negative means use all test windows.",
+    )
+    p.add_argument(
+        "--bench_workers", type=int, default=0,
+        help="Worker threads for inference benchmark (CPU only). "
+             "0 = auto (90%% of CPU cores).",
     )
 
     try:
