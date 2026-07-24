@@ -32,7 +32,7 @@ from types import SimpleNamespace
 from training.sfoa_configs import get_config
 
 
-MODEL_TYPES = ("lstm", "gru", "bilstm", "bigrue", "cnn_bilstm", "freq_cnn_bilstm")
+MODEL_TYPES = ("lstm", "gru", "bilstm", "bigrue", "cnn_bilstm", "freq_tsmixer")
 PREPROCESS_APPROACHES = ("none", "smoothing", "sv", "cskv")
 
 
