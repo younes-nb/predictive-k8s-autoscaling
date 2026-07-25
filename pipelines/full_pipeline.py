@@ -66,8 +66,8 @@ def main():
     ap.add_argument(
         "--model_type",
         default="lstm",
-        choices=["lstm", "gru", "bilstm", "bigrue", "cnn_bilstm", "freq_tsmixer", "farms_cnn"],
-        help="Model architecture: lstm/gru (unidirectional), bilstm/bigrue (bidirectional), cnn_bilstm, freq_tsmixer, farms_cnn",
+        choices=["lstm", "gru", "bilstm", "bigrue", "cnn_bilstm", "freq_tsmixer", "farms_cnn", "hfmixer"],
+        help="Model architecture: lstm/gru (unidirectional), bilstm/bigrue (bidirectional), cnn_bilstm, freq_tsmixer, farms_cnn, hfmixer",
     )
     ap.add_argument("--smooth_window", type=int, default=5, help="Moving average window size for 'smoothing' approach (default: %(default)s)")
     ap.add_argument("--dataset_workers", type=int, default=0, help="Dataloader workers for sv/cskv datasets (default: %(default)s)")
