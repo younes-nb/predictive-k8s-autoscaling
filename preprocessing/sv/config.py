@@ -6,8 +6,8 @@ from typing import List
 class SvConfig:
     SWT_LEVEL: int = 4
     MEM_SWT_LEVEL: int = 2
-    VMD_K: int = 9
-    MEM_VMD_K: int = 9
+    VMD_K: int = 7
+    MEM_VMD_K: int = 8
     VMD_ALPHA: int = 2000
     VMD_TAU: float = 0.0
     VMD_DC: int = 0
