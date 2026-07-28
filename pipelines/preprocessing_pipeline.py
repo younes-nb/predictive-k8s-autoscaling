@@ -61,8 +61,8 @@ def main():
     ap.add_argument("--mem_vmd_swt_level", type=int, default=None,
                      help="SWT detail level fed into VMD for memory (sv only, default: config)")
     ap.add_argument("--subset_seed", type=int, default=42, help="Seed for service subsampling in build_windows")
-    ap.add_argument("--force_recompute", action="store_true",
-                     help="Ignore cached output and recompute all preprocessing approach shards")
+    ap.add_argument("--recompute_preprocessing", action="store_true",
+                     help="Recompute the preprocessing approach output, ignoring cached shards")
 
     args = ap.parse_args()
 
@@ -156,16 +156,16 @@ def main():
                 cmd_sv.extend(["--vmd_swt_level", str(args.vmd_swt_level)])
             if args.mem_vmd_swt_level is not None:
                 cmd_sv.extend(["--mem_vmd_swt_level", str(args.mem_vmd_swt_level)])
-            if args.force_recompute:
-                cmd_sv.append("--force_recompute")
+            if args.recompute_preprocessing:
+                cmd_sv.append("--recompute_preprocessing")
             run(cmd_sv, "Step 3b: SV Decomposition")
         elif args.preprocess_approach == "cskv":
             cskv_out = os.path.join(args.windows_dir, "cskv")
             cmd_cskv = [sys.executable, cskv_script,
                         "--windows_dir", args.windows_dir,
                         "--out_dir", cskv_out]
-            if args.force_recompute:
-                cmd_cskv.append("--force_recompute")
+            if args.recompute_preprocessing:
+                cmd_cskv.append("--recompute_preprocessing")
             run(cmd_cskv, "Step 3b: CSKV Decomposition")
     else:
         print("\n=== Skipping preprocessing approach ===")
