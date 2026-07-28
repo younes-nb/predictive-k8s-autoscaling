@@ -109,6 +109,8 @@ def main() -> None:
                     help="Fraction of CPU cores to use (default: 0.9)")
     ap.add_argument("--no_clustering", action="store_true",
                     help="Skip Sample Entropy, K-Means, and VMD; use raw IMFs only.")
+    ap.add_argument("--force_recompute", action="store_true",
+                    help="Ignore cached output and recompute all shards")
     args = ap.parse_args()
 
     set_seed(TRAINING.SEED)
@@ -141,7 +143,7 @@ def main() -> None:
             out_sid = os.path.join(args.out_dir, f"{base}_sid_{split}.npy")
             out_last = os.path.join(args.out_dir, f"{base}_last_{split}.npy")
 
-            if os.path.exists(out_x) and os.path.exists(out_last):
+            if not args.force_recompute and os.path.exists(out_x) and os.path.exists(out_last):
                 logging.info("Shard %s already done, skipping", base)
                 continue
 

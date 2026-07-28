@@ -27,6 +27,7 @@ def main():
     ap.add_argument("--skip_ingest", action="store_true", help="Skip converting raw traces to parquet")
     ap.add_argument("--skip_raw_windows", action="store_true", help="Skip building sliding window datasets (build_windows.py)")
     ap.add_argument("--skip_preprocessing_approach", action="store_true", help="Skip the preprocessing approach step (sv/cskv/smoothing)")
+    ap.add_argument("--force_recompute", action="store_true", help="Ignore cached output and recompute all preprocessing approach shards")
     ap.add_argument("--windows_dir", default=PATHS.WINDOWS_DIR, help="Output directory for window datasets")
     ap.add_argument("--skip_preprocessing", action="store_true", help="Skip the entire preprocessing pipeline (fetch+ingest+windows)")
     ap.add_argument("--skip_weights", action="store_true", help="Skip boundary weight computation")
@@ -135,6 +136,8 @@ def main():
             cmd_pre.append("--skip_raw_windows")
         if args.skip_preprocessing_approach:
             cmd_pre.append("--skip_preprocessing_approach")
+        if args.force_recompute:
+            cmd_pre.append("--force_recompute")
         cmd_pre.extend(["--preprocess_approach", args.preprocess_approach])
         cmd_pre.extend(["--smooth_window", str(args.smooth_window)])
         cmd_pre.extend(["--subset_seed", str(args.seed)])

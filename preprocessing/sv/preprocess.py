@@ -101,6 +101,8 @@ def main() -> None:
                     help=f"SWT decomposition level for memory (default: {CFG.MEM_SWT_LEVEL})")
     ap.add_argument("--num_workers", type=float, default=0.9,
                     help="Fraction of CPU cores to use (default: 0.9)")
+    ap.add_argument("--force_recompute", action="store_true",
+                    help="Ignore cached output and recompute all shards")
     args = ap.parse_args()
 
     has_mem = args.feature_set == "cpu_mem_both"
@@ -135,7 +137,7 @@ def main() -> None:
             out_sid = os.path.join(args.out_dir, f"{base}_sid_{split}.npy")
             out_last = os.path.join(args.out_dir, f"{base}_last_{split}.npy")
 
-            if os.path.exists(out_x) and os.path.exists(out_last):
+            if not args.force_recompute and os.path.exists(out_x) and os.path.exists(out_last):
                 logging.info("Shard %s already done, skipping", base)
                 continue
 
