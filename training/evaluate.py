@@ -47,7 +47,12 @@ def _preprocess_raw_window(x_np, preprocess_approach):
         from preprocessing.sv.decomposition import decompose_window
         from preprocessing.sv.config import CFG as SV_CFG
         cpu_cfg = SV_CFG
-        mem_cfg = replace(SV_CFG, SWT_LEVEL=SV_CFG.MEM_SWT_LEVEL)
+        mem_cfg = replace(
+            SV_CFG,
+            SWT_LEVEL=SV_CFG.MEM_SWT_LEVEL,
+            VMD_K=SV_CFG.MEM_VMD_K,
+            VMD_SWT_LEVEL=SV_CFG.MEM_VMD_SWT_LEVEL,
+        )
         channels = []
         for f in range(x_np.shape[1]):
             cfg = mem_cfg if f == 1 else cpu_cfg
