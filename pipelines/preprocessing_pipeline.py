@@ -26,7 +26,10 @@ def main():
     ap.add_argument("--windows_dir", default=PATHS.WINDOWS_DIR)
     ap.add_argument("--skip_fetch", action="store_true")
     ap.add_argument("--skip_ingest", action="store_true")
-    ap.add_argument("--skip_windows", action="store_true")
+    ap.add_argument("--skip_raw_windows", action="store_true",
+                     help="Skip building raw sliding windows (build_windows.py)")
+    ap.add_argument("--skip_preprocessing_approach", action="store_true",
+                     help="Skip the preprocessing approach step (sv/cskv/smoothing)")
     ap.add_argument(
         "--delete_raw",
         action="store_false",
@@ -97,7 +100,7 @@ def main():
     else:
         print("\n=== Skipping ingest ===")
 
-    if not args.skip_windows:
+    if not args.skip_raw_windows:
         cmd = [
             sys.executable,
             windows_script,
@@ -110,7 +113,10 @@ def main():
             cmd.extend(["--max_services", str(args.max_services)])
         cmd.extend(["--subset_seed", str(args.subset_seed)])
         run(cmd, "Step 3: Build windows (join tables)")
+    else:
+        print("\n=== Skipping raw windows ===")
 
+    if not args.skip_preprocessing_approach:
         if args.preprocess_approach == "smoothing":
             cmd_smooth = [
                 sys.executable, smooth_script,
@@ -136,7 +142,7 @@ def main():
                         "--out_dir", cskv_out]
             run(cmd_cskv, "Step 3b: CSKV Decomposition")
     else:
-        print("\n=== Skipping windows ===")
+        print("\n=== Skipping preprocessing approach ===")
 
     print("\nPreprocessing complete.")
 
