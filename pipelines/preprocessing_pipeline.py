@@ -50,6 +50,16 @@ def main():
     ap.add_argument("--dataset_workers", type=int, default=0, help="Workers for sv/cskv decomposition")
     ap.add_argument("--swt_level", type=int, default=None, help="SWT level for CPU (sv only, default: config)")
     ap.add_argument("--mem_swt_level", type=int, default=None, help="SWT level for memory (sv only, default: config)")
+    ap.add_argument("--no_vmd", action="store_true",
+                     help="Skip VMD decomposition; use only SWT coefficients (sv only)")
+    ap.add_argument("--vmd_k", type=int, default=None,
+                     help="VMD K (modes) for CPU (sv only, default: config)")
+    ap.add_argument("--mem_vmd_k", type=int, default=None,
+                     help="VMD K for memory (sv only, default: config)")
+    ap.add_argument("--vmd_swt_level", type=int, default=None,
+                     help="SWT detail level fed into VMD for CPU (sv only, default: config)")
+    ap.add_argument("--mem_vmd_swt_level", type=int, default=None,
+                     help="SWT detail level fed into VMD for memory (sv only, default: config)")
     ap.add_argument("--subset_seed", type=int, default=42, help="Seed for service subsampling in build_windows")
     ap.add_argument("--force_recompute", action="store_true",
                      help="Ignore cached output and recompute all preprocessing approach shards")
@@ -136,6 +146,16 @@ def main():
                 cmd_sv.extend(["--swt_level", str(args.swt_level)])
             if args.mem_swt_level is not None:
                 cmd_sv.extend(["--mem_swt_level", str(args.mem_swt_level)])
+            if args.no_vmd:
+                cmd_sv.append("--no_vmd")
+            if args.vmd_k is not None:
+                cmd_sv.extend(["--vmd_k", str(args.vmd_k)])
+            if args.mem_vmd_k is not None:
+                cmd_sv.extend(["--mem_vmd_k", str(args.mem_vmd_k)])
+            if args.vmd_swt_level is not None:
+                cmd_sv.extend(["--vmd_swt_level", str(args.vmd_swt_level)])
+            if args.mem_vmd_swt_level is not None:
+                cmd_sv.extend(["--mem_vmd_swt_level", str(args.mem_vmd_swt_level)])
             if args.force_recompute:
                 cmd_sv.append("--force_recompute")
             run(cmd_sv, "Step 3b: SV Decomposition")

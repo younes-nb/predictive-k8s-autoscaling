@@ -75,6 +75,16 @@ def main():
     ap.add_argument("--dataset_workers", type=int, default=0, help="Dataloader workers for sv/cskv datasets (default: %(default)s)")
     ap.add_argument("--swt_level", type=int, default=None, help="SWT level for CPU (sv only, default: config)")
     ap.add_argument("--mem_swt_level", type=int, default=None, help="SWT level for memory (sv only, default: config)")
+    ap.add_argument("--no_vmd", action="store_true",
+                    help="Skip VMD decomposition; use only SWT coefficients (sv only)")
+    ap.add_argument("--vmd_k", type=int, default=None,
+                    help="VMD K (modes) for CPU (sv only, default: config)")
+    ap.add_argument("--mem_vmd_k", type=int, default=None,
+                    help="VMD K for memory (sv only, default: config)")
+    ap.add_argument("--vmd_swt_level", type=int, default=None,
+                    help="SWT detail level (D1, D2, ...) fed into VMD for CPU (sv only, default: config)")
+    ap.add_argument("--mem_vmd_swt_level", type=int, default=None,
+                    help="SWT detail level (D1, D2, ...) fed into VMD for memory (sv only, default: config)")
     ap.add_argument(
         "--train_pct",
         type=float,
@@ -145,6 +155,16 @@ def main():
             cmd_pre.extend(["--swt_level", str(args.swt_level)])
         if args.mem_swt_level is not None:
             cmd_pre.extend(["--mem_swt_level", str(args.mem_swt_level)])
+        if args.no_vmd:
+            cmd_pre.append("--no_vmd")
+        if args.vmd_k is not None:
+            cmd_pre.extend(["--vmd_k", str(args.vmd_k)])
+        if args.mem_vmd_k is not None:
+            cmd_pre.extend(["--mem_vmd_k", str(args.mem_vmd_k)])
+        if args.vmd_swt_level is not None:
+            cmd_pre.extend(["--vmd_swt_level", str(args.vmd_swt_level)])
+        if args.mem_vmd_swt_level is not None:
+            cmd_pre.extend(["--mem_vmd_swt_level", str(args.mem_vmd_swt_level)])
 
         total_times["preprocessing"] = run(cmd_pre, "Step 1: Preprocessing")
 

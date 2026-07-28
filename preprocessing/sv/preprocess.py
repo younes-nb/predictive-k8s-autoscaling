@@ -64,8 +64,11 @@ def _decompose_shard(task):
     else:
         last = last_cpu
 
-    n_cpu_channels = cpu_cfg.VMD_K + cpu_cfg.SWT_LEVEL
-    n_mem_channels = (mem_cfg.VMD_K + mem_cfg.SWT_LEVEL) if has_mem else 0
+    n_cpu_channels = (cpu_cfg.SWT_LEVEL + 1) if cpu_cfg.NO_VMD else (cpu_cfg.VMD_K + cpu_cfg.SWT_LEVEL)
+    n_mem_channels = (
+        ((mem_cfg.SWT_LEVEL + 1) if mem_cfg.NO_VMD else (mem_cfg.VMD_K + mem_cfg.SWT_LEVEL))
+        if has_mem else 0
+    )
     total_channels = n_cpu_channels + n_mem_channels
 
     X_dec = np.zeros((N, input_len, total_channels), dtype=np.float32)
@@ -99,6 +102,16 @@ def main() -> None:
                     help=f"SWT decomposition level for CPU (default: {CFG.SWT_LEVEL})")
     ap.add_argument("--mem_swt_level", type=int, default=CFG.MEM_SWT_LEVEL,
                     help=f"SWT decomposition level for memory (default: {CFG.MEM_SWT_LEVEL})")
+    ap.add_argument("--no_vmd", action="store_true",
+                    help="Skip VMD decomposition; use only SWT coefficients")
+    ap.add_argument("--vmd_k", type=int, default=CFG.VMD_K,
+                    help=f"VMD K (number of modes) for CPU (default: {CFG.VMD_K})")
+    ap.add_argument("--mem_vmd_k", type=int, default=CFG.MEM_VMD_K,
+                    help=f"VMD K for memory (default: {CFG.MEM_VMD_K})")
+    ap.add_argument("--vmd_swt_level", type=int, default=CFG.VMD_SWT_LEVEL,
+                    help=f"SWT detail level (D1, D2, ...) fed into VMD for CPU (default: {CFG.VMD_SWT_LEVEL})")
+    ap.add_argument("--mem_vmd_swt_level", type=int, default=CFG.MEM_VMD_SWT_LEVEL,
+                    help=f"SWT detail level (D1, D2, ...) fed into VMD for memory (default: {CFG.MEM_VMD_SWT_LEVEL})")
     ap.add_argument("--num_workers", type=float, default=0.9,
                     help="Fraction of CPU cores to use (default: 0.9)")
     ap.add_argument("--force_recompute", action="store_true",
@@ -106,8 +119,10 @@ def main() -> None:
     args = ap.parse_args()
 
     has_mem = args.feature_set == "cpu_mem_both"
-    cpu_cfg = replace(CFG, SWT_LEVEL=args.swt_level)
-    mem_cfg = replace(CFG, SWT_LEVEL=args.mem_swt_level)
+    cpu_cfg = replace(CFG, SWT_LEVEL=args.swt_level, VMD_K=args.vmd_k,
+                      NO_VMD=args.no_vmd, VMD_SWT_LEVEL=args.vmd_swt_level)
+    mem_cfg = replace(CFG, SWT_LEVEL=args.mem_swt_level, VMD_K=args.mem_vmd_k,
+                      NO_VMD=args.no_vmd, VMD_SWT_LEVEL=args.mem_vmd_swt_level)
 
     n_cpus = os.cpu_count() or 1
     num_workers = max(1, int(n_cpus * args.num_workers))

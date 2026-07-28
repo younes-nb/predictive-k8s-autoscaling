@@ -23,6 +23,9 @@ class SvDataset(Dataset):
         feature_set: str = "cpu",
         swt_level: int = SV_CFG.SWT_LEVEL,
         mem_swt_level: int = SV_CFG.MEM_SWT_LEVEL,
+        vmd_k: int = SV_CFG.VMD_K,
+        mem_vmd_k: int = SV_CFG.MEM_VMD_K,
+        no_vmd: bool = SV_CFG.NO_VMD,
     ):
         assert split in ("train", "val", "test"), f"Unknown split: {split}"
         self.split = split
@@ -30,8 +33,8 @@ class SvDataset(Dataset):
         self.pred_horizon = pred_horizon
         self.has_mem = feature_set == "cpu_mem_both"
 
-        cpu_channel_dirs = channel_dirs_for(swt_level, SV_CFG.VMD_K, prefix="")
-        mem_channel_dirs = channel_dirs_for(mem_swt_level, SV_CFG.VMD_K, prefix="mem_")
+        cpu_channel_dirs = channel_dirs_for(swt_level, vmd_k, prefix="", no_vmd=no_vmd)
+        mem_channel_dirs = channel_dirs_for(mem_swt_level, mem_vmd_k, prefix="mem_", no_vmd=no_vmd)
         self.channel_dirs = cpu_channel_dirs + (mem_channel_dirs if self.has_mem else [])
         self.n_channels = len(self.channel_dirs)
 
@@ -113,7 +116,9 @@ class SvDataset(Dataset):
 
 def _smoke_check(preprocess_dir: str, split: str,
                   feature_set: str = "cpu", swt_level: int = SV_CFG.SWT_LEVEL,
-                  mem_swt_level: int = SV_CFG.MEM_SWT_LEVEL) -> None:
+                  mem_swt_level: int = SV_CFG.MEM_SWT_LEVEL,
+                  vmd_k: int = SV_CFG.VMD_K, mem_vmd_k: int = SV_CFG.MEM_VMD_K,
+                  no_vmd: bool = SV_CFG.NO_VMD) -> None:
     from shared.config_preprocessing_defaults import PREPROCESSING
 
     ds = SvDataset(
@@ -124,6 +129,9 @@ def _smoke_check(preprocess_dir: str, split: str,
         feature_set=feature_set,
         swt_level=swt_level,
         mem_swt_level=mem_swt_level,
+        vmd_k=vmd_k,
+        mem_vmd_k=mem_vmd_k,
+        no_vmd=no_vmd,
     )
     assert len(ds) > 0, "Dataset has no windows"
     x, y, last = ds[0]
@@ -152,7 +160,12 @@ if __name__ == "__main__":
     ap.add_argument("--feature_set", default="cpu")
     ap.add_argument("--swt_level", type=int, default=SV_CFG.SWT_LEVEL)
     ap.add_argument("--mem_swt_level", type=int, default=SV_CFG.MEM_SWT_LEVEL)
+    ap.add_argument("--vmd_k", type=int, default=SV_CFG.VMD_K)
+    ap.add_argument("--mem_vmd_k", type=int, default=SV_CFG.MEM_VMD_K)
+    ap.add_argument("--no_vmd", action="store_true")
     args = ap.parse_args()
     _smoke_check(args.preprocess_dir, args.split,
                  feature_set=args.feature_set, swt_level=args.swt_level,
-                 mem_swt_level=args.mem_swt_level)
+                 mem_swt_level=args.mem_swt_level,
+                 vmd_k=args.vmd_k, mem_vmd_k=args.mem_vmd_k,
+                 no_vmd=args.no_vmd)
