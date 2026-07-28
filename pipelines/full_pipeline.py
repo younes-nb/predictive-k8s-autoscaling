@@ -232,6 +232,17 @@ def main():
         if args.cpu:
             cmd_train.append("--cpu")
         cmd_train.extend(["--seed", str(args.seed)])
+        if args.preprocess_approach in ("sv", "cskv"):
+            if args.swt_level is not None:
+                cmd_train.extend(["--swt_level", str(args.swt_level)])
+            if args.mem_swt_level is not None:
+                cmd_train.extend(["--mem_swt_level", str(args.mem_swt_level)])
+            if args.no_vmd:
+                cmd_train.append("--no_vmd")
+            if args.vmd_k is not None:
+                cmd_train.extend(["--vmd_k", str(args.vmd_k)])
+            if args.mem_vmd_k is not None:
+                cmd_train.extend(["--mem_vmd_k", str(args.mem_vmd_k)])
 
         total_times["training"] = run(cmd_train, "Step 2: Training")
 
@@ -251,6 +262,17 @@ def main():
             cmd_test.append("--cpu")
         cmd_test.extend(["--test_pct", str(args.test_pct)])
         cmd_test.extend(["--seed", str(args.seed)])
+        if args.preprocess_approach in ("sv", "cskv"):
+            if args.swt_level is not None:
+                cmd_test.extend(["--swt_level", str(args.swt_level)])
+            if args.mem_swt_level is not None:
+                cmd_test.extend(["--mem_swt_level", str(args.mem_swt_level)])
+            if args.no_vmd:
+                cmd_test.append("--no_vmd")
+            if args.vmd_k is not None:
+                cmd_test.extend(["--vmd_k", str(args.vmd_k)])
+            if args.mem_vmd_k is not None:
+                cmd_test.extend(["--mem_vmd_k", str(args.mem_vmd_k)])
 
         total_times["testing"] = run(cmd_test, "Step 3: Evaluation & Diagnostics")
 

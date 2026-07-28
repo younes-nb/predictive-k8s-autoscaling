@@ -57,16 +57,19 @@ def _load_datasets(args, preprocess_approach):
     elif preprocess_approach == "sv":
         from preprocessing.sv.dataset import SvDataset
         from preprocessing.sv.config import CFG as SV_CFG
-        train_ds = SvDataset(
-            args.preprocess_dir, "train",
+        sv_kw = dict(
             input_len=PREPROCESSING.INPUT_LEN, pred_horizon=PREPROCESSING.PRED_HORIZON,
             feature_set=args.feature_set,
         )
-        val_ds = SvDataset(
-            args.preprocess_dir, "val",
-            input_len=PREPROCESSING.INPUT_LEN, pred_horizon=PREPROCESSING.PRED_HORIZON,
-            feature_set=args.feature_set,
-        )
+        for attr, cli_arg in [
+            ("swt_level", "swt_level"), ("mem_swt_level", "mem_swt_level"),
+            ("vmd_k", "vmd_k"), ("mem_vmd_k", "mem_vmd_k"), ("no_vmd", "no_vmd"),
+        ]:
+            val = getattr(args, cli_arg, None)
+            if val is not None:
+                sv_kw[attr] = val
+        train_ds = SvDataset(args.preprocess_dir, "train", **sv_kw)
+        val_ds = SvDataset(args.preprocess_dir, "val", **sv_kw)
         return train_ds, val_ds
     elif preprocess_approach == "cskv":
         from preprocessing.cskv.dataset import CskvDataset
@@ -517,6 +520,11 @@ def main():
     )
     p.add_argument("--preprocess_dir", default=None, help="Decomposition output dir (for sv/cskv)")
     p.add_argument("--dataset_workers", type=int, default=0, help="Workers for sv/cskv dataset loading")
+    p.add_argument("--swt_level", type=int, default=None, help="SWT level for CPU (sv only, default: config)")
+    p.add_argument("--mem_swt_level", type=int, default=None, help="SWT level for memory (sv only, default: config)")
+    p.add_argument("--no_vmd", action="store_true", help="Skip VMD decomposition (sv only)")
+    p.add_argument("--vmd_k", type=int, default=None, help="VMD K for CPU (sv only, default: config)")
+    p.add_argument("--mem_vmd_k", type=int, default=None, help="VMD K for memory (sv only, default: config)")
     p.add_argument("--max_services", type=int, default=0, help="Max services for sv/cskv")
 
     try:

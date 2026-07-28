@@ -151,11 +151,18 @@ def _load_test_dataset(args, ckpt_args, device, log_info, feature_set_name="cpu"
             raise RuntimeError("--preprocess_dir required for sv evaluate")
         from preprocessing.sv.dataset import SvDataset
         from preprocessing.sv.config import CFG as SV_CFG
-        test_ds = SvDataset(
-            preprocess_dir, "test",
+        sv_kw = dict(
             input_len=PREPROCESSING.INPUT_LEN, pred_horizon=PREPROCESSING.PRED_HORIZON,
             feature_set=feature_set_name,
         )
+        for attr, cli_arg in [
+            ("swt_level", "swt_level"), ("mem_swt_level", "mem_swt_level"),
+            ("vmd_k", "vmd_k"), ("mem_vmd_k", "mem_vmd_k"), ("no_vmd", "no_vmd"),
+        ]:
+            val = getattr(args, cli_arg, None)
+            if val is not None:
+                sv_kw[attr] = val
+        test_ds = SvDataset(preprocess_dir, "test", **sv_kw)
         input_size = test_ds.n_channels
         return test_ds, input_size
     elif preprocess_approach == "cskv":
@@ -432,6 +439,11 @@ def main():
         help="Worker threads for inference benchmark (CPU only). "
              "0 = auto (90%% of CPU cores).",
     )
+    p.add_argument("--swt_level", type=int, default=None, help="SWT level for CPU (sv only, default: config)")
+    p.add_argument("--mem_swt_level", type=int, default=None, help="SWT level for memory (sv only, default: config)")
+    p.add_argument("--no_vmd", action="store_true", help="Skip VMD decomposition (sv only)")
+    p.add_argument("--vmd_k", type=int, default=None, help="VMD K for CPU (sv only, default: config)")
+    p.add_argument("--mem_vmd_k", type=int, default=None, help="VMD K for memory (sv only, default: config)")
 
     try:
         evaluate(p.parse_args())
