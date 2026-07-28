@@ -67,11 +67,7 @@ def decompose_window(window: np.ndarray, cfg) -> np.ndarray:
     n = len(window)
 
     if n < PREPROCESSING.INPUT_LEN or np.std(window) < 1e-12:
-        logger.warning(
-            "Degenerate window (std=%.2e); returning zeros.",
-            float(np.std(window)),
-        )
-        return np.zeros((_expected_channels(cfg), PREPROCESSING.INPUT_LEN), dtype=np.float32)
+        return None
 
     swt_coeffs = pywt.swt(window, 'sym4', level=cfg.SWT_LEVEL, norm=True, trim_approx=True)
     A_ts = swt_coeffs[0]

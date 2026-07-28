@@ -55,6 +55,8 @@ def _decompose_shard(task):
     t0 = time.time()
 
     X = np.load(shard_x_path).astype(np.float32)
+    Y = np.load(shard_y_path)
+    S = np.load(shard_sid_path)
     N, input_len, _ = X.shape
 
     last_cpu = X[:, -1, feature_idx_cpu]
@@ -71,21 +73,34 @@ def _decompose_shard(task):
     )
     total_channels = n_cpu_channels + n_mem_channels
 
+    keep = np.ones(N, dtype=bool)
     X_dec = np.zeros((N, input_len, total_channels), dtype=np.float32)
     for i in range(N):
         cpu_ch = decompose_window(X[i, :, feature_idx_cpu], cpu_cfg)
+        if cpu_ch is None:
+            keep[i] = False
+            continue
         X_dec[i, :, :n_cpu_channels] = cpu_ch.T
         if has_mem:
             mem_ch = decompose_window(X[i, :, feature_idx_mem], mem_cfg)
+            if mem_ch is None:
+                keep[i] = False
+                continue
             X_dec[i, :, n_cpu_channels:] = mem_ch.T
+
+    n_skipped = int((~keep).sum())
+    X_dec = X_dec[keep]
+    last = last[keep]
+    Y = Y[keep]
+    S = S[keep]
 
     np.save(shard_out_x_path, X_dec)
     np.save(shard_out_last_path, last)
-    shutil.copy2(shard_y_path, shard_out_y_path)
-    shutil.copy2(shard_sid_path, shard_out_sid_path)
+    np.save(shard_out_y_path, Y)
+    np.save(shard_out_sid_path, S)
 
     elapsed = time.time() - t0
-    return (os.path.basename(shard_x_path), N, elapsed)
+    return (os.path.basename(shard_x_path), len(X_dec), n_skipped, elapsed)
 
 
 def main() -> None:
@@ -114,8 +129,8 @@ def main() -> None:
                     help=f"SWT detail level (D1, D2, ...) fed into VMD for memory (default: {CFG.MEM_VMD_SWT_LEVEL})")
     ap.add_argument("--num_workers", type=float, default=0.9,
                     help="Fraction of CPU cores to use (default: 0.9)")
-    ap.add_argument("--force_recompute", action="store_true",
-                    help="Ignore cached output and recompute all shards")
+    ap.add_argument("--recompute_preprocessing", action="store_true",
+                    help="Recompute the preprocessing approach output, ignoring cached shards")
     args = ap.parse_args()
 
     has_mem = args.feature_set == "cpu_mem_both"
@@ -152,7 +167,7 @@ def main() -> None:
             out_sid = os.path.join(args.out_dir, f"{base}_sid_{split}.npy")
             out_last = os.path.join(args.out_dir, f"{base}_last_{split}.npy")
 
-            if not args.force_recompute and os.path.exists(out_x) and os.path.exists(out_last):
+            if not args.recompute_preprocessing and os.path.exists(out_x) and os.path.exists(out_last):
                 logging.info("Shard %s already done, skipping", base)
                 continue
 
@@ -170,21 +185,23 @@ def main() -> None:
 
     t_start = time.time()
     total_windows = 0
+    total_skipped = 0
 
     with ProcessPoolExecutor(max_workers=num_workers) as executor:
         futures = {executor.submit(_decompose_shard, t): t for t in shard_tasks}
         pbar = tqdm(total=len(shard_tasks), desc="SV Decomposition", unit="shard")
         for future in as_completed(futures):
-            shard_key, n_windows, elapsed = future.result()
+            shard_key, n_windows, n_skipped, elapsed = future.result()
             total_windows += n_windows
+            total_skipped += n_skipped
             pbar.set_postfix_str(f"{shard_key} ({n_windows}w, {elapsed:.1f}s)")
             pbar.update(1)
         pbar.close()
 
     elapsed = time.time() - t_start
     logging.info(
-        "Preprocessing complete. Shards: %d | Windows: %d | Time: %.1fs",
-        len(shard_tasks), total_windows, elapsed,
+        "Preprocessing complete. Shards: %d | Windows: %d | Skipped: %d | Time: %.1fs",
+        len(shard_tasks), total_windows, total_skipped, elapsed,
     )
 
 
