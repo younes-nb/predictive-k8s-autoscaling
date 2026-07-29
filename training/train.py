@@ -140,6 +140,19 @@ def train(args):
         if not hasattr(args, attr):
             setattr(args, attr, default)
 
+    from preprocessing.sv.config import CFG as SV_CFG
+    sv_defaults = {
+        "swt_level": SV_CFG.SWT_LEVEL,
+        "mem_swt_level": SV_CFG.MEM_SWT_LEVEL,
+        "vmd_k": SV_CFG.VMD_K,
+        "mem_vmd_k": SV_CFG.MEM_VMD_K,
+        "vmd_swt_level": SV_CFG.VMD_SWT_LEVEL,
+        "mem_vmd_swt_level": SV_CFG.MEM_VMD_SWT_LEVEL,
+    }
+    for attr, default in sv_defaults.items():
+        if not hasattr(args, attr) or getattr(args, attr) is None:
+            setattr(args, attr, default)
+
     hyperparam_optimizer = getattr(
         args, "hyperparam_optimizer", TRAINING.HYPERPARAM_OPTIMIZER
     )
