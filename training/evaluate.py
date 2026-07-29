@@ -201,6 +201,23 @@ def _benchmark_single_sample_inference(model, accelerator, args, ckpt_args, devi
         rng = random.Random(42)
         indices = rng.sample(range(len(raw_ds)), n_samples)
 
+    if preprocess_approach == "sv":
+        STDSTD = 1e-12
+        _valid = []
+        for idx in indices:
+            x_raw, *_ = raw_ds[idx]
+            x_np = x_raw.numpy()
+            if any(np.std(x_np[:, f]) < STDSTD for f in range(x_np.shape[1])):
+                continue
+            _valid.append(idx)
+        n_skipped = len(indices) - len(_valid)
+        if n_skipped:
+            log_info(f"Skipped {n_skipped} windows with near-zero std for inference benchmark")
+        indices = _valid
+        if not indices:
+            log_info("No valid windows after filtering near-zero std; skipping benchmark.")
+            return
+
     raw_model = accelerator.unwrap_model(model)
     raw_model.eval()
 
