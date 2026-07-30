@@ -42,7 +42,7 @@ def main():
     )
     ap.add_argument(
         "--preprocess_approach",
-        default="none",
+        default="sv",
         choices=["none", "smoothing", "sv", "cskv"],
         help="Post-processing approach applied after windows are built.",
     )

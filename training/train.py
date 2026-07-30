@@ -531,7 +531,7 @@ def main():
     )
     p.add_argument(
         "--preprocess_approach",
-        default="none",
+        default="sv",
         choices=list(PREPROCESS_APPROACHES),
         help="Preprocessing approach used: none, smoothing, sv, cskv",
     )

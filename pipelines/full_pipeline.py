@@ -61,7 +61,7 @@ def main():
     )
     ap.add_argument(
         "--preprocess_approach",
-        default="none",
+        default="sv",
         choices=["none", "smoothing", "sv", "cskv"],
         help="Post-processing: none (raw windows), smoothing (moving avg), sv (SWT+VMD), cskv (CEEMDAN+SE+K-means+VMD)",
     )

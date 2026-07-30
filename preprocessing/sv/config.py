@@ -13,7 +13,7 @@ class SvConfig:
     VMD_DC: int = 0
     VMD_INIT: int = 1
     VMD_TOL: float = 1e-7
-    NO_VMD: bool = False
+    NO_VMD: bool = True
     VMD_SWT_LEVEL: int = 1
     MEM_VMD_SWT_LEVEL: int = 1
 
