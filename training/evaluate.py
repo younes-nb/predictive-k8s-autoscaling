@@ -36,7 +36,15 @@ MODEL_TYPES = ("lstm", "gru", "bilstm", "bigrue", "cnn_bilstm")
 PREPROCESS_APPROACHES = ("none", "smoothing", "sv", "cskv")
 
 
-def _preprocess_raw_window(x_np, preprocess_approach):
+SV_FIELD_MAP = {
+    "swt_level": "SWT_LEVEL", "mem_swt_level": "MEM_SWT_LEVEL",
+    "vmd_k": "VMD_K", "mem_vmd_k": "MEM_VMD_K",
+    "no_vmd": "NO_VMD",
+    "vmd_swt_level": "VMD_SWT_LEVEL", "mem_vmd_swt_level": "MEM_VMD_SWT_LEVEL",
+}
+
+
+def _preprocess_raw_window(x_np, preprocess_approach, args=None):
     if preprocess_approach == "none":
         return x_np
     elif preprocess_approach == "smoothing":
@@ -46,13 +54,23 @@ def _preprocess_raw_window(x_np, preprocess_approach):
         from dataclasses import replace
         from preprocessing.sv.decomposition import decompose_window
         from preprocessing.sv.config import CFG as SV_CFG
-        cpu_cfg = SV_CFG
+        base = SV_CFG
+        if args is not None:
+            overrides = {}
+            for cli_attr, cfg_attr in SV_FIELD_MAP.items():
+                val = getattr(args, cli_attr, None)
+                if val is not None:
+                    overrides[cfg_attr] = val
+            if overrides:
+                base = replace(SV_CFG, **overrides)
+        cpu_cfg = base
         mem_cfg = replace(
-            SV_CFG,
-            SWT_LEVEL=SV_CFG.MEM_SWT_LEVEL,
-            VMD_K=SV_CFG.MEM_VMD_K,
-            VMD_SWT_LEVEL=SV_CFG.MEM_VMD_SWT_LEVEL,
+            base,
+            SWT_LEVEL=base.MEM_SWT_LEVEL,
+            VMD_K=base.MEM_VMD_K,
+            VMD_SWT_LEVEL=base.MEM_VMD_SWT_LEVEL,
         )
+
         channels = []
         for f in range(x_np.shape[1]):
             cfg = mem_cfg if f == 1 else cpu_cfg
@@ -93,13 +111,13 @@ def _preprocess_raw_window(x_np, preprocess_approach):
         raise ValueError(f"Unknown preprocess_approach: {preprocess_approach}")
 
 
-def _benchmark_worker(idx, raw_ds, model, preprocess_approach, device):
+def _benchmark_worker(idx, raw_ds, model, preprocess_approach, device, args=None):
     x_raw, *_ = raw_ds[idx]
     x_np = x_raw.numpy()
 
     t0 = time.perf_counter()
 
-    x_processed = _preprocess_raw_window(x_np, preprocess_approach)
+    x_processed = _preprocess_raw_window(x_np, preprocess_approach, args)
     x_tensor = torch.from_numpy(x_processed).float().unsqueeze(0).to(device)
 
     with torch.no_grad():
@@ -235,7 +253,7 @@ def _benchmark_single_sample_inference(model, accelerator, args, ckpt_args, devi
             futures = {
                 executor.submit(
                     _benchmark_worker, idx, raw_ds, raw_model,
-                    preprocess_approach, device,
+                    preprocess_approach, device, args,
                 ): idx
                 for idx in indices
             }
@@ -247,7 +265,7 @@ def _benchmark_single_sample_inference(model, accelerator, args, ckpt_args, devi
     else:
         for idx in tqdm(indices, desc="Benchmark", unit="sample"):
             latencies.append(
-                _benchmark_worker(idx, raw_ds, raw_model, preprocess_approach, device)
+                _benchmark_worker(idx, raw_ds, raw_model, preprocess_approach, device, args)
             )
 
     latencies = np.array(latencies)
