@@ -5,7 +5,7 @@ import argparse
 import logging
 import time
 import math
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, os.pardir))
@@ -111,66 +111,23 @@ def _preprocess_raw_window(x_np, preprocess_approach, args=None):
         raise ValueError(f"Unknown preprocess_approach: {preprocess_approach}")
 
 
-def _benchmark_chunk(task):
-    (indices, windows_dir, input_len, horizon, checkpoint_path,
-     preprocess_approach, sv_args, device_str) = task
+def _benchmark_worker(idx, raw_ds, model, preprocess_approach, device, args=None):
+    x_raw, *_ = raw_ds[idx]
+    x_np = x_raw.numpy()
 
-    import sys
-    import os
-    THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-    REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, os.pardir))
-    if REPO_ROOT not in sys.path:
-        sys.path.insert(0, REPO_ROOT)
+    t0 = time.perf_counter()
 
-    import torch
-    import numpy as np
-    import time
-    from core.dataset import ShardedWindowsDataset
-    from shared.features import target_features_for_feature_set
-    from shared.config_preprocessing_defaults import PREPROCESSING
-    from training.sfoa_configs import get_config
-    from types import SimpleNamespace
+    x_processed = _preprocess_raw_window(x_np, preprocess_approach, args)
+    x_tensor = torch.from_numpy(x_processed).float().unsqueeze(0).to(device)
 
-    dev = torch.device(device_str)
+    with torch.no_grad():
+        _ = model(x_tensor)
 
-    checkpoint = torch.load(checkpoint_path, map_location="cpu")
-    ckpt_args = checkpoint.get("args", {})
-    model_type = checkpoint.get("model_type", "lstm")
-    num_targets = len(target_features_for_feature_set(ckpt_args.get("feature_set", PREPROCESSING.FEATURE_SET)))
-    cfg = get_config(model_type)
-    hyperparams = checkpoint.get("hyperparams", cfg.DEFAULTS)
+    if device.type == "cuda":
+        torch.cuda.synchronize()
 
-    raw_ds = ShardedWindowsDataset(windows_dir, "test", input_len, horizon, use_weights=False)
-    if len(raw_ds) > 0:
-        first_x, *_ = raw_ds[0]
-        input_size = first_x.shape[-1]
-    else:
-        input_size = 1
-
-    model = cfg.build_model(hyperparams, input_size, SimpleNamespace(**ckpt_args), num_targets, "cpu")
-    model.load_state_dict(checkpoint["model_state_dict"])
-    model = model.to(dev)
-    model.eval()
-
-    latencies = []
-    for idx in indices:
-        x_raw, *_ = raw_ds[idx]
-        x_np = x_raw.numpy()
-
-        t0 = time.perf_counter()
-        x_processed = _preprocess_raw_window(x_np, preprocess_approach, sv_args)
-        x_tensor = torch.from_numpy(x_processed).float().unsqueeze(0).to(dev)
-
-        with torch.no_grad():
-            _ = model(x_tensor)
-
-        if dev.type == "cuda":
-            torch.cuda.synchronize(dev)
-
-        t1 = time.perf_counter()
-        latencies.append((t1 - t0) * 1000.0)
-
-    return latencies
+    t1 = time.perf_counter()
+    return (t1 - t0) * 1000.0
 
 
 def _build_model_from_checkpoint(checkpoint, input_size, device):
@@ -279,60 +236,37 @@ def _benchmark_single_sample_inference(model, accelerator, args, ckpt_args, devi
             log_info("No valid windows after filtering near-zero std; skipping benchmark.")
             return
 
-    bench_workers = getattr(args, "bench_workers", 0)
-    if bench_workers <= 0:
-        bench_workers = max(1, int(0.9 * (os.cpu_count() or 1)))
-    log_info(f"Parallel benchmark: {bench_workers} worker processes")
+    raw_model = accelerator.unwrap_model(model)
+    raw_model.eval()
 
-    num_gpus = torch.cuda.device_count()
+    bench_workers = getattr(args, "bench_workers", 0)
+    use_parallel = device.type == "cpu"
+    if use_parallel:
+        if bench_workers <= 0:
+            bench_workers = max(1, int(0.9 * (os.cpu_count() or 1)))
+        log_info(f"Parallel benchmark: {bench_workers} worker threads")
+
     latencies = []
 
-    if bench_workers > 1:
-        chunk_size = max(1, len(indices) // bench_workers)
-        chunks = [indices[i:i + chunk_size] for i in range(0, len(indices), chunk_size)]
-
-        sv_args = SimpleNamespace(
-            swt_level=getattr(args, "swt_level", None),
-            mem_swt_level=getattr(args, "mem_swt_level", None),
-            vmd_k=getattr(args, "vmd_k", None),
-            mem_vmd_k=getattr(args, "mem_vmd_k", None),
-            no_vmd=getattr(args, "no_vmd", None),
-            vmd_swt_level=getattr(args, "vmd_swt_level", None),
-            mem_vmd_swt_level=getattr(args, "mem_vmd_swt_level", None),
-        )
-        tasks = [
-            (chunk, args.windows_dir, input_len, horizon,
-             args.checkpoint_path, preprocess_approach, sv_args,
-             f"cuda:{wid % num_gpus}" if num_gpus else "cpu")
-            for wid, chunk in enumerate(chunks)
-        ]
-
-        with ProcessPoolExecutor(max_workers=bench_workers) as executor:
-            futures = {executor.submit(_benchmark_chunk, t): t for t in tasks}
+    if use_parallel and bench_workers > 1:
+        with ThreadPoolExecutor(max_workers=bench_workers) as executor:
+            futures = {
+                executor.submit(
+                    _benchmark_worker, idx, raw_ds, raw_model,
+                    preprocess_approach, device, args,
+                ): idx
+                for idx in indices
+            }
             for future in tqdm(
                 as_completed(futures), total=len(futures),
-                desc="Benchmark", unit="chunk",
+                desc="Benchmark", unit="sample",
             ):
-                latencies.extend(future.result())
+                latencies.append(future.result())
     else:
-        raw_model = accelerator.unwrap_model(model)
-        raw_model.eval()
         for idx in tqdm(indices, desc="Benchmark", unit="sample"):
-            x_raw, *_ = raw_ds[idx]
-            x_np = x_raw.numpy()
-
-            t0 = time.perf_counter()
-            x_processed = _preprocess_raw_window(x_np, preprocess_approach, args)
-            x_tensor = torch.from_numpy(x_processed).float().unsqueeze(0).to(device)
-
-            with torch.no_grad():
-                _ = raw_model(x_tensor)
-
-            if device.type == "cuda":
-                torch.cuda.synchronize()
-
-            t1 = time.perf_counter()
-            latencies.append((t1 - t0) * 1000.0)
+            latencies.append(
+                _benchmark_worker(idx, raw_ds, raw_model, preprocess_approach, device, args)
+            )
 
     latencies = np.array(latencies)
 
@@ -553,7 +487,7 @@ def main():
     )
     p.add_argument(
         "--bench_workers", type=int, default=0,
-        help="Worker processes for inference benchmark (CPU only). "
+        help="Worker threads for inference benchmark (CPU only). "
              "0 = auto (90%% of CPU cores).",
     )
     p.add_argument("--swt_level", type=int, default=None, help="SWT level for CPU (sv only, default: config)")
