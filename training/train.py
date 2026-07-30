@@ -112,6 +112,10 @@ def train(args):
                     "sfoa_train_pct", "sfoa_val_pct", "sfoa_num_workers",
                     "train_pct", "val_pct", "batch_size", "num_workers",
                     "epochs", "seed",
+                    "swt_level", "mem_swt_level", "no_vmd",
+                    "vmd_k", "mem_vmd_k",
+                    "vmd_swt_level", "mem_vmd_swt_level",
+                    "max_services",
                 ) if hasattr(args, k)
             }
             args = argparse.Namespace(**resume_state["args"])
