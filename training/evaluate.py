@@ -433,7 +433,10 @@ def evaluate(args):
     raw_second_lasts = []
     for idx in range(len(raw_test_ds)):
         x_raw, *_ = raw_test_ds[idx]
-        raw_second_lasts.append(x_raw[-2, :].numpy())
+        x_np = x_raw.numpy()
+        if any(np.std(x_np[:, f].astype(np.float64)) < 1e-12 for f in target_idxs_in_features):
+            continue
+        raw_second_lasts.append(x_np[-2, :])
     y_second_last_all = np.stack(raw_second_lasts, axis=0)
     if y_second_last_all.ndim == 1:
         y_second_last_all = y_second_last_all[:, np.newaxis]
