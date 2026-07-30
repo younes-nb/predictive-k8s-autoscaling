@@ -113,7 +113,7 @@ def _preprocess_raw_window(x_np, preprocess_approach, args=None):
 
 def _benchmark_chunk(task):
     (indices, windows_dir, input_len, horizon, checkpoint_path,
-     preprocess_approach, sv_args) = task
+     preprocess_approach, sv_args, device_str) = task
 
     import sys
     import os
@@ -131,6 +131,8 @@ def _benchmark_chunk(task):
     from training.sfoa_configs import get_config
     from types import SimpleNamespace
 
+    dev = torch.device(device_str)
+
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
     ckpt_args = checkpoint.get("args", {})
     model_type = checkpoint.get("model_type", "lstm")
@@ -147,6 +149,7 @@ def _benchmark_chunk(task):
 
     model = cfg.build_model(hyperparams, input_size, SimpleNamespace(**ckpt_args), num_targets, "cpu")
     model.load_state_dict(checkpoint["model_state_dict"])
+    model = model.to(dev)
     model.eval()
 
     latencies = []
@@ -156,10 +159,13 @@ def _benchmark_chunk(task):
 
         t0 = time.perf_counter()
         x_processed = _preprocess_raw_window(x_np, preprocess_approach, sv_args)
-        x_tensor = torch.from_numpy(x_processed).float().unsqueeze(0)
+        x_tensor = torch.from_numpy(x_processed).float().unsqueeze(0).to(dev)
 
         with torch.no_grad():
             _ = model(x_tensor)
+
+        if dev.type == "cuda":
+            torch.cuda.synchronize(dev)
 
         t1 = time.perf_counter()
         latencies.append((t1 - t0) * 1000.0)
@@ -274,15 +280,14 @@ def _benchmark_single_sample_inference(model, accelerator, args, ckpt_args, devi
             return
 
     bench_workers = getattr(args, "bench_workers", 0)
-    use_parallel = device.type == "cpu"
-    if use_parallel:
-        if bench_workers <= 0:
-            bench_workers = max(1, int(0.9 * (os.cpu_count() or 1)))
-        log_info(f"Parallel benchmark: {bench_workers} worker processes")
+    if bench_workers <= 0:
+        bench_workers = max(1, int(0.9 * (os.cpu_count() or 1)))
+    log_info(f"Parallel benchmark: {bench_workers} worker processes")
 
+    num_gpus = torch.cuda.device_count()
     latencies = []
 
-    if use_parallel and bench_workers > 1:
+    if bench_workers > 1:
         chunk_size = max(1, len(indices) // bench_workers)
         chunks = [indices[i:i + chunk_size] for i in range(0, len(indices), chunk_size)]
 
@@ -297,8 +302,9 @@ def _benchmark_single_sample_inference(model, accelerator, args, ckpt_args, devi
         )
         tasks = [
             (chunk, args.windows_dir, input_len, horizon,
-             args.checkpoint_path, preprocess_approach, sv_args)
-            for chunk in chunks
+             args.checkpoint_path, preprocess_approach, sv_args,
+             f"cuda:{wid % num_gpus}" if num_gpus else "cpu")
+            for wid, chunk in enumerate(chunks)
         ]
 
         with ProcessPoolExecutor(max_workers=bench_workers) as executor:
