@@ -208,6 +208,7 @@ def _benchmark_single_sample_inference(model, accelerator, args, ckpt_args, devi
     raw_ds = ShardedWindowsDataset(
         args.windows_dir, "test", input_len, horizon, use_weights=False,
     )
+    raw_ds = head_slice_dataset_by_pct(raw_ds, args.test_pct)
     if len(raw_ds) == 0:
         log_info("No raw windows found for inference latency benchmark.")
         return
