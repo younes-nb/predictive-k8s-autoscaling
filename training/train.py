@@ -26,7 +26,7 @@ from shared.logging_utils import setup_logging
 from shared.features import target_features_for_feature_set
 from core.dataset import ShardedWindowsDataset
 
-from training.loss import weighted_mse
+from training.loss import weighted_mse, per_target_loss
 from training.train_helpers import (
     head_slice_dataset_by_pct,
     load_resume_state,
@@ -36,7 +36,7 @@ from training.sfoa_search import run_sfoa_search
 from training.sfoa_configs import get_config
 
 
-MODEL_TYPES = ("lstm", "gru", "bilstm", "bigrue", "cnn_bilstm")
+MODEL_TYPES = ("lstm", "gru", "bilstm", "bigrue", "cnn_bilstm", "cnn_bilstm_dualpath")
 PREPROCESS_APPROACHES = ("none", "smoothing", "sv", "cskv")
 
 
@@ -156,6 +156,9 @@ def train(args):
     for attr, default in sv_defaults.items():
         if not hasattr(args, attr) or getattr(args, attr) is None:
             setattr(args, attr, default)
+
+    if not hasattr(args, "loss_mode"):
+        setattr(args, "loss_mode", "joint_mse")
 
     hyperparam_optimizer = getattr(
         args, "hyperparam_optimizer", TRAINING.HYPERPARAM_OPTIMIZER
@@ -379,8 +382,11 @@ def train(args):
                 preds = model(x)
                 if w is not None:
                     loss = weighted_mse(preds, y, w, under_penalty=args.under_penalty)
-                else:
+                elif args.loss_mode == "joint_mse":
                     loss = criterion(preds, y)
+                else:
+                    mem_mode = "l1" if args.loss_mode == "per_target_mae" else "mse"
+                    loss = per_target_loss(preds, y, mem_mode=mem_mode)
 
             accelerator.backward(loss)
 
@@ -412,8 +418,11 @@ def train(args):
 
                 if w is not None:
                     loss = weighted_mse(preds, y, w, under_penalty=args.under_penalty)
-                else:
+                elif args.loss_mode == "joint_mse":
                     loss = criterion(preds, y)
+                else:
+                    mem_mode = "l1" if args.loss_mode == "per_target_mae" else "mse"
+                    loss = per_target_loss(preds, y, mem_mode=mem_mode)
 
                 val_loss_accum += loss.item() * x.size(0)
                 val_samples_seen += x.size(0)
@@ -507,6 +516,13 @@ def main():
     p.add_argument("--grad_clip", type=float, default=TRAINING.GRAD_CLIP)
     p.add_argument("--weight_decay", type=float, default=TRAINING.WEIGHT_DECAY)
     p.add_argument("--under_penalty", type=float, default=TRAINING.UNDER_PENALTY)
+    p.add_argument(
+        "--loss_mode",
+        default="joint_mse",
+        choices=["joint_mse", "per_target_mse", "per_target_mae"],
+        help="joint_mse: MSE over all targets. per_target_*: equal-weight per target; "
+             "per_target_mae uses L1 for the memory target (tuned for memory MAE).",
+    )
     p.add_argument("--seed", type=int, default=TRAINING.SEED)
     p.add_argument("--cpu", action="store_true")
     p.add_argument("--num_workers", type=int, default=TRAINING.NUM_WORKERS)

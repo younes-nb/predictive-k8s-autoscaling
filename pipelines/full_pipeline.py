@@ -68,7 +68,7 @@ def main():
     ap.add_argument(
         "--model_type",
         default="lstm",
-        choices=["lstm", "gru", "bilstm", "bigrue", "cnn_bilstm"],
+        choices=["lstm", "gru", "bilstm", "bigrue", "cnn_bilstm", "cnn_bilstm_dualpath"],
         help="Model architecture: lstm/gru (unidirectional), bilstm/bigrue (bidirectional), cnn_bilstm",
     )
     ap.add_argument("--smooth_window", type=int, default=5, help="Moving average window size for 'smoothing' approach (default: %(default)s)")
@@ -85,6 +85,12 @@ def main():
                     help="SWT detail level (D1, D2, ...) fed into VMD for CPU (sv only, default: config)")
     ap.add_argument("--mem_vmd_swt_level", type=int, default=None,
                     help="SWT detail level (D1, D2, ...) fed into VMD for memory (sv only, default: config)")
+    ap.add_argument(
+        "--loss_mode",
+        default="joint_mse",
+        choices=["joint_mse", "per_target_mse", "per_target_mae"],
+        help="joint_mse: MSE over all targets. per_target_mae: equal-weight per target with L1 memory loss.",
+    )
     ap.add_argument(
         "--train_pct",
         type=float,
@@ -227,6 +233,7 @@ def main():
         cmd_train.extend(["--sfoa_num_workers", str(args.sfoa_num_workers)])
         cmd_train.extend(["--train_pct", str(args.train_pct)])
         cmd_train.extend(["--val_pct", str(args.val_pct)])
+        cmd_train.extend(["--loss_mode", args.loss_mode])
         if args.resume_training:
             cmd_train.append("--resume_training")
         if args.cpu:

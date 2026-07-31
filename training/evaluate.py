@@ -32,7 +32,7 @@ from types import SimpleNamespace
 from training.sfoa_configs import get_config
 
 
-MODEL_TYPES = ("lstm", "gru", "bilstm", "bigrue", "cnn_bilstm")
+MODEL_TYPES = ("lstm", "gru", "bilstm", "bigrue", "cnn_bilstm", "cnn_bilstm_dualpath")
 PREPROCESS_APPROACHES = ("none", "smoothing", "sv", "cskv")
 
 
@@ -180,8 +180,10 @@ def _load_test_dataset(args, ckpt_args, device, log_info, feature_set_name="cpu"
             val = getattr(args, cli_arg, None)
             if val is not None:
                 sv_kw[attr] = val
-        test_ds = SvDataset(preprocess_dir, "test", **sv_kw)
-        input_size = test_ds.n_channels
+        test_ds_full = SvDataset(preprocess_dir, "test", **sv_kw)
+        input_size = test_ds_full.n_channels
+        test_ds = head_slice_dataset_by_pct(test_ds_full, args.test_pct)
+        log_info(f"Test samples (SV): {len(test_ds)}/{len(test_ds_full)} ({float(args.test_pct):g}%)")
         return test_ds, input_size
     elif preprocess_approach == "cskv":
         preprocess_dir = getattr(args, "preprocess_dir", None)

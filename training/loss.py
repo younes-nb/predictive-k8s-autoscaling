@@ -4,6 +4,24 @@ import torch
 import torch.nn as nn
 
 
+def per_target_loss(preds, target, mem_mode="mse"):
+    """Per-target loss so the memory head gets full gradient signal.
+
+    preds/target: (B, H, T). T==2 assumes [cpu, mem] ordering.
+    CPU is always MSE; memory uses `mem_mode` ("mse" or "l1").
+    Returns CPU_loss + mem_loss (equal weight).
+    """
+    t = preds.shape[-1]
+    if t == 1:
+        return nn.functional.mse_loss(preds, target)
+    cpu_loss = nn.functional.mse_loss(preds[..., 0], target[..., 0])
+    if mem_mode == "l1":
+        mem_loss = nn.functional.l1_loss(preds[..., 1], target[..., 1])
+    else:
+        mem_loss = nn.functional.mse_loss(preds[..., 1], target[..., 1])
+    return cpu_loss + mem_loss
+
+
 def weighted_mse(preds, target, w=None, under_penalty=5.0):
     diff = preds - target
     sq_err = diff**2
