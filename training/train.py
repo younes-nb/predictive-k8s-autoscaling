@@ -3,6 +3,7 @@ import sys
 import random
 import argparse
 import logging
+import warnings
 import numpy as np
 from datetime import datetime, timedelta
 
@@ -288,6 +289,10 @@ def train(args):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
     torch.use_deterministic_algorithms(True)
+    warnings.filterwarnings(
+        "ignore",
+        message=r"Grad strides do not match bucket view strides.*",
+    )
     log_info(f"Seed set: {seed}")
 
     model = _build_model(model_type, input_size, args, num_targets, current_hyperparams, device)
