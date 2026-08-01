@@ -26,6 +26,7 @@ def main():
     ap.add_argument("--skip_fetch", action="store_true", help="Skip downloading raw trace data from OSS")
     ap.add_argument("--skip_ingest", action="store_true", help="Skip converting raw traces to parquet")
     ap.add_argument("--skip_raw_windows", action="store_true", help="Skip building sliding window datasets (build_windows.py)")
+    ap.add_argument("--recompute_windows", action="store_true", help="Recompute sliding window datasets, ignoring cached shards (build_windows.py)")
     ap.add_argument("--skip_preprocessing_approach", action="store_true", help="Skip the preprocessing approach step (sv/cskv/smoothing)")
     ap.add_argument("--recompute_preprocessing", action="store_true", help="Recompute the preprocessing approach output, ignoring cached shards")
     ap.add_argument("--windows_dir", default=PATHS.WINDOWS_DIR, help="Output directory for window datasets")
@@ -160,6 +161,8 @@ def main():
             cmd_pre.append("--skip_ingest")
         if args.skip_raw_windows:
             cmd_pre.append("--skip_raw_windows")
+        if args.recompute_windows:
+            cmd_pre.append("--recompute_windows")
         if args.skip_preprocessing_approach:
             cmd_pre.append("--skip_preprocessing_approach")
         if args.recompute_preprocessing:

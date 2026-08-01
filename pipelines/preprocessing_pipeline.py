@@ -30,6 +30,8 @@ def main():
                      help="Skip building raw sliding windows (build_windows.py)")
     ap.add_argument("--skip_preprocessing_approach", action="store_true",
                      help="Skip the preprocessing approach step (sv/cskv/smoothing)")
+    ap.add_argument("--recompute_windows", action="store_true",
+                     help="Recompute raw sliding windows, ignoring cached shards (build_windows.py)")
     ap.add_argument(
         "--delete_raw",
         action="store_false",
@@ -124,6 +126,8 @@ def main():
         if args.max_services is not None:
             cmd.extend(["--max_services", str(args.max_services)])
         cmd.extend(["--subset_seed", str(args.subset_seed)])
+        if args.recompute_windows:
+            cmd.append("--recompute")
         run(cmd, "Step 3: Build windows (join tables)")
     else:
         print("\n=== Skipping raw windows ===")

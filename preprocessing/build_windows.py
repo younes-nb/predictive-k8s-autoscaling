@@ -239,6 +239,8 @@ def main():
     p.add_argument("--batch_size", type=int, default=256)
     p.add_argument("--num_workers", type=float, default=0.9,
                     help="Fraction of CPU cores to use (default: 0.9)")
+    p.add_argument("--recompute", action="store_true",
+                    help="Delete cached done markers and shards, forcing a full rebuild")
 
     args = p.parse_args()
     rng = np.random.default_rng(args.subset_seed)
@@ -292,6 +294,14 @@ def main():
         print(f"Processing all {len(all_services_list)} services globally")
 
     os.makedirs(args.out_dir, exist_ok=True)
+
+    if args.recompute:
+        cached = glob.glob(os.path.join(args.out_dir, "part-*.done")) + \
+                 glob.glob(os.path.join(args.out_dir, "part-*_chunk-*.npy"))
+        for f in cached:
+            os.remove(f)
+        if cached:
+            print(f"Removed {len(cached)} cached artifacts for recompute")
 
     total_batches = (len(all_services_list) + args.batch_size - 1) // args.batch_size
 
