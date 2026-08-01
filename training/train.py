@@ -36,7 +36,7 @@ from training.sfoa_search import run_sfoa_search
 from training.sfoa_configs import get_config
 
 
-MODEL_TYPES = ("lstm", "gru", "bilstm", "bigrue", "cnn_bilstm", "cnn_bilstm_dualpath")
+MODEL_TYPES = ("lstm", "gru", "bilstm", "bigrue", "cnn_bilstm", "wadm")
 PREPROCESS_APPROACHES = ("none", "smoothing", "sv", "cskv")
 
 
@@ -232,12 +232,6 @@ def train(args):
     if hyperparam_optimizer == "none":
         current_hyperparams = cfg.DEFAULTS.copy()
         sfoa_done = True
-        for _hp in ("mix_style", "anchor_kind", "slope_span", "head_style",
-                    "d_group", "d_time", "d_feat", "n_group_blocks", "n_cross_blocks",
-                    "pool_head_dim"):
-            _v = getattr(args, _hp, None)
-            if _v is not None:
-                current_hyperparams[_hp] = _v
 
     if current_hyperparams is None and not sfoa_done and hyperparam_optimizer == "sfoa":
         if accelerator.num_processes > 1:
@@ -343,7 +337,11 @@ def train(args):
     if resume_state:
         model_state = resume_state.get("model_state_dict")
         if model_state:
-            model.load_state_dict(model_state)
+            missing, unexpected = model.load_state_dict(model_state, strict=False)
+            if missing:
+                raise RuntimeError(f"Resume state missing keys: {sorted(missing)[:10]}")
+            if unexpected:
+                log_info(f"Note: dropping {len(unexpected)} stale resume keys: {sorted(unexpected)[:5]}")
         optimizer_state = resume_state.get("optimizer_state_dict")
         if optimizer_state:
             optimizer.load_state_dict(optimizer_state)
@@ -565,22 +563,6 @@ def main():
     p.add_argument("--vmd_k", type=int, default=None, help="VMD K for CPU (sv only, default: config)")
     p.add_argument("--mem_vmd_k", type=int, default=None, help="VMD K for memory (sv only, default: config)")
     p.add_argument("--max_services", type=int, default=0, help="Max services for sv/cskv")
-
-    p.add_argument("--mix_style", default=None,
-                   choices=["gelu_bottleneck", "linear_bottleneck", "linear_fused", "linear_fused_gelu"],
-                   help="CPU mixer mixing style (overrides sfoa DEFAULTS)")
-    p.add_argument("--anchor_kind", default=None, choices=["linear", "quadratic"],
-                   help="CPU trend anchor extrapolation kind (overrides sfoa DEFAULTS)")
-    p.add_argument("--slope_span", type=int, default=None,
-                   help="CPU trend anchor slope span in steps (overrides sfoa DEFAULTS)")
-    p.add_argument("--head_style", default=None, choices=["linear", "pooled_mlp"],
-                   help="CPU delta-head style (overrides sfoa DEFAULTS)")
-    p.add_argument("--pool_head_dim", type=int, default=None, help="Override sfoa DEFAULTS")
-    p.add_argument("--d_group", type=int, default=None, help="Override sfoa DEFAULTS")
-    p.add_argument("--d_time", type=int, default=None, help="Override sfoa DEFAULTS")
-    p.add_argument("--d_feat", type=int, default=None, help="Override sfoa DEFAULTS")
-    p.add_argument("--n_group_blocks", type=int, default=None, help="Override sfoa DEFAULTS")
-    p.add_argument("--n_cross_blocks", type=int, default=None, help="Override sfoa DEFAULTS")
 
     try:
         train(p.parse_args())

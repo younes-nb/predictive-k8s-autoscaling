@@ -32,7 +32,7 @@ from types import SimpleNamespace
 from training.sfoa_configs import get_config
 
 
-MODEL_TYPES = ("lstm", "gru", "bilstm", "bigrue", "cnn_bilstm", "cnn_bilstm_dualpath")
+MODEL_TYPES = ("lstm", "gru", "bilstm", "bigrue", "cnn_bilstm", "wadm")
 PREPROCESS_APPROACHES = ("none", "smoothing", "sv", "cskv")
 
 
@@ -349,7 +349,12 @@ def evaluate(args):
     test_ds, input_size = _load_test_dataset(args, ckpt_args, device, log_info, feature_set_name)
 
     model = _build_model_from_checkpoint(checkpoint, input_size, device)
-    model.load_state_dict(checkpoint["model_state_dict"])
+    sd = checkpoint["model_state_dict"]
+    missing, unexpected = model.load_state_dict(sd, strict=False)
+    if missing:
+        raise RuntimeError(f"Checkpoint missing keys: {sorted(missing)[:10]}")
+    if unexpected:
+        log_info(f"Note: dropping {len(unexpected)} stale checkpoint keys: {sorted(unexpected)[:5]}")
 
     if device.type != "cpu":
         log_info("Tuning inference batch size to hardware limits...")
