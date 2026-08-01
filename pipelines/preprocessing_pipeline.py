@@ -24,6 +24,8 @@ def main():
         choices=list(FEATURE_SETS.keys()),
     )
     ap.add_argument("--windows_dir", default=PATHS.WINDOWS_DIR)
+    ap.add_argument("--input_len", type=int, default=PREPROCESSING.INPUT_LEN,
+                     help="Sliding window input length passed to build_windows (default: %(default)s)")
     ap.add_argument("--skip_fetch", action="store_true")
     ap.add_argument("--skip_ingest", action="store_true")
     ap.add_argument("--skip_raw_windows", action="store_true",
@@ -126,6 +128,7 @@ def main():
         if args.max_services is not None:
             cmd.extend(["--max_services", str(args.max_services)])
         cmd.extend(["--subset_seed", str(args.subset_seed)])
+        cmd.extend(["--input_len", str(args.input_len)])
         if args.recompute_windows:
             cmd.append("--recompute")
         run(cmd, "Step 3: Build windows (join tables)")

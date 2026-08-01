@@ -178,7 +178,7 @@ def _load_test_dataset(args, ckpt_args, device, log_info, feature_set_name="cpu"
         from preprocessing.sv.dataset import SvDataset
         from preprocessing.sv.config import CFG as SV_CFG
         sv_kw = dict(
-            input_len=PREPROCESSING.INPUT_LEN, pred_horizon=PREPROCESSING.PRED_HORIZON,
+            input_len=input_len, pred_horizon=horizon,
             feature_set=feature_set_name,
         )
         for attr, cli_arg in [
@@ -201,7 +201,7 @@ def _load_test_dataset(args, ckpt_args, device, log_info, feature_set_name="cpu"
         from preprocessing.cskv.config import CFG as CSKV_CFG
         test_ds = CskvDataset(
             preprocess_dir, "test",
-            input_len=PREPROCESSING.INPUT_LEN, pred_horizon=PREPROCESSING.PRED_HORIZON,
+            input_len=input_len, pred_horizon=horizon,
         )
         input_size = test_ds.total_channels
         return test_ds, input_size
@@ -495,7 +495,7 @@ def main():
         "--test_pct",
         type=float,
         default=TRAINING.TEST_PCT,
-        help="Percentage of test samples for evaluation; 25 means 25%, not 0.25 (100 uses all; <=0 uses all).",
+        help="Percentage of test samples for evaluation; 25 means 25%%, not 0.25 (100 uses all; <=0 uses all).",
     )
     p.add_argument("--preprocess_dir", default=None, help="Decomposition output dir (for sv/cskv)")
     p.add_argument("--seed", type=int, default=TRAINING.SEED, help="Random seed for reproducibility")

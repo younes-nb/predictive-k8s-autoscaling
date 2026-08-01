@@ -30,6 +30,8 @@ def main():
     ap.add_argument("--skip_preprocessing_approach", action="store_true", help="Skip the preprocessing approach step (sv/cskv/smoothing)")
     ap.add_argument("--recompute_preprocessing", action="store_true", help="Recompute the preprocessing approach output, ignoring cached shards")
     ap.add_argument("--windows_dir", default=PATHS.WINDOWS_DIR, help="Output directory for window datasets")
+    ap.add_argument("--input_len", type=int, default=PREPROCESSING.INPUT_LEN,
+        help="Sliding window input length; changing it auto-rebuilds the windows (default: %(default)s)")
     ap.add_argument("--skip_preprocessing", action="store_true", help="Skip the entire preprocessing pipeline (fetch+ingest+windows)")
     ap.add_argument("--skip_weights", action="store_true", help="Skip boundary weight computation")
     ap.add_argument("--skip_training", action="store_true", help="Skip the training step")
@@ -170,6 +172,13 @@ def main():
         cmd_pre.extend(["--preprocess_approach", args.preprocess_approach])
         cmd_pre.extend(["--smooth_window", str(args.smooth_window)])
         cmd_pre.extend(["--subset_seed", str(args.seed)])
+        cmd_pre.extend(["--input_len", str(args.input_len)])
+        if args.input_len != PREPROCESSING.INPUT_LEN:
+            print(
+                f"\n[INFO] input_len={args.input_len} != default {PREPROCESSING.INPUT_LEN}; "
+                f"forcing window rebuild (--recompute_windows)"
+            )
+            cmd_pre.append("--recompute_windows")
         if args.swt_level is not None:
             cmd_pre.extend(["--swt_level", str(args.swt_level)])
         if args.mem_swt_level is not None:
@@ -234,6 +243,8 @@ def main():
             args.model_type,
             "--preprocess_approach",
             args.preprocess_approach,
+            "--input_len",
+            str(args.input_len),
         ]
         if args.preprocess_approach in ("sv", "cskv"):
             cmd_train.extend(["--preprocess_dir", os.path.join(args.windows_dir, args.preprocess_approach)])
@@ -279,6 +290,8 @@ def main():
             current_checkpoint,
             "--batch_size",
             str(TRAINING.BATCH_SIZE),
+            "--input_len",
+            str(args.input_len),
         ]
         if args.preprocess_approach in ("sv", "cskv"):
             cmd_test.extend(["--preprocess_dir", os.path.join(args.windows_dir, args.preprocess_approach)])

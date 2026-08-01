@@ -59,7 +59,7 @@ def _load_datasets(args, preprocess_approach):
         from preprocessing.sv.dataset import SvDataset
         from preprocessing.sv.config import CFG as SV_CFG
         sv_kw = dict(
-            input_len=PREPROCESSING.INPUT_LEN, pred_horizon=PREPROCESSING.PRED_HORIZON,
+            input_len=args.input_len, pred_horizon=PREPROCESSING.PRED_HORIZON,
             feature_set=args.feature_set,
         )
         for attr, cli_arg in [
@@ -77,11 +77,11 @@ def _load_datasets(args, preprocess_approach):
         from preprocessing.cskv.config import CFG as CSKV_CFG
         train_ds = CskvDataset(
             args.preprocess_dir, "train",
-            input_len=PREPROCESSING.INPUT_LEN, pred_horizon=PREPROCESSING.PRED_HORIZON,
+            input_len=args.input_len, pred_horizon=PREPROCESSING.PRED_HORIZON,
         )
         val_ds = CskvDataset(
             args.preprocess_dir, "val",
-            input_len=PREPROCESSING.INPUT_LEN, pred_horizon=PREPROCESSING.PRED_HORIZON,
+            input_len=args.input_len, pred_horizon=PREPROCESSING.PRED_HORIZON,
         )
         return train_ds, val_ds
     else:
