@@ -575,6 +575,9 @@ def main():
     except Exception as e:
         logging.error("Fatal Error during training", exc_info=True)
         sys.exit(1)
+    finally:
+        if torch.distributed.is_initialized():
+            torch.distributed.destroy_process_group()
 
 
 if __name__ == "__main__":

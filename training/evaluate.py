@@ -5,6 +5,8 @@ import argparse
 import logging
 import time
 import math
+import warnings
+from datetime import timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -12,11 +14,17 @@ REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, os.pardir))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
+warnings.filterwarnings(
+    "ignore",
+    category=FutureWarning,
+    message=r"`torch\.distributed\.all_gather_into_tensor` is deprecated.*",
+)
+
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from accelerate import Accelerator
+from accelerate import Accelerator, InitProcessGroupKwargs
 from tqdm import tqdm
 
 from shared.config_paths import PATHS
@@ -284,7 +292,8 @@ def _benchmark_single_sample_inference(model, accelerator, args, ckpt_args, devi
 
 
 def evaluate(args):
-    accelerator = Accelerator(cpu=args.cpu)
+    timeout_kwargs = InitProcessGroupKwargs(timeout=timedelta(seconds=14400))
+    accelerator = Accelerator(cpu=args.cpu, kwargs_handlers=[timeout_kwargs])
     device = accelerator.device
 
     seed = getattr(args, "seed", TRAINING.SEED)
@@ -367,7 +376,7 @@ def evaluate(args):
 
     system_cores = os.cpu_count() or 1
     gpu_count = torch.cuda.device_count() or 1
-    optimal_workers = min(system_cores, 4 * gpu_count)
+    optimal_workers = min(system_cores, 4 * gpu_count, 12)
     log_info(f"Dynamically set num_workers to {optimal_workers}")
 
     def _worker_init_fn(worker_id):
@@ -391,6 +400,7 @@ def evaluate(args):
         _benchmark_single_sample_inference(
             model, accelerator, args, ckpt_args, device, log_info,
         )
+    accelerator.wait_for_everyone()
 
     all_preds = []
     all_trues = []
@@ -490,9 +500,9 @@ def main():
     p.add_argument("--preprocess_dir", default=None, help="Decomposition output dir (for sv/cskv)")
     p.add_argument("--seed", type=int, default=TRAINING.SEED, help="Random seed for reproducibility")
     p.add_argument(
-        "--inference_bench_samples", type=int, default=0,
+        "--inference_bench_samples", type=int, default=1000,
         help="Number of raw windows for single-sample latency benchmark. "
-             "0 or negative means use all test windows.",
+             "<=0 means use all test windows.",
     )
     p.add_argument(
         "--bench_workers", type=int, default=0,
@@ -510,6 +520,9 @@ def main():
     except Exception:
         logging.error("Fatal Error during evaluation", exc_info=True)
         sys.exit(1)
+    finally:
+        if torch.distributed.is_initialized():
+            torch.distributed.destroy_process_group()
 
 
 if __name__ == "__main__":
