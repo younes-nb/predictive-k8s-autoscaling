@@ -28,8 +28,9 @@ def channel_dirs_for(
     no_vmd: bool = False,
 ) -> List[str]:
     if no_vmd:
-        dirs: List[str] = [f"{prefix}D{lv}" for lv in range(swt_level, 0, -1)]
-        dirs.append(f"{prefix}A{swt_level}")
+        dirs = [f"{prefix}A{swt_level}"]
+        for lv in range(swt_level, 0, -1):
+            dirs.append(f"{prefix}D{lv}")
         return dirs
     dirs = [f"{prefix}vmd_mode_{k}" for k in range(vmd_k)]
     for lv in range(swt_level, 1, -1):

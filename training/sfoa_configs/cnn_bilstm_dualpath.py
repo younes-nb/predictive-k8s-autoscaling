@@ -16,6 +16,11 @@ DEFAULTS = {
     "n_cross_blocks": 2,
     "dropout": 0.1,
     "lr": 1e-3,
+    "mix_style": "linear_fused",
+    "anchor_kind": "linear",
+    "slope_span": 8,
+    "head_style": "pooled_mlp",
+    "pool_head_dim": 128,
 }
 
 
@@ -33,5 +38,10 @@ def build_model(hyperparams, input_size, args, num_targets, device):
         n_group_blocks=hyperparams["n_group_blocks"],
         n_cross_blocks=hyperparams["n_cross_blocks"],
         dropout=hyperparams["dropout"],
+        mix_style=hyperparams.get("mix_style", "gelu_bottleneck"),
+        anchor_kind=hyperparams.get("anchor_kind", "linear"),
+        slope_span=hyperparams.get("slope_span", 8),
+        head_style=hyperparams.get("head_style", "linear"),
+        pool_head_dim=hyperparams.get("pool_head_dim", 128),
         num_targets=num_targets,
     ).to(device)
