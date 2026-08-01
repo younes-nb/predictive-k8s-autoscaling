@@ -6,12 +6,20 @@ import shutil
 import tempfile
 import time
 import gc
+import math
+import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, os.pardir))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
+
+_n_cpus = os.cpu_count() or 1
+_NUM_WORKERS = 0.9
+os.environ.setdefault(
+    "POLARS_MAX_THREADS", str(max(1, int(_n_cpus * _NUM_WORKERS)))
+)
 
 import polars as pl
 import numpy as np
@@ -25,8 +33,10 @@ from shared.features import FEATURE_SETS, get_feature_set, tables_for_feature_se
 
 from preprocessing.parquet_utils import list_parquet_parts, build_table_agg
 
+_WORKER_CTX = {}
 
-def save_chunk(out_dir, shard_idx, chunk_idx, shard_data):
+
+def save_chunk(out_dir, shard_idx, chunk_idx, shard_data, sync=False):
     base_name = f"part-{shard_idx:04d}_chunk-{chunk_idx:04d}"
     saved_any = False
 
@@ -47,8 +57,8 @@ def save_chunk(out_dir, shard_idx, chunk_idx, shard_data):
                     file_name = os.path.basename(src_file)
                     dest_file = os.path.join(out_dir, file_name)
                     shutil.move(src_file, dest_file)
+                if sync:
                     os.sync()
-                    time.sleep(2.0)
 
     except OSError as e:
         print(f"\nStaging Error: {e}")
@@ -57,123 +67,41 @@ def save_chunk(out_dir, shard_idx, chunk_idx, shard_data):
     return saved_any
 
 
-def _process_batch(batch_idx, current_batch_ids, args_dict, table_parts,
-                   feature_names, target_features, target_indices,
-                   needed_tables, table_exprs, base_table, effective_id_cols):
+def _agg_exprs_for_table(table_exprs, table_name):
     import polars as pl
-    from preprocessing.parquet_utils import build_table_agg
 
+    exprs = []
+    for feat_name, raw_col in table_exprs[table_name]:
+        if table_name == "msresource":
+            exprs.append(pl.col(raw_col).mean().alias(feat_name))
+        elif table_name == "msrtmcre":
+            exprs.append(pl.col(raw_col).sum().alias(feat_name))
+        else:
+            exprs.append(pl.col(raw_col).last().alias(feat_name))
+    return exprs
+
+
+def _process_service_group(group_idx, service_ids):
+    import numpy as np
+
+    ctx = _WORKER_CTX
+    args_dict = ctx["args_dict"]
     out_dir = args_dict["out_dir"]
-    done_marker = os.path.join(out_dir, f"part-{batch_idx:04d}.done")
+    done_marker = os.path.join(out_dir, f"part-{group_idx:04d}.done")
     if os.path.exists(done_marker):
-        return (batch_idx, 0, 0.0, True)
+        return (group_idx, 0, 0.0, True)
 
     t0 = time.time()
-    load_ids = sorted(set(current_batch_ids))
-
-    def agg_exprs_for_table(table_name):
-        exprs = []
-        for feat_name, raw_col in table_exprs[table_name]:
-            if table_name == "msresource":
-                exprs.append(pl.col(raw_col).mean().alias(feat_name))
-            elif table_name == "msrtmcre":
-                exprs.append(pl.col(raw_col).sum().alias(feat_name))
-            else:
-                exprs.append(pl.col(raw_col).last().alias(feat_name))
-        return exprs
-
-    base_need_cols = list(
-        set([
-            args_dict["time_col"],
-            *effective_id_cols,
-            *[raw for _, raw in table_exprs[base_table]],
-        ])
-    )
-
-    lf_base = (
-        pl.scan_parquet(table_parts[base_table])
-        .filter(pl.col(args_dict["service_col"]).is_in(load_ids))
-        .select(base_need_cols)
-    )
-
-    joined_lazy = build_table_agg(
-        lf_base, args_dict["time_col"], effective_id_cols, args_dict["freq"],
-        table_exprs[base_table], agg_exprs=agg_exprs_for_table(base_table),
-    )
-
-    bounds = lf_base.select([
-        pl.col(args_dict["time_col"]).min().alias("min_t"),
-        pl.col(args_dict["time_col"]).max().alias("max_t"),
-    ]).collect()
-
-    if bounds.height == 0 or bounds["min_t"][0] is None:
-        open(done_marker, "a").close()
-        return (batch_idx, 0, time.time() - t0, True)
-
-    min_t, max_t = bounds["min_t"][0], bounds["max_t"][0]
-
-    for t in needed_tables:
-        if t == base_table:
-            continue
-        t_need_cols = list(
-            set([args_dict["time_col"], *effective_id_cols, *[raw for _, raw in table_exprs[t]]])
-        )
-
-        lf_t = pl.scan_parquet(table_parts[t]).filter(
-            (pl.col(args_dict["time_col"]).cast(pl.Datetime) >= min_t)
-            & (pl.col(args_dict["time_col"]).cast(pl.Datetime) <= max_t)
-        )
-
-        t_schema = pl.scan_parquet(table_parts[t]).collect_schema().names()
-        if args_dict["service_col"] in t_schema:
-            lf_t = lf_t.filter(pl.col(args_dict["service_col"]).is_in(current_batch_ids))
-
-        lf_t_agg = build_table_agg(
-            lf_t.select(t_need_cols), args_dict["time_col"], effective_id_cols,
-            args_dict["freq"], table_exprs[t], agg_exprs=agg_exprs_for_table(t),
-        )
-
-        join_on = ["_t"] + FEATURE_SETS[args_dict["feature_set"]].get("join_keys", {}).get(t, [])
-        joined_lazy = joined_lazy.join(lf_t_agg, on=join_on, how="left")
-
-    for feat in feature_names:
-        is_resource = "cpu" in feat.lower() or "mem" in feat.lower()
-        if is_resource:
-            joined_lazy = joined_lazy.with_columns(pl.col(feat).clip(0.0, 1.0))
-
-    sort_cols = list(
-        set(effective_id_cols).intersection(joined_lazy.collect_schema().names())
-    ) + ["_t"]
-
-    joined = (
-        joined_lazy.drop_nulls(feature_names)
-        .collect(engine="streaming")
-        .sort(sort_cols)
-    )
-    del joined_lazy
-    gc.collect()
-
-    if joined.height == 0:
-        open(done_marker, "a").close()
-        return (batch_idx, 0, time.time() - t0, True)
+    arrays = ctx["service_arrays"]
+    target_indices = ctx["target_indices"]
 
     shard_data = {"train": ([], [], []), "val": ([], [], []), "test": ([], [], [])}
-    batch_set = set(current_batch_ids)
-    group_cols = [c for c in effective_id_cols if c in joined.columns]
+    n_processed = 0
 
-    for ms_key, g in joined.group_by(group_cols, maintain_order=True):
-        if g.height < args_dict["input_len"] + args_dict["pred_horizon"]:
+    for ms_id in service_ids:
+        feat_raw = arrays.get(ms_id)
+        if feat_raw is None:
             continue
-
-        ms_id = ms_key if isinstance(ms_key, str) else ms_key[0]
-        if ms_id not in batch_set:
-            continue
-
-        feat_arrays = {}
-        for feat in feature_names:
-            feat_arrays[feat] = g[feat].to_numpy().astype("float32")
-
-        feat_raw = np.stack([feat_arrays[feat] for feat in feature_names], axis=1)
 
         n = len(feat_raw)
         idx_tr = int(n * args_dict["train_frac"])
@@ -203,14 +131,15 @@ def _process_batch(batch_idx, current_batch_ids, args_dict, table_parts,
                 shard_data[split_name][0].append(Xs)
                 shard_data[split_name][1].append(Ys)
                 shard_data[split_name][2].append(Ss)
+                n_processed += 1
 
-    saved = save_chunk(out_dir, batch_idx, 0, shard_data)
+    save_chunk(out_dir, group_idx, 0, shard_data, sync=ctx["sync"])
     open(done_marker, "a").close()
 
-    del joined, shard_data
+    del shard_data
     gc.collect()
 
-    return (batch_idx, 1, time.time() - t0, False)
+    return (group_idx, n_processed, time.time() - t0, False)
 
 
 def main():
@@ -236,14 +165,16 @@ def main():
     p.add_argument("--service_col", type=str, default=PREPROCESSING.SERVICE_COL)
     p.add_argument("--max_services", type=int, default=PREPROCESSING.MAX_SERVICES)
     p.add_argument("--subset_seed", type=int, default=PREPROCESSING.SUBSET_SEED)
-    p.add_argument("--batch_size", type=int, default=256)
+    p.add_argument("--batch_size", type=int, default=0,
+                    help="Services per worker group; 0 = auto-size to the worker pool (default: 0)")
     p.add_argument("--num_workers", type=float, default=0.9,
                     help="Fraction of CPU cores to use (default: 0.9)")
     p.add_argument("--recompute", action="store_true",
                     help="Delete cached done markers and shards, forcing a full rebuild")
+    p.add_argument("--sync", action="store_true",
+                    help="Run os.sync() after saving each chunk (durability; slower)")
 
     args = p.parse_args()
-    rng = np.random.default_rng(args.subset_seed)
 
     if (
         args.train_frac <= 0
@@ -254,6 +185,10 @@ def main():
 
     n_cpus = os.cpu_count() or 1
     num_workers = max(1, int(n_cpus * args.num_workers))
+    print(
+        f"n_cpus={n_cpus}, worker pool={num_workers}, "
+        f"polars threads capped to {pl.thread_pool_size()}"
+    )
 
     spec = get_feature_set(args.feature_set)
     feature_names = list(spec["features"])
@@ -274,16 +209,20 @@ def main():
             raise SystemExit(f"No parquet parts found for table='{t}'")
         table_parts[t] = parts
 
+    base_parts = table_parts[base_table]
+
     print(
-        f"Discovering unique services across all {len(table_parts[base_table])} base shards..."
+        f"Discovering unique services across {len(base_parts)} base shards "
+        f"(polars parallel across all cores)..."
     )
     all_services_df = (
-        pl.scan_parquet(table_parts[base_table])
+        pl.scan_parquet(base_parts, low_memory=True)
         .select(args.service_col)
         .unique()
         .collect(engine="streaming")
     )
     all_services_list = sorted(all_services_df[args.service_col].to_list())
+    print(f"Total unique services: {len(all_services_list)}")
 
     if args.max_services and len(all_services_list) > args.max_services:
         rng = np.random.default_rng(args.subset_seed)
@@ -303,7 +242,22 @@ def main():
         if cached:
             print(f"Removed {len(cached)} cached artifacts for recompute")
 
-    total_batches = (len(all_services_list) + args.batch_size - 1) // args.batch_size
+    if args.batch_size and args.batch_size > 0:
+        group_size = args.batch_size
+    else:
+        group_size = max(1, math.ceil(len(all_services_list) / num_workers))
+    total_groups = (len(all_services_list) + group_size - 1) // group_size
+
+    groups_to_run = []
+    for gi in range(total_groups):
+        done_marker = os.path.join(args.out_dir, f"part-{gi:04d}.done")
+        if os.path.exists(done_marker):
+            continue
+        groups_to_run.append(gi)
+
+    if not groups_to_run:
+        print("\nAll service groups processed (all cached).")
+        return
 
     args_dict = {
         "out_dir": args.out_dir,
@@ -318,52 +272,126 @@ def main():
         "feature_set": args.feature_set,
     }
 
-    batch_tasks = []
-    for batch_idx in range(total_batches):
-        done_marker = os.path.join(args.out_dir, f"part-{batch_idx:04d}.done")
-        if os.path.exists(done_marker):
-            continue
-        start_idx = batch_idx * args.batch_size
-        end_idx = start_idx + args.batch_size
-        current_batch_ids = all_services_list[start_idx:end_idx]
-        batch_tasks.append((batch_idx, current_batch_ids))
+    agg_frames = {}
+    agg_order = [base_table] + [t for t in needed_tables if t != base_table]
+    for t in agg_order:
+        parts = table_parts[t]
+        schema = pl.scan_parquet(parts).collect_schema().names()
+        has_service = args.service_col in schema
 
-    if not batch_tasks:
-        print("\nAll global batches processed (all cached).")
+        need_cols = list(
+            set([
+                args.time_col,
+                *effective_id_cols,
+                *[raw for _, raw in table_exprs[t]],
+            ])
+        )
+        lf = pl.scan_parquet(parts, low_memory=True).select(need_cols)
+        if has_service:
+            lf = lf.filter(pl.col(args.service_col).is_in(all_services_list))
+
+        agg_frames[t] = build_table_agg(
+            lf, args.time_col, effective_id_cols, args.freq, table_exprs[t],
+            agg_exprs=_agg_exprs_for_table(table_exprs, t),
+        ).collect(engine="streaming")
+        print(f"Table '{t}' aggregated: {agg_frames[t].height} rows")
+
+    if base_table not in agg_frames or agg_frames[base_table].is_empty():
+        print("No base-table data after aggregation; nothing to do.")
         return
 
-    print(f"Processing {len(batch_tasks)} batches with {num_workers} workers")
+    joined = agg_frames[base_table].lazy()
+    join_keys = FEATURE_SETS[args.feature_set].get("join_keys", {})
+    for t in agg_order:
+        if t == base_table:
+            continue
+        t_frame = agg_frames[t]
+        if args.service_col in t_frame.columns:
+            t_frame = t_frame.filter(pl.col(args.service_col).is_in(all_services_list))
+        join_on = ["_t"] + join_keys.get(t, [])
+        joined = joined.join(t_frame.lazy(), on=join_on, how="left")
 
-    pbar = tqdm(total=total_batches, desc="Building windows", unit="batch",
+    for feat in feature_names:
+        is_resource = "cpu" in feat.lower() or "mem" in feat.lower()
+        if is_resource:
+            joined = joined.with_columns(pl.col(feat).clip(0.0, 1.0))
+
+    sort_cols = list(
+        set(effective_id_cols).intersection(joined.collect_schema().names())
+    ) + ["_t"]
+
+    joined_df = (
+        joined.drop_nulls(feature_names)
+        .collect(engine="streaming")
+        .sort(sort_cols)
+    )
+    print(f"Joined/clean table: {joined_df.height} rows")
+
+    if joined_df.height == 0:
+        print("No valid rows after join/filtering; nothing to do.")
+        return
+
+    group_cols = [c for c in effective_id_cols if c in joined_df.columns]
+    service_arrays = {}
+    for ms_key, g in joined_df.group_by(group_cols, maintain_order=True):
+        if g.height < args.input_len + args.pred_horizon:
+            continue
+        ms_id = ms_key if isinstance(ms_key, str) else ms_key[0]
+        feat_arrays = {
+            f: g[f].to_numpy().astype("float32") for f in feature_names
+        }
+        service_arrays[ms_id] = np.stack(
+            [feat_arrays[f] for f in feature_names], axis=1
+        )
+    del joined_df
+    gc.collect()
+    print(f"Service feature arrays: {len(service_arrays)} services")
+
+    if not service_arrays:
+        print("No services with enough data after filtering; nothing to do.")
+        return
+
+    global _WORKER_CTX
+    _WORKER_CTX = {
+        "args_dict": args_dict,
+        "service_arrays": service_arrays,
+        "target_indices": target_indices,
+        "sync": args.sync,
+    }
+
+    tasks = []
+    for gi in groups_to_run:
+        start_idx = gi * group_size
+        end_idx = min(start_idx + group_size, len(all_services_list))
+        tasks.append((gi, all_services_list[start_idx:end_idx]))
+
+    print(f"Processing {len(tasks)} groups with {num_workers} workers (group_size={group_size})")
+
+    pbar = tqdm(total=len(tasks), desc="Building windows", unit="group",
                 bar_format=("{desc}: {percentage:5.1f}%|{bar}| "
                              "{n_fmt}/{total_fmt} [{elapsed}<{remaining}, "
                              "{rate_fmt}]"))
 
+    pool_kwargs = {}
+    if os.name == "posix":
+        pool_kwargs["mp_context"] = mp.get_context("fork")
+
     if num_workers <= 1:
-        for batch_idx, current_batch_ids in batch_tasks:
-            _process_batch(
-                batch_idx, current_batch_ids, args_dict, table_parts,
-                feature_names, target_features, target_indices,
-                needed_tables, table_exprs, base_table, effective_id_cols,
-            )
+        for gi, ids in tasks:
+            _process_service_group(gi, ids)
             pbar.update(1)
     else:
-        with ProcessPoolExecutor(max_workers=num_workers) as executor:
+        with ProcessPoolExecutor(max_workers=num_workers, **pool_kwargs) as executor:
             futures = {
-                executor.submit(
-                    _process_batch,
-                    batch_idx, current_batch_ids, args_dict, table_parts,
-                    feature_names, target_features, target_indices,
-                    needed_tables, table_exprs, base_table, effective_id_cols,
-                ): batch_idx
-                for batch_idx, current_batch_ids in batch_tasks
+                executor.submit(_process_service_group, gi, ids): gi
+                for gi, ids in tasks
             }
             for future in as_completed(futures):
                 future.result()
                 pbar.update(1)
 
     pbar.close()
-    print("\nAll global batches processed.")
+    print("\nAll service groups processed.")
 
 
 if __name__ == "__main__":
