@@ -27,7 +27,7 @@ from shared.logging_utils import setup_logging
 from shared.features import target_features_for_feature_set
 from core.dataset import ShardedWindowsDataset
 
-from training.loss import weighted_mse, per_target_loss
+from training.loss import weighted_mse, per_target_loss, per_target_composite_loss
 from training.train_helpers import (
     head_slice_dataset_by_pct,
     load_resume_state,
@@ -161,6 +161,16 @@ def train(args):
 
     if not hasattr(args, "loss_mode"):
         setattr(args, "loss_mode", "joint_mse")
+
+    composite_defaults = {
+        "mem_huber_beta": TRAINING.MEM_HUBER_BETA,
+        "mem_mse_w": TRAINING.MEM_MSE_W,
+        "mem_rel_w": TRAINING.MEM_REL_W,
+        "mem_residual_reg": TRAINING.MEM_RESIDUAL_REG,
+    }
+    for attr, default in composite_defaults.items():
+        if not hasattr(args, attr) or getattr(args, attr) is None:
+            setattr(args, attr, default)
 
     hyperparam_optimizer = getattr(
         args, "hyperparam_optimizer", TRAINING.HYPERPARAM_OPTIMIZER
@@ -369,9 +379,29 @@ def train(args):
     if accelerator.mixed_precision == "fp16":
         log_info("AMP (FP16 mixed precision) enabled via Accelerate")
 
-    log_info("\n--- Starting Training Loop ---")
+    def _compute_loss(model, preds, y, w):
+        if w is not None:
+            return weighted_mse(preds, y, w, under_penalty=args.under_penalty)
+        if args.loss_mode == "joint_mse":
+            loss = nn.functional.mse_loss(preds, y)
+        elif args.loss_mode == "per_target_composite":
+            loss = per_target_composite_loss(
+                preds, y,
+                huber_beta=args.mem_huber_beta,
+                mse_w=args.mem_mse_w,
+                rel_w=args.mem_rel_w,
+            )
+        else:
+            mem_mode = "l1" if args.loss_mode == "per_target_mae" else "mse"
+            loss = per_target_loss(preds, y, mem_mode=mem_mode)
+        reg = getattr(args, "mem_residual_reg", 0.0) or 0.0
+        if reg and hasattr(model, "memory_gate"):
+            gate = model.memory_gate()
+            if gate is not None:
+                loss = loss + reg * gate.pow(2).mean()
+        return loss
 
-    criterion = nn.MSELoss()
+    log_info("\n--- Starting Training Loop ---")
 
     for epoch in range(start_epoch, args.epochs + 1):
         start_time = datetime.now()
@@ -390,13 +420,7 @@ def train(args):
 
             with accelerator.autocast():
                 preds = model(x)
-                if w is not None:
-                    loss = weighted_mse(preds, y, w, under_penalty=args.under_penalty)
-                elif args.loss_mode == "joint_mse":
-                    loss = criterion(preds, y)
-                else:
-                    mem_mode = "l1" if args.loss_mode == "per_target_mae" else "mse"
-                    loss = per_target_loss(preds, y, mem_mode=mem_mode)
+                loss = _compute_loss(model, preds, y, w)
 
             accelerator.backward(loss)
 
@@ -425,14 +449,7 @@ def train(args):
                     w = None
 
                 preds = model(x)
-
-                if w is not None:
-                    loss = weighted_mse(preds, y, w, under_penalty=args.under_penalty)
-                elif args.loss_mode == "joint_mse":
-                    loss = criterion(preds, y)
-                else:
-                    mem_mode = "l1" if args.loss_mode == "per_target_mae" else "mse"
-                    loss = per_target_loss(preds, y, mem_mode=mem_mode)
+                loss = _compute_loss(model, preds, y, w)
 
                 val_loss_accum += loss.item() * x.size(0)
                 val_samples_seen += x.size(0)
@@ -529,10 +546,20 @@ def main():
     p.add_argument(
         "--loss_mode",
         default="joint_mse",
-        choices=["joint_mse", "per_target_mse", "per_target_mae"],
+        choices=["joint_mse", "per_target_mse", "per_target_mae", "per_target_composite"],
         help="joint_mse: MSE over all targets. per_target_*: equal-weight per target; "
-             "per_target_mae uses L1 for the memory target (tuned for memory MAE).",
+             "per_target_mae uses L1 for the memory target; per_target_composite blends "
+             "Huber + small MSE (+ optional relative) for the memory target.",
     )
+    p.add_argument("--mem_huber_beta", type=float, default=None,
+                   help="Huber beta for the memory term of per_target_composite (default: config)")
+    p.add_argument("--mem_mse_w", type=float, default=None,
+                   help="Weight of the MSE term added to the memory Huber loss (default: config)")
+    p.add_argument("--mem_rel_w", type=float, default=None,
+                   help="Weight of the relative/MAPE term added to the memory loss (default: config)")
+    p.add_argument("--mem_residual_reg", type=float, default=None,
+                   help="L2 penalty on the memory residual gate, pulling memory toward the naive "
+                        "persistence anchor (default: config)")
     p.add_argument("--seed", type=int, default=TRAINING.SEED)
     p.add_argument("--cpu", action="store_true")
     p.add_argument("--num_workers", type=int, default=TRAINING.NUM_WORKERS)

@@ -49,6 +49,10 @@ class TrainingDefaults:
     TRAIN_PCT: float = 100.0
     VAL_PCT: float = 100.0
     TEST_PCT: float = 100.0
+    MEM_HUBER_BETA: float = 0.002
+    MEM_MSE_W: float = 0.5
+    MEM_REL_W: float = 0.0
+    MEM_RESIDUAL_REG: float = 0.05
 
 
 TRAINING = TrainingDefaults()

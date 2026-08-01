@@ -4,6 +4,37 @@ import torch
 import torch.nn as nn
 
 
+def per_target_composite_loss(
+    preds,
+    target,
+    huber_beta: float = 0.002,
+    mse_w: float = 0.5,
+    rel_w: float = 0.0,
+    rel_eps: float = 1e-6,
+):
+    """Per-target loss for beating the naive memory forecaster.
+
+    preds/target: (B, H, T). T==2 assumes [cpu, mem] ordering.
+    CPU is always MSE. Memory combines Huber (MAE-dominant), a small MSE term
+    (large-error control / RMSE), and an optional relative (MAPE) term so the
+    memory head can beat naive on both MAE-like and MSE-like metrics.
+    Returns CPU_loss + mem_loss (equal weight).
+    """
+    t = preds.shape[-1]
+    if t == 1:
+        return nn.functional.mse_loss(preds, target)
+    cpu_loss = nn.functional.mse_loss(preds[..., 0], target[..., 0])
+    p_mem = preds[..., 1]
+    t_mem = target[..., 1]
+    mem_loss = nn.functional.smooth_l1_loss(p_mem, t_mem, beta=huber_beta)
+    if mse_w:
+        mem_loss = mem_loss + mse_w * nn.functional.mse_loss(p_mem, t_mem)
+    if rel_w:
+        rel = torch.abs(p_mem - t_mem) / (torch.abs(t_mem) + rel_eps)
+        mem_loss = mem_loss + rel_w * rel.mean()
+    return cpu_loss + mem_loss
+
+
 def per_target_loss(preds, target, mem_mode="mse"):
     """Per-target loss so the memory head gets full gradient signal.
 

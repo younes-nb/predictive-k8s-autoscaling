@@ -88,9 +88,19 @@ def main():
     ap.add_argument(
         "--loss_mode",
         default="joint_mse",
-        choices=["joint_mse", "per_target_mse", "per_target_mae"],
-        help="joint_mse: MSE over all targets. per_target_mae: equal-weight per target with L1 memory loss.",
+        choices=["joint_mse", "per_target_mse", "per_target_mae", "per_target_composite"],
+        help="joint_mse: MSE over all targets. per_target_mae: equal-weight per target with L1 memory loss. "
+             "per_target_composite: Huber + MSE (+ optional relative) memory loss.",
     )
+    ap.add_argument("--mem_huber_beta", type=float, default=None,
+                    help="Huber beta for the memory term of per_target_composite (default: config)")
+    ap.add_argument("--mem_mse_w", type=float, default=None,
+                    help="Weight of the MSE term added to the memory Huber loss (default: config)")
+    ap.add_argument("--mem_rel_w", type=float, default=None,
+                    help="Weight of the relative/MAPE term added to the memory loss (default: config)")
+    ap.add_argument("--mem_residual_reg", type=float, default=None,
+                    help="L2 penalty on the memory residual gate, pulling memory toward the naive "
+                         "persistence anchor (default: config)")
     ap.add_argument(
         "--train_pct",
         type=float,
@@ -234,6 +244,10 @@ def main():
         cmd_train.extend(["--train_pct", str(args.train_pct)])
         cmd_train.extend(["--val_pct", str(args.val_pct)])
         cmd_train.extend(["--loss_mode", args.loss_mode])
+        for attr in ("mem_huber_beta", "mem_mse_w", "mem_rel_w", "mem_residual_reg"):
+            val = getattr(args, attr, None)
+            if val is not None:
+                cmd_train.extend([f"--{attr}", str(val)])
         if args.resume_training:
             cmd_train.append("--resume_training")
         if args.cpu:

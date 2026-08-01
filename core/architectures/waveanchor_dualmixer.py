@@ -1,4 +1,5 @@
 import warnings
+from typing import Optional
 
 import numpy as np
 import torch
@@ -108,12 +109,15 @@ class AnchorMixer(nn.Module):
         osc_channels=None,
         det_channels=None,
         trd_channels=None,
+        anchor_mode: str = "trend",
+        residual_gate_init: Optional[float] = None,
     ):
         super().__init__()
         T = input_len
         self.pred_horizon = pred_horizon
         self.num_targets = num_targets
         self.slope_span = SLOPE_SPAN
+        self.anchor_mode = anchor_mode
 
         osc = list(osc_channels if osc_channels is not None else [1, 2, 3])
         det = list(det_channels if det_channels is not None else [4])
@@ -147,7 +151,15 @@ class AnchorMixer(nn.Module):
 
         self.norm_out = nn.LayerNorm(cross_c)
 
-        self.register_buffer("trend_w", self._build_trend_w(input_len, in_channels, pred_horizon))
+        self.register_buffer(
+            "trend_w", self._build_trend_w(input_len, in_channels, pred_horizon, anchor_mode)
+        )
+
+        self.residual_gate = None
+        if residual_gate_init is not None:
+            self.residual_gate = nn.Parameter(
+                torch.full((pred_horizon,), float(residual_gate_init))
+            )
 
         self.head_style = HEAD_STYLE
         if HEAD_STYLE == "linear":
@@ -166,10 +178,16 @@ class AnchorMixer(nn.Module):
             raise ValueError(f"Unknown head_style: {HEAD_STYLE}")
 
     @staticmethod
-    def _build_trend_w(input_len: int, n_bands: int, pred_horizon: int) -> torch.Tensor:
+    def _build_trend_w(
+        input_len: int, n_bands: int, pred_horizon: int, anchor_mode: str = "trend"
+    ) -> torch.Tensor:
         w = AnchorMixer._swt_reconstruction_weights(input_len, n_bands, position=-1)
-        w8 = AnchorMixer._swt_reconstruction_weights(input_len, n_bands, position=input_len - 1 - SLOPE_SPAN)
         trend_w = np.zeros((n_bands * input_len, pred_horizon), dtype=np.float64)
+        if anchor_mode == "persistence":
+            for s in range(1, pred_horizon + 1):
+                trend_w[:, s - 1] = w.reshape(-1)
+            return torch.from_numpy(trend_w).float()
+        w8 = AnchorMixer._swt_reconstruction_weights(input_len, n_bands, position=input_len - 1 - SLOPE_SPAN)
         if ANCHOR_KIND == "quadratic":
             w16 = AnchorMixer._swt_reconstruction_weights(input_len, n_bands, position=input_len - 1 - 2 * SLOPE_SPAN)
             c1 = (3.0 * w - 4.0 * w8 + w16) / (2.0 * SLOPE_SPAN)
@@ -227,6 +245,8 @@ class AnchorMixer(nn.Module):
             delta = self.pool_head(torch.cat([h[:, -1, :], h.mean(dim=1), base_trend], dim=1))
 
         out = base_trend + delta
+        if self.residual_gate is not None:
+            out = base_trend + delta * self.residual_gate
 
         if self.num_targets > 1:
             return out.view(-1, self.pred_horizon, self.num_targets)
@@ -277,7 +297,12 @@ class WaveAnchorDualMixer(nn.Module):
             osc_channels=[1],
             det_channels=[2],
             trd_channels=[0],
+            anchor_mode="persistence",
+            residual_gate_init=0.01,
         )
+
+    def memory_gate(self):
+        return self.mem_mixer.residual_gate
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if x.dim() == 2:
