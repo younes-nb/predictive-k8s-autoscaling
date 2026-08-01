@@ -311,6 +311,7 @@ def evaluate(args):
         "mem_vmd_k": SV_CFG.MEM_VMD_K,
         "vmd_swt_level": SV_CFG.VMD_SWT_LEVEL,
         "mem_vmd_swt_level": SV_CFG.MEM_VMD_SWT_LEVEL,
+        "no_vmd": SV_CFG.NO_VMD,
     }
     for attr, default in sv_defaults.items():
         if not hasattr(args, attr) or getattr(args, attr) is None:
@@ -500,7 +501,7 @@ def main():
     )
     p.add_argument("--swt_level", type=int, default=None, help="SWT level for CPU (sv only, default: config)")
     p.add_argument("--mem_swt_level", type=int, default=None, help="SWT level for memory (sv only, default: config)")
-    p.add_argument("--no_vmd", action="store_true", help="Skip VMD decomposition (sv only)")
+    p.add_argument("--no_vmd", action="store_true", default=None, help="Skip VMD decomposition (sv only, default: config)")
     p.add_argument("--vmd_k", type=int, default=None, help="VMD K for CPU (sv only, default: config)")
     p.add_argument("--mem_vmd_k", type=int, default=None, help="VMD K for memory (sv only, default: config)")
 

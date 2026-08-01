@@ -117,7 +117,7 @@ def main() -> None:
                     help=f"SWT decomposition level for CPU (default: {CFG.SWT_LEVEL})")
     ap.add_argument("--mem_swt_level", type=int, default=CFG.MEM_SWT_LEVEL,
                     help=f"SWT decomposition level for memory (default: {CFG.MEM_SWT_LEVEL})")
-    ap.add_argument("--no_vmd", action="store_true",
+    ap.add_argument("--no_vmd", action="store_true", default=CFG.NO_VMD,
                     help="Skip VMD decomposition; use only SWT coefficients")
     ap.add_argument("--vmd_k", type=int, default=CFG.VMD_K,
                     help=f"VMD K (number of modes) for CPU (default: {CFG.VMD_K})")

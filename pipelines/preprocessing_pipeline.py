@@ -50,7 +50,7 @@ def main():
     ap.add_argument("--dataset_workers", type=int, default=0, help="Workers for sv/cskv decomposition")
     ap.add_argument("--swt_level", type=int, default=None, help="SWT level for CPU (sv only, default: config)")
     ap.add_argument("--mem_swt_level", type=int, default=None, help="SWT level for memory (sv only, default: config)")
-    ap.add_argument("--no_vmd", action="store_true",
+    ap.add_argument("--no_vmd", action="store_true", default=None,
                      help="Skip VMD decomposition; use only SWT coefficients (sv only)")
     ap.add_argument("--vmd_k", type=int, default=None,
                      help="VMD K (modes) for CPU (sv only, default: config)")
