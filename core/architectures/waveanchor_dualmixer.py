@@ -126,24 +126,34 @@ class AnchorMixer(nn.Module):
         self._det_idx = torch.tensor(det, dtype=torch.long)
         self._trd_idx = torch.tensor(trd, dtype=torch.long)
 
-        self.cnn_osc = GroupCNN(len(osc), d_group, dropout=dropout)
-        self.cnn_det = GroupCNN(len(det), d_group, dropout=dropout)
-        self.cnn_trd = GroupCNN(len(trd), d_group, dropout=dropout)
+        self.has_osc = len(osc) > 0
+        self.has_det = len(det) > 0
+        self.has_trd = len(trd) > 0
 
-        self.group_mix_osc = nn.ModuleList([
-            MixerBlock(T, d_group, D_TIME, D_FEAT, dropout, MIX_STYLE)
-            for _ in range(N_GROUP_BLOCKS)
-        ])
-        self.group_mix_det = nn.ModuleList([
-            MixerBlock(T, d_group, D_TIME, D_FEAT, dropout, MIX_STYLE)
-            for _ in range(N_GROUP_BLOCKS)
-        ])
-        self.group_mix_trd = nn.ModuleList([
-            MixerBlock(T, d_group, D_TIME, D_FEAT, dropout, MIX_STYLE)
-            for _ in range(N_GROUP_BLOCKS)
-        ])
+        self.cnn_osc = GroupCNN(len(osc), d_group, dropout=dropout) if self.has_osc else None
+        self.cnn_det = GroupCNN(len(det), d_group, dropout=dropout) if self.has_det else None
+        self.cnn_trd = GroupCNN(len(trd), d_group, dropout=dropout) if self.has_trd else None
 
-        cross_c = d_group * 3
+        self.group_mix_osc = (
+            nn.ModuleList([
+                MixerBlock(T, d_group, D_TIME, D_FEAT, dropout, MIX_STYLE)
+                for _ in range(N_GROUP_BLOCKS)
+            ]) if self.has_osc else None
+        )
+        self.group_mix_det = (
+            nn.ModuleList([
+                MixerBlock(T, d_group, D_TIME, D_FEAT, dropout, MIX_STYLE)
+                for _ in range(N_GROUP_BLOCKS)
+            ]) if self.has_det else None
+        )
+        self.group_mix_trd = (
+            nn.ModuleList([
+                MixerBlock(T, d_group, D_TIME, D_FEAT, dropout, MIX_STYLE)
+                for _ in range(N_GROUP_BLOCKS)
+            ]) if self.has_trd else None
+        )
+
+        cross_c = d_group * (self.has_osc + self.has_det + self.has_trd)
         self.cross_blocks = nn.ModuleList([
             MixerBlock(T, cross_c, D_TIME, D_FEAT, dropout, MIX_STYLE)
             for _ in range(N_CROSS_BLOCKS)
@@ -228,11 +238,14 @@ class AnchorMixer(nn.Module):
 
         base_trend = x.permute(0, 2, 1).flatten(1, 2) @ self.trend_w
 
-        h_osc = self._mix_group(self.cnn_osc(x[:, :, osc]), self.group_mix_osc)
-        h_det = self._mix_group(self.cnn_det(x[:, :, det]), self.group_mix_det)
-        h_trd = self._mix_group(self.cnn_trd(x[:, :, trd]), self.group_mix_trd)
-
-        h = torch.cat([h_osc, h_det, h_trd], dim=2)
+        h_parts = []
+        if self.has_osc:
+            h_parts.append(self._mix_group(self.cnn_osc(x[:, :, osc]), self.group_mix_osc))
+        if self.has_det:
+            h_parts.append(self._mix_group(self.cnn_det(x[:, :, det]), self.group_mix_det))
+        if self.has_trd:
+            h_parts.append(self._mix_group(self.cnn_trd(x[:, :, trd]), self.group_mix_trd))
+        h = torch.cat(h_parts, dim=2)
 
         for blk in self.cross_blocks:
             h = blk(h)
@@ -251,6 +264,17 @@ class AnchorMixer(nn.Module):
         if self.num_targets > 1:
             return out.view(-1, self.pred_horizon, self.num_targets)
         return out
+
+
+def _swt_groups(n_channels: int):
+    if n_channels < 2:
+        raise ValueError(
+            f"SWT level 0 gives a single band; at least 2 channels "
+            f"(A level + D1) are required, got {n_channels}"
+        )
+    if n_channels == 2:
+        return [0], [], [1]
+    return [0], list(range(1, n_channels - 1)), [n_channels - 1]
 
 
 class WaveAnchorDualMixer(nn.Module):
@@ -275,6 +299,12 @@ class WaveAnchorDualMixer(nn.Module):
         self.cpu_channels = cpu_channels
         self.mem_channels = mem_channels
 
+        if osc_channels is not None or det_channels is not None or trd_channels is not None:
+            cpu_osc, cpu_det, cpu_trd = osc_channels, det_channels, trd_channels
+        else:
+            cpu_osc, cpu_det, cpu_trd = _swt_groups(cpu_channels)
+        mem_osc, mem_det, mem_trd = _swt_groups(mem_channels)
+
         self.cpu_mixer = AnchorMixer(
             in_channels=cpu_channels,
             input_len=input_len,
@@ -282,9 +312,9 @@ class WaveAnchorDualMixer(nn.Module):
             num_targets=1,
             d_group=D_GROUP,
             dropout=dropout,
-            osc_channels=osc_channels,
-            det_channels=det_channels,
-            trd_channels=trd_channels,
+            osc_channels=cpu_osc,
+            det_channels=cpu_det,
+            trd_channels=cpu_trd,
         )
 
         self.mem_mixer = AnchorMixer(
@@ -294,9 +324,9 @@ class WaveAnchorDualMixer(nn.Module):
             num_targets=1,
             d_group=MEM_D_GROUP,
             dropout=dropout,
-            osc_channels=[1],
-            det_channels=[2],
-            trd_channels=[0],
+            osc_channels=mem_osc,
+            det_channels=mem_det,
+            trd_channels=mem_trd,
             anchor_mode="persistence",
             residual_gate_init=0.01,
         )
