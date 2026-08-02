@@ -66,7 +66,7 @@ def decompose_window(window: np.ndarray, cfg) -> np.ndarray:
     window = np.asarray(window, dtype=np.float64)
     n = len(window)
 
-    if n < PREPROCESSING.INPUT_LEN or np.std(window) < 1e-12:
+    if n < 2 ** cfg.SWT_LEVEL or np.std(window) < 1e-12:
         return None
 
     swt_coeffs = pywt.swt(window, 'sym4', level=cfg.SWT_LEVEL, norm=True, trim_approx=True)
@@ -93,8 +93,8 @@ def decompose_window(window: np.ndarray, cfg) -> np.ndarray:
 
     result = np.stack(channels, axis=0)
     expected_channels = _expected_channels(cfg)
-    assert result.shape == (expected_channels, PREPROCESSING.INPUT_LEN), (
-        f"Expected ({expected_channels}, {PREPROCESSING.INPUT_LEN}), got {result.shape}"
+    assert result.shape == (expected_channels, n), (
+        f"Expected ({expected_channels}, {n}), got {result.shape}"
     )
     return result
 
