@@ -12,7 +12,6 @@ MEM_D_GROUP = 24
 D_TIME = 128
 D_FEAT = 64
 N_GROUP_BLOCKS = 2
-N_CROSS_BLOCKS = 2
 MIX_STYLE = "linear_fused"
 ANCHOR_KIND = "linear"
 SLOPE_SPAN = 8
@@ -111,6 +110,9 @@ class AnchorMixer(nn.Module):
         trd_channels=None,
         anchor_mode: str = "trend",
         residual_gate_init: Optional[float] = None,
+        group_cnn_kernels=(3, 5),
+        n_group_blocks=N_GROUP_BLOCKS,
+        pool_head_dim: int = POOL_HEAD_DIM,
     ):
         super().__init__()
         T = input_len
@@ -130,35 +132,30 @@ class AnchorMixer(nn.Module):
         self.has_det = len(det) > 0
         self.has_trd = len(trd) > 0
 
-        self.cnn_osc = GroupCNN(len(osc), d_group, dropout=dropout) if self.has_osc else None
-        self.cnn_det = GroupCNN(len(det), d_group, dropout=dropout) if self.has_det else None
-        self.cnn_trd = GroupCNN(len(trd), d_group, dropout=dropout) if self.has_trd else None
+        self.cnn_osc = GroupCNN(len(osc), d_group, kernels=group_cnn_kernels, dropout=dropout) if self.has_osc else None
+        self.cnn_det = GroupCNN(len(det), d_group, kernels=group_cnn_kernels, dropout=dropout) if self.has_det else None
+        self.cnn_trd = GroupCNN(len(trd), d_group, kernels=group_cnn_kernels, dropout=dropout) if self.has_trd else None
 
         self.group_mix_osc = (
             nn.ModuleList([
                 MixerBlock(T, d_group, D_TIME, D_FEAT, dropout, MIX_STYLE)
-                for _ in range(N_GROUP_BLOCKS)
+                for _ in range(n_group_blocks)
             ]) if self.has_osc else None
         )
         self.group_mix_det = (
             nn.ModuleList([
                 MixerBlock(T, d_group, D_TIME, D_FEAT, dropout, MIX_STYLE)
-                for _ in range(N_GROUP_BLOCKS)
+                for _ in range(n_group_blocks)
             ]) if self.has_det else None
         )
         self.group_mix_trd = (
             nn.ModuleList([
                 MixerBlock(T, d_group, D_TIME, D_FEAT, dropout, MIX_STYLE)
-                for _ in range(N_GROUP_BLOCKS)
+                for _ in range(n_group_blocks)
             ]) if self.has_trd else None
         )
 
         cross_c = d_group * (self.has_osc + self.has_det + self.has_trd)
-        self.cross_blocks = nn.ModuleList([
-            MixerBlock(T, cross_c, D_TIME, D_FEAT, dropout, MIX_STYLE)
-            for _ in range(N_CROSS_BLOCKS)
-        ])
-
         self.norm_out = nn.LayerNorm(cross_c)
 
         self.register_buffer(
@@ -178,9 +175,9 @@ class AnchorMixer(nn.Module):
             nn.init.zeros_(self.output_head.bias)
         elif HEAD_STYLE == "pooled_mlp":
             self.pool_head = nn.Sequential(
-                nn.Linear(2 * cross_c + pred_horizon, POOL_HEAD_DIM),
+                nn.Linear(2 * cross_c + pred_horizon, pool_head_dim),
                 nn.GELU(),
-                nn.Linear(POOL_HEAD_DIM, pred_horizon),
+                nn.Linear(pool_head_dim, pred_horizon),
             )
             nn.init.zeros_(self.pool_head[2].weight)
             nn.init.zeros_(self.pool_head[2].bias)
@@ -193,10 +190,8 @@ class AnchorMixer(nn.Module):
     ) -> torch.Tensor:
         w = AnchorMixer._swt_reconstruction_weights(input_len, n_bands, position=-1)
         trend_w = np.zeros((n_bands * input_len, pred_horizon), dtype=np.float64)
-        if anchor_mode == "persistence":
-            for s in range(1, pred_horizon + 1):
-                trend_w[:, s - 1] = w.reshape(-1)
-            return torch.from_numpy(trend_w).float()
+        if anchor_mode == "none":
+            return torch.zeros(n_bands * input_len, pred_horizon)
         w8 = AnchorMixer._swt_reconstruction_weights(input_len, n_bands, position=input_len - 1 - SLOPE_SPAN)
         if ANCHOR_KIND == "quadratic":
             w16 = AnchorMixer._swt_reconstruction_weights(input_len, n_bands, position=input_len - 1 - 2 * SLOPE_SPAN)
@@ -247,9 +242,6 @@ class AnchorMixer(nn.Module):
             h_parts.append(self._mix_group(self.cnn_trd(x[:, :, trd]), self.group_mix_trd))
         h = torch.cat(h_parts, dim=2)
 
-        for blk in self.cross_blocks:
-            h = blk(h)
-
         h = self.norm_out(h)
 
         if self.head_style == "linear":
@@ -291,6 +283,14 @@ class WaveAnchorDualMixer(nn.Module):
         osc_channels=None,
         det_channels=None,
         trd_channels=None,
+        group_cnn_kernels=(3, 5),
+        n_group_blocks=N_GROUP_BLOCKS,
+        d_group: int = D_GROUP,
+        pool_head_dim: int = POOL_HEAD_DIM,
+        cpu_anchor_mode: str = "trend",
+        mem_anchor_mode: str = "trend",
+        mem_residual_gate_init: Optional[float] = 0.01,
+        grouping: str = "default",
     ):
         super().__init__()
         assert in_channels == cpu_channels + mem_channels
@@ -299,22 +299,30 @@ class WaveAnchorDualMixer(nn.Module):
         self.cpu_channels = cpu_channels
         self.mem_channels = mem_channels
 
-        if osc_channels is not None or det_channels is not None or trd_channels is not None:
-            cpu_osc, cpu_det, cpu_trd = osc_channels, det_channels, trd_channels
+        if grouping == "single":
+            cpu_osc, cpu_det, cpu_trd = list(range(cpu_channels)), [], []
+            mem_osc, mem_det, mem_trd = list(range(mem_channels)), [], []
         else:
-            cpu_osc, cpu_det, cpu_trd = _swt_groups(cpu_channels)
-        mem_osc, mem_det, mem_trd = _swt_groups(mem_channels)
+            if osc_channels is not None or det_channels is not None or trd_channels is not None:
+                cpu_osc, cpu_det, cpu_trd = osc_channels, det_channels, trd_channels
+            else:
+                cpu_osc, cpu_det, cpu_trd = _swt_groups(cpu_channels)
+            mem_osc, mem_det, mem_trd = _swt_groups(mem_channels)
 
         self.cpu_mixer = AnchorMixer(
             in_channels=cpu_channels,
             input_len=input_len,
             pred_horizon=pred_horizon,
             num_targets=1,
-            d_group=D_GROUP,
+            d_group=d_group,
             dropout=dropout,
             osc_channels=cpu_osc,
             det_channels=cpu_det,
             trd_channels=cpu_trd,
+            anchor_mode=cpu_anchor_mode,
+            group_cnn_kernels=group_cnn_kernels,
+            n_group_blocks=n_group_blocks,
+            pool_head_dim=pool_head_dim,
         )
 
         self.mem_mixer = AnchorMixer(
@@ -327,8 +335,11 @@ class WaveAnchorDualMixer(nn.Module):
             osc_channels=mem_osc,
             det_channels=mem_det,
             trd_channels=mem_trd,
-            anchor_mode="persistence",
-            residual_gate_init=0.01,
+            anchor_mode=mem_anchor_mode,
+            residual_gate_init=mem_residual_gate_init,
+            group_cnn_kernels=group_cnn_kernels,
+            n_group_blocks=n_group_blocks,
+            pool_head_dim=pool_head_dim,
         )
 
     def memory_gate(self):

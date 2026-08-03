@@ -5,7 +5,7 @@ from typing import List
 @dataclass(frozen=True)
 class SvConfig:
     SWT_LEVEL: int = 4
-    MEM_SWT_LEVEL: int = 2
+    MEM_SWT_LEVEL: int = 3
     VMD_K: int = 7
     MEM_VMD_K: int = 8
     VMD_ALPHA: int = 2000

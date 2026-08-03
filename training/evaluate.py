@@ -149,6 +149,8 @@ def _build_model_from_checkpoint(checkpoint, input_size, device):
 
 
 def _load_test_dataset(args, ckpt_args, device, log_info, feature_set_name="cpu"):
+    split = getattr(args, "split", "test")
+    pct = getattr(args, "val_pct", None) if split == "val" else getattr(args, "test_pct", 100.0)
     input_len = ckpt_args.get("input_len", PREPROCESSING.INPUT_LEN)
     horizon = ckpt_args.get("pred_horizon", PREPROCESSING.PRED_HORIZON)
     model_type = ckpt_args.get("model_type", "lstm")
@@ -156,14 +158,14 @@ def _load_test_dataset(args, ckpt_args, device, log_info, feature_set_name="cpu"
 
     if preprocess_approach in ("none", "smoothing"):
         test_ds = ShardedWindowsDataset(
-            args.windows_dir, "test", input_len, horizon, use_weights=False
+            args.windows_dir, split, input_len, horizon, use_weights=False
         )
         total_test_samples = len(test_ds)
-        test_ds = head_slice_dataset_by_pct(test_ds, args.test_pct)
-        log_info(f"Test samples (Total): {total_test_samples}")
+        test_ds = head_slice_dataset_by_pct(test_ds, pct)
+        log_info(f"{split.capitalize()} samples (Total): {total_test_samples}")
         log_info(
-            f"Test samples (Used):  {len(test_ds)}/{total_test_samples} "
-            f"({float(args.test_pct):g}%)"
+            f"{split.capitalize()} samples (Used):  {len(test_ds)}/{total_test_samples} "
+            f"({float(pct):g}%)"
         )
         if len(test_ds) > 0:
             first_x, *_ = test_ds[0]
@@ -188,10 +190,10 @@ def _load_test_dataset(args, ckpt_args, device, log_info, feature_set_name="cpu"
             val = getattr(args, cli_arg, None)
             if val is not None:
                 sv_kw[attr] = val
-        test_ds_full = SvDataset(preprocess_dir, "test", **sv_kw)
+        test_ds_full = SvDataset(preprocess_dir, split, **sv_kw)
         input_size = test_ds_full.n_channels
-        test_ds = head_slice_dataset_by_pct(test_ds_full, args.test_pct)
-        log_info(f"Test samples (SV): {len(test_ds)}/{len(test_ds_full)} ({float(args.test_pct):g}%)")
+        test_ds = head_slice_dataset_by_pct(test_ds_full, pct)
+        log_info(f"{split.capitalize()} samples (SV): {len(test_ds)}/{len(test_ds_full)} ({float(pct):g}%)")
         return test_ds, input_size
     elif preprocess_approach == "cskv":
         preprocess_dir = getattr(args, "preprocess_dir", None)
@@ -200,7 +202,7 @@ def _load_test_dataset(args, ckpt_args, device, log_info, feature_set_name="cpu"
         from preprocessing.cskv.dataset import CskvDataset
         from preprocessing.cskv.config import CFG as CSKV_CFG
         test_ds = CskvDataset(
-            preprocess_dir, "test",
+            preprocess_dir, split,
             input_len=input_len, pred_horizon=horizon,
         )
         input_size = test_ds.total_channels
@@ -216,9 +218,11 @@ def _benchmark_single_sample_inference(model, accelerator, args, ckpt_args, devi
     n_bench = getattr(args, "inference_bench_samples", 0)
 
     raw_ds = ShardedWindowsDataset(
-        args.windows_dir, "test", input_len, horizon, use_weights=False,
+        args.windows_dir, getattr(args, "split", "test"), input_len, horizon, use_weights=False,
     )
-    raw_ds = head_slice_dataset_by_pct(raw_ds, args.test_pct)
+    split = getattr(args, "split", "test")
+    pct = getattr(args, "val_pct", None) if split == "val" else getattr(args, "test_pct", 100.0)
+    raw_ds = head_slice_dataset_by_pct(raw_ds, pct)
     if len(raw_ds) == 0:
         log_info("No raw windows found for inference latency benchmark.")
         return
@@ -310,7 +314,7 @@ def evaluate(args):
 
     log_path = None
     if accelerator.is_local_main_process:
-        log_path = setup_logging("test")
+        log_path = setup_logging(args.split)
 
     from preprocessing.sv.config import CFG as SV_CFG
     sv_defaults = {
@@ -445,10 +449,12 @@ def evaluate(args):
 
     input_len = ckpt_args.get("input_len", PREPROCESSING.INPUT_LEN)
     horizon = ckpt_args.get("pred_horizon", PREPROCESSING.PRED_HORIZON)
+    split = args.split
+    pct = args.val_pct if split == "val" else args.test_pct
     raw_test_ds = ShardedWindowsDataset(
-        args.windows_dir, "test", input_len, horizon, use_weights=False
+        args.windows_dir, split, input_len, horizon, use_weights=False
     )
-    raw_test_ds = head_slice_dataset_by_pct(raw_test_ds, args.test_pct)
+    raw_test_ds = head_slice_dataset_by_pct(raw_test_ds, pct)
     raw_second_lasts = []
     for idx in range(len(raw_test_ds)):
         x_raw, *_ = raw_test_ds[idx]
@@ -496,6 +502,18 @@ def main():
         type=float,
         default=TRAINING.TEST_PCT,
         help="Percentage of test samples for evaluation; 25 means 25%%, not 0.25 (100 uses all; <=0 uses all).",
+    )
+    p.add_argument(
+        "--val_pct",
+        type=float,
+        default=TRAINING.VAL_PCT,
+        help="Percentage of val samples for evaluation when --split val; 25 means 25%%, not 0.25 (100 uses all; <=0 uses all).",
+    )
+    p.add_argument(
+        "--split",
+        default="test",
+        choices=["test", "val"],
+        help="Which split to evaluate on (default: %(default)s)",
     )
     p.add_argument("--preprocess_dir", default=None, help="Decomposition output dir (for sv/cskv)")
     p.add_argument("--seed", type=int, default=TRAINING.SEED, help="Random seed for reproducibility")

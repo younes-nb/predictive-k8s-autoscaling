@@ -160,7 +160,7 @@ def train(args):
             setattr(args, attr, default)
 
     if not hasattr(args, "loss_mode"):
-        setattr(args, "loss_mode", "joint_mse")
+        setattr(args, "loss_mode", "per_target_mse")
 
     composite_defaults = {
         "mem_huber_beta": TRAINING.MEM_HUBER_BETA,
@@ -380,6 +380,9 @@ def train(args):
         log_info("AMP (FP16 mixed precision) enabled via Accelerate")
 
     def _compute_loss(model, preds, y, w):
+        if args.last_step_only:
+            preds = preds[..., -1:, :]
+            y = y[..., -1:, :]
         if w is not None:
             return weighted_mse(preds, y, w, under_penalty=args.under_penalty)
         if args.loss_mode == "joint_mse":
@@ -545,12 +548,15 @@ def main():
     p.add_argument("--under_penalty", type=float, default=TRAINING.UNDER_PENALTY)
     p.add_argument(
         "--loss_mode",
-        default="joint_mse",
+        default="per_target_mse",
         choices=["joint_mse", "per_target_mse", "per_target_mae", "per_target_composite"],
         help="joint_mse: MSE over all targets. per_target_*: equal-weight per target; "
              "per_target_mae uses L1 for the memory target; per_target_composite blends "
              "Huber + small MSE (+ optional relative) for the memory target.",
     )
+    p.add_argument("--last_step_only", action=argparse.BooleanOptionalAction, default=True,
+                   help="Compute loss only on the final horizon step (H-1); use --no-last_step_only "
+                        "to average over all steps (default: on).")
     p.add_argument("--mem_huber_beta", type=float, default=None,
                    help="Huber beta for the memory term of per_target_composite (default: config)")
     p.add_argument("--mem_mse_w", type=float, default=None,
@@ -558,8 +564,8 @@ def main():
     p.add_argument("--mem_rel_w", type=float, default=None,
                    help="Weight of the relative/MAPE term added to the memory loss (default: config)")
     p.add_argument("--mem_residual_reg", type=float, default=None,
-                   help="L2 penalty on the memory residual gate, pulling memory toward the naive "
-                        "persistence anchor (default: config)")
+                   help="L2 penalty on the memory residual gate, pulling memory toward the trend "
+                        "anchor (default: config)")
     p.add_argument("--seed", type=int, default=TRAINING.SEED)
     p.add_argument("--cpu", action="store_true")
     p.add_argument("--num_workers", type=int, default=TRAINING.NUM_WORKERS)
@@ -596,6 +602,22 @@ def main():
     p.add_argument("--vmd_k", type=int, default=None, help="VMD K for CPU (sv only, default: config)")
     p.add_argument("--mem_vmd_k", type=int, default=None, help="VMD K for memory (sv only, default: config)")
     p.add_argument("--max_services", type=int, default=0, help="Max services for sv/cskv")
+    p.add_argument("--wadm_cnn_kernels", type=int, nargs="+", default=None,
+                   help="GroupCNN kernel sizes for wadm (ablation; default (3,5))")
+    p.add_argument("--wadm_group_blocks", type=int, default=None,
+                   help="Group MixerBlocks per group for wadm (ablation; 0 disables)")
+    p.add_argument("--wadm_d_group", type=int, default=None,
+                   help="CPU group hidden dim for wadm (ablation; default 64)")
+    p.add_argument("--wadm_pool_head_dim", type=int, default=None,
+                   help="Pooled-MLP head dim for wadm (ablation; default 128)")
+    p.add_argument("--wadm_cpu_anchor", choices=["trend", "none"], default=None,
+                   help="CPU anchor mode for wadm (ablation; default trend)")
+    p.add_argument("--wadm_mem_anchor", choices=["trend", "none"], default=None,
+                   help="Memory anchor mode for wadm (ablation; default trend)")
+    p.add_argument("--wadm_no_mem_gate", action="store_true",
+                   help="Disable the memory residual gate (wadm ablation)")
+    p.add_argument("--wadm_grouping", choices=["default", "single"], default=None,
+                   help="Channel grouping for wadm (ablation; single = one osc group)")
 
     try:
         train(p.parse_args())
