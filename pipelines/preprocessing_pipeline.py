@@ -31,7 +31,7 @@ def main():
     ap.add_argument("--skip_raw_windows", action="store_true",
                      help="Skip building raw sliding windows (build_windows.py)")
     ap.add_argument("--skip_preprocessing_approach", action="store_true",
-                     help="Skip the preprocessing approach step (sv/cskv/smoothing)")
+                     help="Skip the preprocessing approach step (swt/cskv/smoothing)")
     ap.add_argument("--recompute_windows", action="store_true",
                      help="Recompute raw sliding windows, ignoring cached shards (build_windows.py)")
     ap.add_argument(
@@ -46,24 +46,14 @@ def main():
     )
     ap.add_argument(
         "--preprocess_approach",
-        default="sv",
-        choices=["none", "smoothing", "sv", "cskv"],
+        default="swt",
+        choices=["none", "smoothing", "swt", "cskv"],
         help="Post-processing approach applied after windows are built.",
     )
     ap.add_argument("--smooth_window", type=int, default=5, help="Smoothing window size (for 'smoothing' approach)")
-    ap.add_argument("--dataset_workers", type=int, default=0, help="Workers for sv/cskv decomposition")
-    ap.add_argument("--swt_level", type=int, default=None, help="SWT level for CPU (sv only, default: config)")
-    ap.add_argument("--mem_swt_level", type=int, default=None, help="SWT level for memory (sv only, default: config)")
-    ap.add_argument("--no_vmd", action="store_true", default=None,
-                     help="Skip VMD decomposition; use only SWT coefficients (sv only)")
-    ap.add_argument("--vmd_k", type=int, default=None,
-                     help="VMD K (modes) for CPU (sv only, default: config)")
-    ap.add_argument("--mem_vmd_k", type=int, default=None,
-                     help="VMD K for memory (sv only, default: config)")
-    ap.add_argument("--vmd_swt_level", type=int, default=None,
-                     help="SWT detail level fed into VMD for CPU (sv only, default: config)")
-    ap.add_argument("--mem_vmd_swt_level", type=int, default=None,
-                     help="SWT detail level fed into VMD for memory (sv only, default: config)")
+    ap.add_argument("--dataset_workers", type=int, default=0, help="Workers for swt/cskv decomposition")
+    ap.add_argument("--swt_level", type=int, default=None, help="SWT level for CPU (swt only, default: config)")
+    ap.add_argument("--mem_swt_level", type=int, default=None, help="SWT level for memory (swt only, default: config)")
     ap.add_argument("--subset_seed", type=int, default=42, help="Seed for service subsampling in build_windows")
     ap.add_argument("--recompute_preprocessing", action="store_true",
                      help="Recompute the preprocessing approach output, ignoring cached shards")
@@ -77,7 +67,7 @@ def main():
     ingest_script = os.path.join(REPO_ROOT, "preprocessing", "ingest_traces_parquet.py")
     windows_script = os.path.join(REPO_ROOT, "preprocessing", "build_windows.py")
     smooth_script = os.path.join(REPO_ROOT, "preprocessing", "smooth_windows.py")
-    sv_script = os.path.join(REPO_ROOT, "preprocessing", "sv", "preprocess.py")
+    swt_script = os.path.join(REPO_ROOT, "preprocessing", "swt", "preprocess.py")
     cskv_script = os.path.join(REPO_ROOT, "preprocessing", "cskv", "preprocess.py")
 
     if not args.skip_fetch:
@@ -143,29 +133,19 @@ def main():
                 "--smooth_window", str(args.smooth_window),
             ]
             run(cmd_smooth, "Step 3b: Smoothing")
-        elif args.preprocess_approach == "sv":
-            sv_out = os.path.join(args.windows_dir, "sv")
-            cmd_sv = [sys.executable, sv_script,
-                      "--windows_dir", args.windows_dir,
-                      "--out_dir", sv_out,
-                      "--feature_set", args.feature_set]
+        elif args.preprocess_approach == "swt":
+            swt_out = os.path.join(args.windows_dir, "swt")
+            cmd_swt = [sys.executable, swt_script,
+                       "--windows_dir", args.windows_dir,
+                       "--out_dir", swt_out,
+                       "--feature_set", args.feature_set]
             if args.swt_level is not None:
-                cmd_sv.extend(["--swt_level", str(args.swt_level)])
+                cmd_swt.extend(["--swt_level", str(args.swt_level)])
             if args.mem_swt_level is not None:
-                cmd_sv.extend(["--mem_swt_level", str(args.mem_swt_level)])
-            if args.no_vmd:
-                cmd_sv.append("--no_vmd")
-            if args.vmd_k is not None:
-                cmd_sv.extend(["--vmd_k", str(args.vmd_k)])
-            if args.mem_vmd_k is not None:
-                cmd_sv.extend(["--mem_vmd_k", str(args.mem_vmd_k)])
-            if args.vmd_swt_level is not None:
-                cmd_sv.extend(["--vmd_swt_level", str(args.vmd_swt_level)])
-            if args.mem_vmd_swt_level is not None:
-                cmd_sv.extend(["--mem_vmd_swt_level", str(args.mem_vmd_swt_level)])
+                cmd_swt.extend(["--mem_swt_level", str(args.mem_swt_level)])
             if args.recompute_preprocessing:
-                cmd_sv.append("--recompute_preprocessing")
-            run(cmd_sv, "Step 3b: SV Decomposition")
+                cmd_swt.append("--recompute_preprocessing")
+            run(cmd_swt, "Step 3b: SWT Decomposition")
         elif args.preprocess_approach == "cskv":
             cskv_out = os.path.join(args.windows_dir, "cskv")
             cmd_cskv = [sys.executable, cskv_script,

@@ -1,5 +1,5 @@
 """
-Decomposition Visualization for CVCBM and TSDP Experiments
+Decomposition Visualization for CVCBM and SWT Experiments
 
 Finds a noisy 60-step window (>= 10 spikes > 0.8) and produces separate images for each
 decomposition stage. All decomposition steps are computed in-memory from the raw signal.
@@ -9,10 +9,8 @@ CVCBM:
   - Image 2: High-frequency Co-IMF + its VMD modes
   - Image 3: All output channels (VMD modes + Medium Co-IMF + Low Co-IMF)
 
-TSDP:
+SWT:
   - Image 1: Original signal + SWT components (D1, D2, A2)
-  - Image 2: D1 + its VMD modes
-  - Image 3: All output channels (VMD modes + D2 + A2)
 """
 
 import os
@@ -30,15 +28,12 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from preprocessing.cskv.config import CFG as CSKV_CFG
-from preprocessing.sv.config import CFG as SV_CFG
+from preprocessing.swt.config import CFG as SWT_CFG
 from preprocessing.cskv.decomposition import (
     ceemdan_decompose,
     sample_entropy,
     cluster_imfs,
     vmd_decompose as cskv_vmd,
-)
-from preprocessing.sv.decomposition import (
-    vmd_decompose as sv_vmd,
 )
 
 
@@ -232,7 +227,7 @@ def ceemdan_decompose_and_plot(fig, signal, window_start=0):
 
 
 # ────────────────────────────────────────
-# TSDP helpers
+# SWT helpers
 # ────────────────────────────────────────
 
 def get_swt_components(signal, window_start=0):
@@ -284,14 +279,14 @@ def parse_service_arg(val: str) -> int:
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Visualize decomposition for CVCBM and TSDP")
-    ap.add_argument("--experiment", choices=["cskv", "sv", "all"], default="all",
+    ap = argparse.ArgumentParser(description="Visualize decomposition for CVCBM and SWT")
+    ap.add_argument("--experiment", choices=["cskv", "swt", "all"], default="all",
                     help="Which experiment to visualize (default: all)")
     ap.add_argument("--service", type=str, default=None,
                     help="Service index as int (e.g. 42) or zero-padded (e.g. 00241). "
                          "Default: auto-select first with >=10 spikes >0.8")
     ap.add_argument("--cskv_preprocess_dir", default="/dataset/cskv_preprocess")
-    ap.add_argument("--sv_preprocess_dir", default="/dataset/sv_preprocess")
+    ap.add_argument("--swt_preprocess_dir", default="/dataset/swt_preprocess")
     ap.add_argument("--out_dir", default=os.path.join(THIS_DIR, "decomposition_viz"))
     ap.add_argument("--show", action="store_true")
     args = ap.parse_args()
@@ -299,14 +294,14 @@ def main():
     os.makedirs(args.out_dir, exist_ok=True)
 
     run_cskv = args.experiment in ("cskv", "all")
-    run_sv = args.experiment in ("sv", "all")
+    run_swt = args.experiment in ("swt", "all")
 
     if args.service is not None:
         service_idx = parse_service_arg(args.service)
         print(f"Loading service {service_idx:05d}...")
         cskv_sig = load_service_signal(args.cskv_preprocess_dir, service_idx) if run_cskv else None
-        sv_sig = load_service_signal(args.sv_preprocess_dir, service_idx) if run_sv else None
-        ref_sig = cskv_sig if cskv_sig is not None else sv_sig
+        swt_sig = load_service_signal(args.swt_preprocess_dir, service_idx) if run_swt else None
+        ref_sig = cskv_sig if cskv_sig is not None else swt_sig
         window_start = find_window_with_spikes(ref_sig)
         if window_start is None:
             print("WARNING: No window with 10+ spikes > 0.8. Trying min_spikes=5...")
@@ -318,17 +313,17 @@ def main():
         print("Auto-selecting service with suitable window...")
         if run_cskv:
             selected_idx, window_start, cskv_sig = find_service_with_window(args.cskv_preprocess_dir)
-        elif run_sv:
-            selected_idx, window_start, cskv_sig = find_service_with_window(args.sv_preprocess_dir)
+        elif run_swt:
+            selected_idx, window_start, cskv_sig = find_service_with_window(args.swt_preprocess_dir)
         else:
             selected_idx, window_start, cskv_sig = find_service_with_window(args.cskv_preprocess_dir)
         service_idx = selected_idx
-        sv_sig = load_service_signal(args.sv_preprocess_dir, service_idx) if run_sv else None
+        swt_sig = load_service_signal(args.swt_preprocess_dir, service_idx) if run_swt else None
         if run_cskv and cskv_sig is None:
             cskv_sig = load_service_signal(args.cskv_preprocess_dir, service_idx)
 
-    sv_start = min(window_start, len(sv_sig) - 60) if run_sv else 0
-    ref_sig = cskv_sig if run_cskv else sv_sig
+    swt_start = min(window_start, len(swt_sig) - 60) if run_swt else 0
+    ref_sig = cskv_sig if run_cskv else swt_sig
     w = ref_sig[window_start:window_start+60]
     print(f"Using window start: {window_start}")
     print(f"  spikes={int(np.sum(w > 0.8))}, std={w.std():.3f}, max={w.max():.3f}")
@@ -405,56 +400,20 @@ def main():
         else:
             print("  Skipped (CEEMDAN produced no IMFs)")
 
-    # ── TSDP ──────────────────────────────────────────────────────────
-    if run_sv:
+    # ── SWT ──────────────────────────────────────────────────────────
+    if run_swt:
         print("\n" + "=" * 60)
-        print("TSDP")
+        print("SWT")
         print("=" * 60)
 
-        print("  Computing SWT + VMD in-memory...")
-        A2, D2, D1 = get_swt_components(sv_sig, window_start=sv_start)
-
-        sv_vmd_modes = sv_vmd(
-            D1, K=SV_CFG.VMD_K, alpha=SV_CFG.VMD_ALPHA,
-            tau=SV_CFG.VMD_TAU, DC=SV_CFG.VMD_DC,
-            init=SV_CFG.VMD_INIT, tol=SV_CFG.VMD_TOL,
-        )
-        print(f"  VMD on D1 produced {sv_vmd_modes.shape[0]} modes")
+        print("  Computing SWT in-memory...")
 
         print("  Image 1: SWT...")
         fig = plt.figure(figsize=(14, 4 * 4))
-        plot_swt_figure(fig, sv_sig, window_start=sv_start)
-        fig.suptitle(f"TSDP — SWT Decomposition (Service {service_idx:05d})",
+        plot_swt_figure(fig, swt_sig, window_start=swt_start)
+        fig.suptitle(f"SWT — SWT Decomposition (Service {service_idx:05d})",
                      fontsize=14, fontweight="bold")
-        p = os.path.join(args.out_dir, f"sv_{service_idx:05d}_01_swt.png")
-        plt.savefig(p, dpi=150, bbox_inches="tight")
-        print(f"    Saved: {p}")
-        if args.show:
-            plt.show()
-        plt.close(fig)
-
-        print("  Image 2: VMD on D1...")
-        fig = plt.figure(figsize=(14, 2.5 * (sv_vmd_modes.shape[0] + 2)))
-        plot_vmd_modes(fig, sv_vmd_modes, D1,
-            title=f"SV — VMD on D1 (K={sv_vmd_modes.shape[0]})")
-        p = os.path.join(args.out_dir, f"sv_{service_idx:05d}_02_vmd.png")
-        plt.savefig(p, dpi=150, bbox_inches="tight")
-        print(f"    Saved: {p}")
-        if args.show:
-            plt.show()
-        plt.close(fig)
-
-        print("  Image 3: All output channels...")
-        n_vmd = sv_vmd_modes.shape[0]
-        fig = plt.figure(figsize=(14, 2.5 * (n_vmd + 2)))
-        vmd_colors = plt.cm.tab10(np.linspace(0, 1, n_vmd))
-        channels = [sv_vmd_modes[k] for k in range(n_vmd)] + [D2, A2]
-        titles = [f"VMD Mode {k+1} (from D1)" for k in range(n_vmd)] + [
-            "D2", "A2 (Approximation)",
-        ]
-        colors = list(vmd_colors) + ["#4ECDC4", "#9B59B6"]
-        plot_channels(fig, channels, titles, colors, "TSDP — All 12 Output Channels")
-        p = os.path.join(args.out_dir, f"sv_{service_idx:05d}_03_outputs.png")
+        p = os.path.join(args.out_dir, f"swt_{service_idx:05d}_01_swt.png")
         plt.savefig(p, dpi=150, bbox_inches="tight")
         print(f"    Saved: {p}")
         if args.show:

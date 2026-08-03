@@ -10,12 +10,12 @@ DEFAULTS = {
 
 
 def build_model(hyperparams, input_size, args, num_targets, device):
-    from preprocessing.sv.config import CFG as SV_CFG
+    from preprocessing.swt.config import CFG as SWT_CFG
     from core.architectures.waveanchor_dualmixer import (
         WaveAnchorDualMixer, N_GROUP_BLOCKS, D_GROUP, POOL_HEAD_DIM,
     )
-    swt_level = getattr(args, "swt_level", SV_CFG.SWT_LEVEL)
-    mem_swt_level = getattr(args, "mem_swt_level", SV_CFG.MEM_SWT_LEVEL)
+    swt_level = getattr(args, "swt_level", SWT_CFG.SWT_LEVEL)
+    mem_swt_level = getattr(args, "mem_swt_level", SWT_CFG.MEM_SWT_LEVEL)
     kernels = getattr(args, "wadm_cnn_kernels", None)
     if kernels is None:
         kernels = (3, 5)

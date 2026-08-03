@@ -8,12 +8,12 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from preprocessing.sv.config import CFG as SV_CFG, channel_dirs_for
+from preprocessing.swt.config import CFG as SWT_CFG, channel_dirs_for
 
 logger = logging.getLogger(__name__)
 
 
-class SvDataset(Dataset):
+class SwtDataset(Dataset):
     def __init__(
         self,
         preprocess_dir: str,
@@ -21,11 +21,8 @@ class SvDataset(Dataset):
         input_len: int = 60,
         pred_horizon: int = 5,
         feature_set: str = "cpu",
-        swt_level: int = SV_CFG.SWT_LEVEL,
-        mem_swt_level: int = SV_CFG.MEM_SWT_LEVEL,
-        vmd_k: int = SV_CFG.VMD_K,
-        mem_vmd_k: int = SV_CFG.MEM_VMD_K,
-        no_vmd: bool = SV_CFG.NO_VMD,
+        swt_level: int = SWT_CFG.SWT_LEVEL,
+        mem_swt_level: int = SWT_CFG.MEM_SWT_LEVEL,
     ):
         assert split in ("train", "val", "test"), f"Unknown split: {split}"
         self.split = split
@@ -33,8 +30,8 @@ class SvDataset(Dataset):
         self.pred_horizon = pred_horizon
         self.has_mem = feature_set == "cpu_mem_both"
 
-        cpu_channel_dirs = channel_dirs_for(swt_level, vmd_k, prefix="", no_vmd=no_vmd)
-        mem_channel_dirs = channel_dirs_for(mem_swt_level, mem_vmd_k, prefix="mem_", no_vmd=no_vmd)
+        cpu_channel_dirs = channel_dirs_for(swt_level)
+        mem_channel_dirs = channel_dirs_for(mem_swt_level, prefix="mem_")
         self.channel_dirs = cpu_channel_dirs + (mem_channel_dirs if self.has_mem else [])
         self.n_channels = len(self.channel_dirs)
 
@@ -48,7 +45,7 @@ class SvDataset(Dataset):
         if not x_files:
             raise FileNotFoundError(
                 f"No decomposed shards found in {preprocess_dir} for split={split}. "
-                "Run sv/preprocess.py first."
+                "Run swt/preprocess.py first."
             )
 
         n_shards = len(x_files)
@@ -82,7 +79,7 @@ class SvDataset(Dataset):
             all_last.append(last)
 
         if not all_X:
-            logger.warning("SvDataset[%s]: no valid windows found in %s", split, preprocess_dir)
+            logger.warning("SwtDataset[%s]: no valid windows found in %s", split, preprocess_dir)
             self.X = torch.empty((0, self.n_channels), dtype=torch.float32)
             if self.has_mem:
                 self.y = torch.empty((0, 2), dtype=torch.float32)
@@ -102,7 +99,7 @@ class SvDataset(Dataset):
                     self.last = torch.zeros(len(self.X), dtype=torch.float32)
 
         logger.info(
-            "SvDataset[%s]: %d windows, X=%s, y=%s from %d shards in %.1fs",
+            "SwtDataset[%s]: %d windows, X=%s, y=%s from %d shards in %.1fs",
             split, len(self.X), tuple(self.X.shape), tuple(self.y.shape),
             n_shards, time.time() - t_start,
         )
@@ -115,13 +112,11 @@ class SvDataset(Dataset):
 
 
 def _smoke_check(preprocess_dir: str, split: str,
-                  feature_set: str = "cpu", swt_level: int = SV_CFG.SWT_LEVEL,
-                  mem_swt_level: int = SV_CFG.MEM_SWT_LEVEL,
-                  vmd_k: int = SV_CFG.VMD_K, mem_vmd_k: int = SV_CFG.MEM_VMD_K,
-                  no_vmd: bool = SV_CFG.NO_VMD) -> None:
+                  feature_set: str = "cpu", swt_level: int = SWT_CFG.SWT_LEVEL,
+                  mem_swt_level: int = SWT_CFG.MEM_SWT_LEVEL) -> None:
     from shared.config_preprocessing_defaults import PREPROCESSING
 
-    ds = SvDataset(
+    ds = SwtDataset(
         preprocess_dir,
         split,
         input_len=PREPROCESSING.INPUT_LEN,
@@ -129,9 +124,6 @@ def _smoke_check(preprocess_dir: str, split: str,
         feature_set=feature_set,
         swt_level=swt_level,
         mem_swt_level=mem_swt_level,
-        vmd_k=vmd_k,
-        mem_vmd_k=mem_vmd_k,
-        no_vmd=no_vmd,
     )
     assert len(ds) > 0, "Dataset has no windows"
     x, y, last = ds[0]
@@ -150,22 +142,17 @@ def _smoke_check(preprocess_dir: str, split: str,
         f"Bad last shape: {tuple(last.shape)} expected {expected_last_shape}"
     print(f"Dataset windows: {len(ds)}")
     print(f"x={tuple(x.shape)} y={tuple(y.shape)} last={tuple(last.shape)}")
-    print("SvDataset smoke test passed")
+    print("SwtDataset smoke test passed")
 
 
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser(description="Smoke-check SvDataset shapes.")
+    ap = argparse.ArgumentParser(description="Smoke-check SwtDataset shapes.")
     ap.add_argument("--preprocess_dir", required=True)
     ap.add_argument("--split", choices=("train", "val", "test"), default="train")
     ap.add_argument("--feature_set", default="cpu")
-    ap.add_argument("--swt_level", type=int, default=SV_CFG.SWT_LEVEL)
-    ap.add_argument("--mem_swt_level", type=int, default=SV_CFG.MEM_SWT_LEVEL)
-    ap.add_argument("--vmd_k", type=int, default=SV_CFG.VMD_K)
-    ap.add_argument("--mem_vmd_k", type=int, default=SV_CFG.MEM_VMD_K)
-    ap.add_argument("--no_vmd", action="store_true")
+    ap.add_argument("--swt_level", type=int, default=SWT_CFG.SWT_LEVEL)
+    ap.add_argument("--mem_swt_level", type=int, default=SWT_CFG.MEM_SWT_LEVEL)
     args = ap.parse_args()
     _smoke_check(args.preprocess_dir, args.split,
                  feature_set=args.feature_set, swt_level=args.swt_level,
-                 mem_swt_level=args.mem_swt_level,
-                 vmd_k=args.vmd_k, mem_vmd_k=args.mem_vmd_k,
-                 no_vmd=args.no_vmd)
+                 mem_swt_level=args.mem_swt_level)

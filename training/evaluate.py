@@ -41,14 +41,11 @@ from training.sfoa_configs import get_config
 
 
 MODEL_TYPES = ("lstm", "gru", "bilstm", "bigrue", "cnn_bilstm", "wadm")
-PREPROCESS_APPROACHES = ("none", "smoothing", "sv", "cskv")
+PREPROCESS_APPROACHES = ("none", "smoothing", "swt", "cskv")
 
 
-SV_FIELD_MAP = {
+SWT_FIELD_MAP = {
     "swt_level": "SWT_LEVEL", "mem_swt_level": "MEM_SWT_LEVEL",
-    "vmd_k": "VMD_K", "mem_vmd_k": "MEM_VMD_K",
-    "no_vmd": "NO_VMD",
-    "vmd_swt_level": "VMD_SWT_LEVEL", "mem_vmd_swt_level": "MEM_VMD_SWT_LEVEL",
 }
 
 
@@ -58,25 +55,23 @@ def _preprocess_raw_window(x_np, preprocess_approach, args=None):
     elif preprocess_approach == "smoothing":
         from preprocessing.smooth_windows import smooth_array
         return smooth_array(x_np, window_size=5)
-    elif preprocess_approach == "sv":
+    elif preprocess_approach == "swt":
         from dataclasses import replace
-        from preprocessing.sv.decomposition import decompose_window
-        from preprocessing.sv.config import CFG as SV_CFG
-        base = SV_CFG
+        from preprocessing.swt.decomposition import decompose_window
+        from preprocessing.swt.config import CFG as SWT_CFG
+        base = SWT_CFG
         if args is not None:
             overrides = {}
-            for cli_attr, cfg_attr in SV_FIELD_MAP.items():
+            for cli_attr, cfg_attr in SWT_FIELD_MAP.items():
                 val = getattr(args, cli_attr, None)
                 if val is not None:
                     overrides[cfg_attr] = val
             if overrides:
-                base = replace(SV_CFG, **overrides)
+                base = replace(SWT_CFG, **overrides)
         cpu_cfg = base
         mem_cfg = replace(
             base,
             SWT_LEVEL=base.MEM_SWT_LEVEL,
-            VMD_K=base.MEM_VMD_K,
-            VMD_SWT_LEVEL=base.MEM_VMD_SWT_LEVEL,
         )
 
         channels = []
@@ -173,27 +168,26 @@ def _load_test_dataset(args, ckpt_args, device, log_info, feature_set_name="cpu"
         else:
             input_size = 1
         return test_ds, input_size
-    elif preprocess_approach == "sv":
+    elif preprocess_approach == "swt":
         preprocess_dir = getattr(args, "preprocess_dir", None)
         if not preprocess_dir:
-            raise RuntimeError("--preprocess_dir required for sv evaluate")
-        from preprocessing.sv.dataset import SvDataset
-        from preprocessing.sv.config import CFG as SV_CFG
-        sv_kw = dict(
+            raise RuntimeError("--preprocess_dir required for swt evaluate")
+        from preprocessing.swt.dataset import SwtDataset
+        from preprocessing.swt.config import CFG as SWT_CFG
+        swt_kw = dict(
             input_len=input_len, pred_horizon=horizon,
             feature_set=feature_set_name,
         )
         for attr, cli_arg in [
             ("swt_level", "swt_level"), ("mem_swt_level", "mem_swt_level"),
-            ("vmd_k", "vmd_k"), ("mem_vmd_k", "mem_vmd_k"), ("no_vmd", "no_vmd"),
         ]:
             val = getattr(args, cli_arg, None)
             if val is not None:
-                sv_kw[attr] = val
-        test_ds_full = SvDataset(preprocess_dir, split, **sv_kw)
+                swt_kw[attr] = val
+        test_ds_full = SwtDataset(preprocess_dir, split, **swt_kw)
         input_size = test_ds_full.n_channels
         test_ds = head_slice_dataset_by_pct(test_ds_full, pct)
-        log_info(f"{split.capitalize()} samples (SV): {len(test_ds)}/{len(test_ds_full)} ({float(pct):g}%)")
+        log_info(f"{split.capitalize()} samples (SWT): {len(test_ds)}/{len(test_ds_full)} ({float(pct):g}%)")
         return test_ds, input_size
     elif preprocess_approach == "cskv":
         preprocess_dir = getattr(args, "preprocess_dir", None)
@@ -234,7 +228,7 @@ def _benchmark_single_sample_inference(model, accelerator, args, ckpt_args, devi
         rng = random.Random(42)
         indices = rng.sample(range(len(raw_ds)), n_samples)
 
-    if preprocess_approach == "sv":
+    if preprocess_approach == "swt":
         STDSTD = 1e-12
         _valid = []
         for idx in indices:
@@ -316,17 +310,12 @@ def evaluate(args):
     if accelerator.is_local_main_process:
         log_path = setup_logging(args.split)
 
-    from preprocessing.sv.config import CFG as SV_CFG
-    sv_defaults = {
-        "swt_level": SV_CFG.SWT_LEVEL,
-        "mem_swt_level": SV_CFG.MEM_SWT_LEVEL,
-        "vmd_k": SV_CFG.VMD_K,
-        "mem_vmd_k": SV_CFG.MEM_VMD_K,
-        "vmd_swt_level": SV_CFG.VMD_SWT_LEVEL,
-        "mem_vmd_swt_level": SV_CFG.MEM_VMD_SWT_LEVEL,
-        "no_vmd": SV_CFG.NO_VMD,
+    from preprocessing.swt.config import CFG as SWT_CFG
+    swt_defaults = {
+        "swt_level": SWT_CFG.SWT_LEVEL,
+        "mem_swt_level": SWT_CFG.MEM_SWT_LEVEL,
     }
-    for attr, default in sv_defaults.items():
+    for attr, default in swt_defaults.items():
         if not hasattr(args, attr) or getattr(args, attr) is None:
             setattr(args, attr, default)
 
@@ -419,14 +408,14 @@ def evaluate(args):
         with torch.no_grad():
             mu = model(x)
 
-        if preprocess_approach in ("sv", "cskv"):
+        if preprocess_approach in ("swt", "cskv"):
             batch_last = batch[2]
             gathered_mu, gathered_y, gathered_last = accelerator.gather_for_metrics((mu, y, batch_last))
         else:
             gathered_mu, gathered_y, gathered_x = accelerator.gather_for_metrics((mu, y, x))
 
         if accelerator.is_local_main_process:
-            if preprocess_approach in ("sv", "cskv"):
+            if preprocess_approach in ("swt", "cskv"):
                 y_last = gathered_last.cpu().numpy()
             else:
                 y_last = gathered_x[:, -1, :].cpu().numpy()
@@ -515,7 +504,7 @@ def main():
         choices=["test", "val"],
         help="Which split to evaluate on (default: %(default)s)",
     )
-    p.add_argument("--preprocess_dir", default=None, help="Decomposition output dir (for sv/cskv)")
+    p.add_argument("--preprocess_dir", default=None, help="Decomposition output dir (for swt/cskv)")
     p.add_argument("--seed", type=int, default=TRAINING.SEED, help="Random seed for reproducibility")
     p.add_argument(
         "--inference_bench_samples", type=int, default=1000,
@@ -527,11 +516,8 @@ def main():
         help="Worker threads for inference benchmark (CPU only). "
              "0 = auto (90%% of CPU cores).",
     )
-    p.add_argument("--swt_level", type=int, default=None, help="SWT level for CPU (sv only, default: config)")
-    p.add_argument("--mem_swt_level", type=int, default=None, help="SWT level for memory (sv only, default: config)")
-    p.add_argument("--no_vmd", action="store_true", default=None, help="Skip VMD decomposition (sv only, default: config)")
-    p.add_argument("--vmd_k", type=int, default=None, help="VMD K for CPU (sv only, default: config)")
-    p.add_argument("--mem_vmd_k", type=int, default=None, help="VMD K for memory (sv only, default: config)")
+    p.add_argument("--swt_level", type=int, default=None, help="SWT level for CPU (swt only, default: config)")
+    p.add_argument("--mem_swt_level", type=int, default=None, help="SWT level for memory (swt only, default: config)")
 
     try:
         evaluate(p.parse_args())

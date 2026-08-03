@@ -38,7 +38,7 @@ from training.sfoa_configs import get_config
 
 
 MODEL_TYPES = ("lstm", "gru", "bilstm", "bigrue", "cnn_bilstm", "wadm")
-PREPROCESS_APPROACHES = ("none", "smoothing", "sv", "cskv")
+PREPROCESS_APPROACHES = ("none", "smoothing", "swt", "cskv")
 
 
 def _build_model(model_type, input_size, args, num_targets, hyperparams, device):
@@ -55,22 +55,21 @@ def _load_datasets(args, preprocess_approach):
             args.windows_dir, "val", args.input_len, args.pred_horizon, args.use_weights
         )
         return train_ds, val_ds
-    elif preprocess_approach == "sv":
-        from preprocessing.sv.dataset import SvDataset
-        from preprocessing.sv.config import CFG as SV_CFG
-        sv_kw = dict(
+    elif preprocess_approach == "swt":
+        from preprocessing.swt.dataset import SwtDataset
+        from preprocessing.swt.config import CFG as SWT_CFG
+        swt_kw = dict(
             input_len=args.input_len, pred_horizon=PREPROCESSING.PRED_HORIZON,
             feature_set=args.feature_set,
         )
         for attr, cli_arg in [
             ("swt_level", "swt_level"), ("mem_swt_level", "mem_swt_level"),
-            ("vmd_k", "vmd_k"), ("mem_vmd_k", "mem_vmd_k"), ("no_vmd", "no_vmd"),
         ]:
             val = getattr(args, cli_arg, None)
             if val is not None:
-                sv_kw[attr] = val
-        train_ds = SvDataset(args.preprocess_dir, "train", **sv_kw)
-        val_ds = SvDataset(args.preprocess_dir, "val", **sv_kw)
+                swt_kw[attr] = val
+        train_ds = SwtDataset(args.preprocess_dir, "train", **swt_kw)
+        val_ds = SwtDataset(args.preprocess_dir, "val", **swt_kw)
         return train_ds, val_ds
     elif preprocess_approach == "cskv":
         from preprocessing.cskv.dataset import CskvDataset
@@ -113,9 +112,7 @@ def train(args):
                     "sfoa_train_pct", "sfoa_val_pct", "sfoa_num_workers",
                     "train_pct", "val_pct", "batch_size", "num_workers",
                     "epochs", "seed",
-                    "swt_level", "mem_swt_level", "no_vmd",
-                    "vmd_k", "mem_vmd_k",
-                    "vmd_swt_level", "mem_vmd_swt_level",
+                    "swt_level", "mem_swt_level",
                     "max_services",
                 ) if hasattr(args, k)
             }
@@ -145,17 +142,12 @@ def train(args):
         if not hasattr(args, attr):
             setattr(args, attr, default)
 
-    from preprocessing.sv.config import CFG as SV_CFG
-    sv_defaults = {
-        "swt_level": SV_CFG.SWT_LEVEL,
-        "mem_swt_level": SV_CFG.MEM_SWT_LEVEL,
-        "vmd_k": SV_CFG.VMD_K,
-        "mem_vmd_k": SV_CFG.MEM_VMD_K,
-        "vmd_swt_level": SV_CFG.VMD_SWT_LEVEL,
-        "mem_vmd_swt_level": SV_CFG.MEM_VMD_SWT_LEVEL,
-        "no_vmd": SV_CFG.NO_VMD,
+    from preprocessing.swt.config import CFG as SWT_CFG
+    swt_defaults = {
+        "swt_level": SWT_CFG.SWT_LEVEL,
+        "mem_swt_level": SWT_CFG.MEM_SWT_LEVEL,
     }
-    for attr, default in sv_defaults.items():
+    for attr, default in swt_defaults.items():
         if not hasattr(args, attr) or getattr(args, attr) is None:
             setattr(args, attr, default)
 
@@ -226,9 +218,9 @@ def train(args):
     else:
         raise RuntimeError("Train dataset is empty.")
 
-    if preprocess_approach == "sv":
-        from preprocessing.sv.config import CFG as SV_CFG
-        log_info(f"SV Config: {SV_CFG}")
+    if preprocess_approach == "swt":
+        from preprocessing.swt.config import CFG as SWT_CFG
+        log_info(f"SWT Config: {SWT_CFG}")
         input_size = train_ds.n_channels
     elif preprocess_approach == "cskv":
         from preprocessing.cskv.config import CFG as CSKV_CFG
@@ -590,18 +582,15 @@ def main():
     )
     p.add_argument(
         "--preprocess_approach",
-        default="sv",
+        default="swt",
         choices=list(PREPROCESS_APPROACHES),
-        help="Preprocessing approach used: none, smoothing, sv, cskv",
+        help="Preprocessing approach used: none, smoothing, swt, cskv",
     )
-    p.add_argument("--preprocess_dir", default=None, help="Decomposition output dir (for sv/cskv)")
-    p.add_argument("--dataset_workers", type=int, default=0, help="Workers for sv/cskv dataset loading")
-    p.add_argument("--swt_level", type=int, default=None, help="SWT level for CPU (sv only, default: config)")
-    p.add_argument("--mem_swt_level", type=int, default=None, help="SWT level for memory (sv only, default: config)")
-    p.add_argument("--no_vmd", action="store_true", default=None, help="Skip VMD decomposition (sv only, default: config)")
-    p.add_argument("--vmd_k", type=int, default=None, help="VMD K for CPU (sv only, default: config)")
-    p.add_argument("--mem_vmd_k", type=int, default=None, help="VMD K for memory (sv only, default: config)")
-    p.add_argument("--max_services", type=int, default=0, help="Max services for sv/cskv")
+    p.add_argument("--preprocess_dir", default=None, help="Decomposition output dir (for swt/cskv)")
+    p.add_argument("--dataset_workers", type=int, default=0, help="Workers for swt/cskv dataset loading")
+    p.add_argument("--swt_level", type=int, default=None, help="SWT level for CPU (swt only, default: config)")
+    p.add_argument("--mem_swt_level", type=int, default=None, help="SWT level for memory (swt only, default: config)")
+    p.add_argument("--max_services", type=int, default=0, help="Max services for swt/cskv")
     p.add_argument("--wadm_cnn_kernels", type=int, nargs="+", default=None,
                    help="GroupCNN kernel sizes for wadm (ablation; default (3,5))")
     p.add_argument("--wadm_group_blocks", type=int, default=None,

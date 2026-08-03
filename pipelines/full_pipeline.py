@@ -27,7 +27,7 @@ def main():
     ap.add_argument("--skip_ingest", action="store_true", help="Skip converting raw traces to parquet")
     ap.add_argument("--skip_raw_windows", action="store_true", help="Skip building sliding window datasets (build_windows.py)")
     ap.add_argument("--recompute_windows", action="store_true", help="Recompute sliding window datasets, ignoring cached shards (build_windows.py)")
-    ap.add_argument("--skip_preprocessing_approach", action="store_true", help="Skip the preprocessing approach step (sv/cskv/smoothing)")
+    ap.add_argument("--skip_preprocessing_approach", action="store_true", help="Skip the preprocessing approach step (swt/cskv/smoothing)")
     ap.add_argument("--recompute_preprocessing", action="store_true", help="Recompute the preprocessing approach output, ignoring cached shards")
     ap.add_argument("--windows_dir", default=PATHS.WINDOWS_DIR, help="Output directory for window datasets")
     ap.add_argument("--input_len", type=int, default=PREPROCESSING.INPUT_LEN,
@@ -80,9 +80,9 @@ def main():
                     help="Channel grouping for wadm (ablation; single = one osc group)")
     ap.add_argument(
         "--preprocess_approach",
-        default="sv",
-        choices=["none", "smoothing", "sv", "cskv"],
-        help="Post-processing: none (raw windows), smoothing (moving avg), sv (SWT+VMD), cskv (CEEMDAN+SE+K-means+VMD)",
+        default="swt",
+        choices=["none", "smoothing", "swt", "cskv"],
+        help="Post-processing: none (raw windows), smoothing (moving avg), swt (SWT), cskv (CEEMDAN+SE+K-means+VMD)",
     )
     ap.add_argument(
         "--model_type",
@@ -91,19 +91,9 @@ def main():
         help="Model architecture: lstm/gru (unidirectional), bilstm/bigrue (bidirectional), cnn_bilstm, wadm (WaveAnchorDualMixer)",
     )
     ap.add_argument("--smooth_window", type=int, default=5, help="Moving average window size for 'smoothing' approach (default: %(default)s)")
-    ap.add_argument("--dataset_workers", type=int, default=0, help="Dataloader workers for sv/cskv datasets (default: %(default)s)")
-    ap.add_argument("--swt_level", type=int, default=None, help="SWT level for CPU (sv only, default: config)")
-    ap.add_argument("--mem_swt_level", type=int, default=None, help="SWT level for memory (sv only, default: config)")
-    ap.add_argument("--no_vmd", action="store_true",
-                    help="Skip VMD decomposition; use only SWT coefficients (sv only)")
-    ap.add_argument("--vmd_k", type=int, default=None,
-                    help="VMD K (modes) for CPU (sv only, default: config)")
-    ap.add_argument("--mem_vmd_k", type=int, default=None,
-                    help="VMD K for memory (sv only, default: config)")
-    ap.add_argument("--vmd_swt_level", type=int, default=None,
-                    help="SWT detail level (D1, D2, ...) fed into VMD for CPU (sv only, default: config)")
-    ap.add_argument("--mem_vmd_swt_level", type=int, default=None,
-                    help="SWT detail level (D1, D2, ...) fed into VMD for memory (sv only, default: config)")
+    ap.add_argument("--dataset_workers", type=int, default=0, help="Dataloader workers for swt/cskv datasets (default: %(default)s)")
+    ap.add_argument("--swt_level", type=int, default=None, help="SWT level for CPU (swt only, default: config)")
+    ap.add_argument("--mem_swt_level", type=int, default=None, help="SWT level for memory (swt only, default: config)")
     ap.add_argument(
         "--loss_mode",
         default="per_target_mse",
@@ -208,16 +198,6 @@ def main():
             cmd_pre.extend(["--swt_level", str(args.swt_level)])
         if args.mem_swt_level is not None:
             cmd_pre.extend(["--mem_swt_level", str(args.mem_swt_level)])
-        if args.no_vmd:
-            cmd_pre.append("--no_vmd")
-        if args.vmd_k is not None:
-            cmd_pre.extend(["--vmd_k", str(args.vmd_k)])
-        if args.mem_vmd_k is not None:
-            cmd_pre.extend(["--mem_vmd_k", str(args.mem_vmd_k)])
-        if args.vmd_swt_level is not None:
-            cmd_pre.extend(["--vmd_swt_level", str(args.vmd_swt_level)])
-        if args.mem_vmd_swt_level is not None:
-            cmd_pre.extend(["--mem_vmd_swt_level", str(args.mem_vmd_swt_level)])
 
         total_times["preprocessing"] = run(cmd_pre, "Step 1: Preprocessing")
 
@@ -271,7 +251,7 @@ def main():
             "--input_len",
             str(args.input_len),
         ]
-        if args.preprocess_approach in ("sv", "cskv"):
+        if args.preprocess_approach in ("swt", "cskv"):
             cmd_train.extend(["--preprocess_dir", os.path.join(args.windows_dir, args.preprocess_approach)])
             cmd_train.extend(["--dataset_workers", str(args.dataset_workers)])
         if TRAINING.USE_WEIGHTS:
@@ -294,17 +274,11 @@ def main():
         if args.cpu:
             cmd_train.append("--cpu")
         cmd_train.extend(["--seed", str(args.seed)])
-        if args.preprocess_approach in ("sv", "cskv"):
+        if args.preprocess_approach in ("swt", "cskv"):
             if args.swt_level is not None:
                 cmd_train.extend(["--swt_level", str(args.swt_level)])
             if args.mem_swt_level is not None:
                 cmd_train.extend(["--mem_swt_level", str(args.mem_swt_level)])
-            if args.no_vmd:
-                cmd_train.append("--no_vmd")
-            if args.vmd_k is not None:
-                cmd_train.extend(["--vmd_k", str(args.vmd_k)])
-            if args.mem_vmd_k is not None:
-                cmd_train.extend(["--mem_vmd_k", str(args.mem_vmd_k)])
         for attr in ("wadm_cnn_kernels", "wadm_group_blocks", "wadm_d_group", "wadm_pool_head_dim"):
             val = getattr(args, attr, None)
             if val is not None:
@@ -331,7 +305,7 @@ def main():
             "--input_len",
             str(args.input_len),
         ]
-        if args.preprocess_approach in ("sv", "cskv"):
+        if args.preprocess_approach in ("swt", "cskv"):
             cmd_test.extend(["--preprocess_dir", os.path.join(args.windows_dir, args.preprocess_approach)])
         if args.cpu:
             cmd_test.append("--cpu")
@@ -339,17 +313,11 @@ def main():
         cmd_test.extend(["--split", args.split])
         cmd_test.extend(["--val_pct", str(args.val_pct)])
         cmd_test.extend(["--seed", str(args.seed)])
-        if args.preprocess_approach in ("sv", "cskv"):
+        if args.preprocess_approach in ("swt", "cskv"):
             if args.swt_level is not None:
                 cmd_test.extend(["--swt_level", str(args.swt_level)])
             if args.mem_swt_level is not None:
                 cmd_test.extend(["--mem_swt_level", str(args.mem_swt_level)])
-            if args.no_vmd:
-                cmd_test.append("--no_vmd")
-            if args.vmd_k is not None:
-                cmd_test.extend(["--vmd_k", str(args.vmd_k)])
-            if args.mem_vmd_k is not None:
-                cmd_test.extend(["--mem_vmd_k", str(args.mem_vmd_k)])
 
         total_times["testing"] = run(cmd_test, "Step 3: Evaluation & Diagnostics")
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Benchmark per-window inference time of SV vs CSKV preprocessing."""
+"""Benchmark per-window inference time of SWT vs CSKV preprocessing."""
 
 import argparse
 import glob
@@ -15,8 +15,8 @@ REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from preprocessing.sv.config import CFG as SV_CFG
-from preprocessing.sv.decomposition import decompose_window
+from preprocessing.swt.config import CFG as SWT_CFG
+from preprocessing.swt.decomposition import decompose_window
 from preprocessing.cskv.config import CFG as CSKV_CFG, set_seed
 from preprocessing.cskv.decomposition import decompose_service_signal
 from shared.config_preprocessing_defaults import PREPROCESSING
@@ -50,7 +50,7 @@ def load_windows(windows_dir: str, n: int, rng: np.random.Generator) -> np.ndarr
     return np.stack(windows, axis=0)
 
 
-def benchmark_sv(windows: np.ndarray, cfg) -> list[float]:
+def benchmark_swt(windows: np.ndarray, cfg) -> list[float]:
     times = []
     for i in range(len(windows)):
         t0 = time.perf_counter()
@@ -79,24 +79,24 @@ def compute_stats(times_ms: np.ndarray) -> dict:
     }
 
 
-def print_table(n_windows: int, window_len: int, sv_stats: dict, cskv_stats: dict):
+def print_table(n_windows: int, window_len: int, swt_stats: dict, cskv_stats: dict):
     print(f"\nPreprocessing Inference Time Benchmark (N={n_windows}, window_len={window_len})")
     print("=" * 74)
     header = f"{'Approach':<10} {'AVG(ms)':>10} {'P50(ms)':>10} {'P95(ms)':>10} {'Min(ms)':>10} {'Max(ms)':>10}"
     print(header)
     print("-" * 74)
-    for label, stats in [("SV", sv_stats), ("CSKV", cskv_stats)]:
+    for label, stats in [("SWT", swt_stats), ("CSKV", cskv_stats)]:
         print(
             f"{label:<10} {stats['avg']:>10.2f} {stats['p50']:>10.2f} "
             f"{stats['p95']:>10.2f} {stats['min']:>10.2f} {stats['max']:>10.2f}"
         )
     print("=" * 74)
-    if sv_stats["avg"] > 0:
-        ratio = cskv_stats["avg"] / sv_stats["avg"]
-        slower, faster = ("CSKV", "SV") if ratio > 1 else ("SV", "CSKV")
+    if swt_stats["avg"] > 0:
+        ratio = cskv_stats["avg"] / swt_stats["avg"]
+        slower, faster = ("CSKV", "SWT") if ratio > 1 else ("SWT", "CSKV")
         print(f"\n{slower} is {ratio:.2f}x slower than {faster} on average")
     else:
-        print("\nSV avg is zero; cannot compute ratio")
+        print("\nSWT avg is zero; cannot compute ratio")
 
 
 def main():
@@ -114,12 +114,10 @@ def main():
         help="Ignore --windows_dir and generate synthetic windows instead.",
     )
 
-    sv_g = parser.add_argument_group("SV config overrides")
-    sv_g.add_argument("--sv_input_len", type=int, default=None)
-    sv_g.add_argument("--sv_pred_horizon", type=int, default=None)
-    sv_g.add_argument("--sv_swt_level", type=int, default=None)
-    sv_g.add_argument("--sv_vmd_k", type=int, default=None)
-    sv_g.add_argument("--sv_vmd_alpha", type=int, default=None)
+    swt_g = parser.add_argument_group("SWT config overrides")
+    swt_g.add_argument("--swt_input_len", type=int, default=None)
+    swt_g.add_argument("--swt_pred_horizon", type=int, default=None)
+    swt_g.add_argument("--swt_swt_level", type=int, default=None)
 
     cskv_g = parser.add_argument_group("CSKV config overrides")
     cskv_g.add_argument("--cskv_input_len", type=int, default=None)
@@ -131,19 +129,15 @@ def main():
 
     args = parser.parse_args()
 
-    sv_overrides = {}
+    swt_overrides = {}
     cskv_overrides = {}
 
-    if args.sv_input_len is not None:
-        sv_overrides["INPUT_LEN"] = args.sv_input_len
-    if args.sv_pred_horizon is not None:
-        sv_overrides["PRED_HORIZON"] = args.sv_pred_horizon
-    if args.sv_swt_level is not None:
-        sv_overrides["SWT_LEVEL"] = args.sv_swt_level
-    if args.sv_vmd_k is not None:
-        sv_overrides["VMD_K"] = args.sv_vmd_k
-    if args.sv_vmd_alpha is not None:
-        sv_overrides["VMD_ALPHA"] = args.sv_vmd_alpha
+    if args.swt_input_len is not None:
+        swt_overrides["INPUT_LEN"] = args.swt_input_len
+    if args.swt_pred_horizon is not None:
+        swt_overrides["PRED_HORIZON"] = args.swt_pred_horizon
+    if args.swt_swt_level is not None:
+        swt_overrides["SWT_LEVEL"] = args.swt_swt_level
 
     if args.cskv_input_len is not None:
         cskv_overrides["INPUT_LEN"] = args.cskv_input_len
@@ -161,30 +155,30 @@ def main():
     rng = np.random.default_rng(args.seed)
 
     if args.use_synthetic:
-        synth_len = sv_overrides.get("INPUT_LEN", PREPROCESSING.INPUT_LEN)
+        synth_len = swt_overrides.get("INPUT_LEN", PREPROCESSING.INPUT_LEN)
         windows = generate_windows(args.n_windows, synth_len, rng)
         window_len = synth_len
     else:
         windows = load_windows(args.windows_dir, args.n_windows, rng)
         window_len = windows.shape[1]
 
-    sv_overrides.setdefault("INPUT_LEN", window_len)
+    swt_overrides.setdefault("INPUT_LEN", window_len)
     cskv_overrides.setdefault("INPUT_LEN", window_len)
 
-    sv_cfg = replace(SV_CFG, **sv_overrides)
+    swt_cfg = replace(SWT_CFG, **swt_overrides)
     cskv_cfg = replace(CSKV_CFG, **cskv_overrides)
 
-    print(f"Running SV benchmark ({args.n_windows} windows, len={window_len})...")
-    sv_times = benchmark_sv(windows, sv_cfg)
-    sv_stats = compute_stats(np.array(sv_times) * 1000)
-    print(f"  done ({sv_stats['avg']:.2f} ms avg)")
+    print(f"Running SWT benchmark ({args.n_windows} windows, len={window_len})...")
+    swt_times = benchmark_swt(windows, swt_cfg)
+    swt_stats = compute_stats(np.array(swt_times) * 1000)
+    print(f"  done ({swt_stats['avg']:.2f} ms avg)")
 
     print(f"Running CSKV benchmark ({args.n_windows} windows, len={window_len})...")
     cskv_times = benchmark_cskv(windows, cskv_cfg)
     cskv_stats = compute_stats(np.array(cskv_times) * 1000)
     print(f"  done ({cskv_stats['avg']:.2f} ms avg)")
 
-    print_table(args.n_windows, window_len, sv_stats, cskv_stats)
+    print_table(args.n_windows, window_len, swt_stats, cskv_stats)
 
 
 if __name__ == "__main__":

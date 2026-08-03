@@ -20,8 +20,8 @@ if REPO_ROOT not in sys.path:
 
 from shared.config_preprocessing_defaults import PREPROCESSING
 from shared.features import get_feature_set
-from preprocessing.sv.config import CFG
-from preprocessing.sv.decomposition import decompose_window
+from preprocessing.swt.config import CFG
+from preprocessing.swt.decomposition import decompose_window
 
 
 class _TehranFormatter(logging.Formatter):
@@ -43,7 +43,7 @@ def setup_logging(out_dir: str) -> None:
     sh = logging.StreamHandler(sys.stdout)
     sh.setFormatter(fmt)
     root.addHandler(sh)
-    logging.getLogger("preprocessing.sv.decomposition").setLevel(logging.WARNING)
+    logging.getLogger("preprocessing.swt.decomposition").setLevel(logging.WARNING)
     logging.info("Preprocessing log: %s", log_path)
 
 
@@ -66,11 +66,8 @@ def _decompose_shard(task):
     else:
         last = last_cpu
 
-    n_cpu_channels = (cpu_cfg.SWT_LEVEL + 1) if cpu_cfg.NO_VMD else (cpu_cfg.VMD_K + cpu_cfg.SWT_LEVEL)
-    n_mem_channels = (
-        ((mem_cfg.SWT_LEVEL + 1) if mem_cfg.NO_VMD else (mem_cfg.VMD_K + mem_cfg.SWT_LEVEL))
-        if has_mem else 0
-    )
+    n_cpu_channels = cpu_cfg.SWT_LEVEL + 1
+    n_mem_channels = (mem_cfg.SWT_LEVEL + 1) if has_mem else 0
     total_channels = n_cpu_channels + n_mem_channels
 
     keep = np.ones(N, dtype=bool)
@@ -105,11 +102,11 @@ def _decompose_shard(task):
 
 def main() -> None:
     ap = argparse.ArgumentParser(
-        description="Decompose windowed signals via SWT + VMD into channels."
+        description="Decompose windowed signals via SWT into channels."
     )
     ap.add_argument("--windows_dir", required=True,
                     help="Path to build_windows output directory")
-    ap.add_argument("--out_dir", default="/dataset/sv_preprocess",
+    ap.add_argument("--out_dir", default="/dataset/swt_preprocess",
                     help="Output directory for decomposed shards")
     ap.add_argument("--feature_set", default="cpu",
                     help="Feature set: 'cpu' for CPU only, 'cpu_mem_both' for CPU + memory")
@@ -117,16 +114,6 @@ def main() -> None:
                     help=f"SWT decomposition level for CPU (default: {CFG.SWT_LEVEL})")
     ap.add_argument("--mem_swt_level", type=int, default=CFG.MEM_SWT_LEVEL,
                     help=f"SWT decomposition level for memory (default: {CFG.MEM_SWT_LEVEL})")
-    ap.add_argument("--no_vmd", action="store_true", default=CFG.NO_VMD,
-                    help="Skip VMD decomposition; use only SWT coefficients")
-    ap.add_argument("--vmd_k", type=int, default=CFG.VMD_K,
-                    help=f"VMD K (number of modes) for CPU (default: {CFG.VMD_K})")
-    ap.add_argument("--mem_vmd_k", type=int, default=CFG.MEM_VMD_K,
-                    help=f"VMD K for memory (default: {CFG.MEM_VMD_K})")
-    ap.add_argument("--vmd_swt_level", type=int, default=CFG.VMD_SWT_LEVEL,
-                    help=f"SWT detail level (D1, D2, ...) fed into VMD for CPU (default: {CFG.VMD_SWT_LEVEL})")
-    ap.add_argument("--mem_vmd_swt_level", type=int, default=CFG.MEM_VMD_SWT_LEVEL,
-                    help=f"SWT detail level (D1, D2, ...) fed into VMD for memory (default: {CFG.MEM_VMD_SWT_LEVEL})")
     ap.add_argument("--num_workers", type=float, default=0.9,
                     help="Fraction of CPU cores to use (default: 0.9)")
     ap.add_argument("--recompute_preprocessing", action="store_true",
@@ -134,10 +121,8 @@ def main() -> None:
     args = ap.parse_args()
 
     has_mem = args.feature_set == "cpu_mem_both"
-    cpu_cfg = replace(CFG, SWT_LEVEL=args.swt_level, VMD_K=args.vmd_k,
-                      NO_VMD=args.no_vmd, VMD_SWT_LEVEL=args.vmd_swt_level)
-    mem_cfg = replace(CFG, SWT_LEVEL=args.mem_swt_level, VMD_K=args.mem_vmd_k,
-                      NO_VMD=args.no_vmd, VMD_SWT_LEVEL=args.mem_vmd_swt_level)
+    cpu_cfg = replace(CFG, SWT_LEVEL=args.swt_level)
+    mem_cfg = replace(CFG, SWT_LEVEL=args.mem_swt_level)
 
     n_cpus = os.cpu_count() or 1
     num_workers = max(1, int(n_cpus * args.num_workers))
@@ -189,7 +174,7 @@ def main() -> None:
 
     with ProcessPoolExecutor(max_workers=num_workers) as executor:
         futures = {executor.submit(_decompose_shard, t): t for t in shard_tasks}
-        pbar = tqdm(total=len(shard_tasks), desc="SV Decomposition", unit="shard")
+        pbar = tqdm(total=len(shard_tasks), desc="SWT Decomposition", unit="shard")
         for future in as_completed(futures):
             shard_key, n_windows, n_skipped, elapsed = future.result()
             total_windows += n_windows
