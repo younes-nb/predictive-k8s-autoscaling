@@ -27,7 +27,7 @@ from shared.logging_utils import setup_logging
 from shared.features import target_features_for_feature_set
 from core.dataset import ShardedWindowsDataset
 
-from training.loss import weighted_mse, per_target_loss, per_target_composite_loss
+from training.loss import weighted_mse, per_target_loss
 from training.train_helpers import (
     head_slice_dataset_by_pct,
     load_resume_state,
@@ -154,15 +154,8 @@ def train(args):
     if not hasattr(args, "loss_mode"):
         setattr(args, "loss_mode", "per_target_mse")
 
-    composite_defaults = {
-        "mem_huber_beta": TRAINING.MEM_HUBER_BETA,
-        "mem_mse_w": TRAINING.MEM_MSE_W,
-        "mem_rel_w": TRAINING.MEM_REL_W,
-        "mem_residual_reg": TRAINING.MEM_RESIDUAL_REG,
-    }
-    for attr, default in composite_defaults.items():
-        if not hasattr(args, attr) or getattr(args, attr) is None:
-            setattr(args, attr, default)
+    if not hasattr(args, "mem_residual_reg") or getattr(args, "mem_residual_reg") is None:
+        setattr(args, "mem_residual_reg", TRAINING.MEM_RESIDUAL_REG)
 
     hyperparam_optimizer = getattr(
         args, "hyperparam_optimizer", TRAINING.HYPERPARAM_OPTIMIZER
@@ -379,13 +372,6 @@ def train(args):
             return weighted_mse(preds, y, w, under_penalty=args.under_penalty)
         if args.loss_mode == "joint_mse":
             loss = nn.functional.mse_loss(preds, y)
-        elif args.loss_mode == "per_target_composite":
-            loss = per_target_composite_loss(
-                preds, y,
-                huber_beta=args.mem_huber_beta,
-                mse_w=args.mem_mse_w,
-                rel_w=args.mem_rel_w,
-            )
         else:
             mem_mode = "l1" if args.loss_mode == "per_target_mae" else "mse"
             loss = per_target_loss(preds, y, mem_mode=mem_mode)
@@ -541,20 +527,13 @@ def main():
     p.add_argument(
         "--loss_mode",
         default="per_target_mse",
-        choices=["joint_mse", "per_target_mse", "per_target_mae", "per_target_composite"],
+        choices=["joint_mse", "per_target_mse", "per_target_mae"],
         help="joint_mse: MSE over all targets. per_target_*: equal-weight per target; "
-             "per_target_mae uses L1 for the memory target; per_target_composite blends "
-             "Huber + small MSE (+ optional relative) for the memory target.",
+             "per_target_mae uses L1 for the memory target.",
     )
     p.add_argument("--last_step_only", action=argparse.BooleanOptionalAction, default=True,
                    help="Compute loss only on the final horizon step (H-1); use --no-last_step_only "
                         "to average over all steps (default: on).")
-    p.add_argument("--mem_huber_beta", type=float, default=None,
-                   help="Huber beta for the memory term of per_target_composite (default: config)")
-    p.add_argument("--mem_mse_w", type=float, default=None,
-                   help="Weight of the MSE term added to the memory Huber loss (default: config)")
-    p.add_argument("--mem_rel_w", type=float, default=None,
-                   help="Weight of the relative/MAPE term added to the memory loss (default: config)")
     p.add_argument("--mem_residual_reg", type=float, default=None,
                    help="L2 penalty on the memory residual gate, pulling memory toward the trend "
                         "anchor (default: config)")
@@ -594,19 +573,13 @@ def main():
     p.add_argument("--wadm_cnn_kernels", type=int, nargs="+", default=None,
                    help="GroupCNN kernel sizes for wadm (ablation; default (3,5))")
     p.add_argument("--wadm_group_blocks", type=int, default=None,
-                   help="Group MixerBlocks per group for wadm (ablation; 0 disables)")
+                   help="Group MixerBlocks per group for wadm (ablation; default 2)")
     p.add_argument("--wadm_d_group", type=int, default=None,
                    help="CPU group hidden dim for wadm (ablation; default 64)")
+    p.add_argument("--wadm_mem_d_group", type=int, default=None,
+                   help="Memory group hidden dim for wadm (ablation; default 24)")
     p.add_argument("--wadm_pool_head_dim", type=int, default=None,
                    help="Pooled-MLP head dim for wadm (ablation; default 128)")
-    p.add_argument("--wadm_cpu_anchor", choices=["trend", "none"], default=None,
-                   help="CPU anchor mode for wadm (ablation; default trend)")
-    p.add_argument("--wadm_mem_anchor", choices=["trend", "none"], default=None,
-                   help="Memory anchor mode for wadm (ablation; default trend)")
-    p.add_argument("--wadm_no_mem_gate", action="store_true",
-                   help="Disable the memory residual gate (wadm ablation)")
-    p.add_argument("--wadm_grouping", choices=["default", "single"], default=None,
-                   help="Channel grouping for wadm (ablation; single = one osc group)")
 
     try:
         train(p.parse_args())

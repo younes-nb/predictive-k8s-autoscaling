@@ -65,19 +65,13 @@ def main():
     ap.add_argument("--wadm_cnn_kernels", type=int, nargs="+", default=None,
                     help="GroupCNN kernel sizes for wadm (ablation; default (3,5))")
     ap.add_argument("--wadm_group_blocks", type=int, default=None,
-                    help="Group MixerBlocks per group for wadm (ablation; 0 disables)")
+                    help="Group MixerBlocks per group for wadm (ablation; default 3, 0 disables)")
     ap.add_argument("--wadm_d_group", type=int, default=None,
                     help="CPU group hidden dim for wadm (ablation; default 64)")
+    ap.add_argument("--wadm_mem_d_group", type=int, default=None,
+                    help="Memory group hidden dim for wadm (ablation; default 24)")
     ap.add_argument("--wadm_pool_head_dim", type=int, default=None,
                     help="Pooled-MLP head dim for wadm (ablation; default 128)")
-    ap.add_argument("--wadm_cpu_anchor", choices=["trend", "none"], default=None,
-                    help="CPU anchor mode for wadm (ablation; default trend)")
-    ap.add_argument("--wadm_mem_anchor", choices=["trend", "none"], default=None,
-                    help="Memory anchor mode for wadm (ablation; default trend)")
-    ap.add_argument("--wadm_no_mem_gate", action="store_true",
-                    help="Disable the memory residual gate (wadm ablation)")
-    ap.add_argument("--wadm_grouping", choices=["default", "single"], default=None,
-                    help="Channel grouping for wadm (ablation; single = one osc group)")
     ap.add_argument(
         "--preprocess_approach",
         default="swt",
@@ -97,19 +91,12 @@ def main():
     ap.add_argument(
         "--loss_mode",
         default="per_target_mse",
-        choices=["joint_mse", "per_target_mse", "per_target_mae", "per_target_composite"],
-        help="joint_mse: MSE over all targets. per_target_mae: equal-weight per target with L1 memory loss. "
-             "per_target_composite: Huber + MSE (+ optional relative) memory loss.",
+        choices=["joint_mse", "per_target_mse", "per_target_mae"],
+        help="joint_mse: MSE over all targets. per_target_mae: equal-weight per target with L1 memory loss.",
     )
     ap.add_argument("--last_step_only", action=argparse.BooleanOptionalAction, default=True,
                     help="Compute loss only on the final horizon step (H-1); use --no-last_step_only "
                          "to average over all steps (default: on).")
-    ap.add_argument("--mem_huber_beta", type=float, default=None,
-                    help="Huber beta for the memory term of per_target_composite (default: config)")
-    ap.add_argument("--mem_mse_w", type=float, default=None,
-                    help="Weight of the MSE term added to the memory Huber loss (default: config)")
-    ap.add_argument("--mem_rel_w", type=float, default=None,
-                    help="Weight of the relative/MAPE term added to the memory loss (default: config)")
     ap.add_argument("--mem_residual_reg", type=float, default=None,
                     help="L2 penalty on the memory residual gate, pulling memory toward the trend "
                          "anchor (default: config)")
@@ -265,10 +252,8 @@ def main():
         cmd_train.extend(["--loss_mode", args.loss_mode])
         if args.last_step_only:
             cmd_train.append("--last_step_only")
-        for attr in ("mem_huber_beta", "mem_mse_w", "mem_rel_w", "mem_residual_reg"):
-            val = getattr(args, attr, None)
-            if val is not None:
-                cmd_train.extend([f"--{attr}", str(val)])
+        if getattr(args, "mem_residual_reg", None) is not None:
+            cmd_train.extend(["--mem_residual_reg", str(args.mem_residual_reg)])
         if args.resume_training:
             cmd_train.append("--resume_training")
         if args.cpu:
@@ -279,17 +264,11 @@ def main():
                 cmd_train.extend(["--swt_level", str(args.swt_level)])
             if args.mem_swt_level is not None:
                 cmd_train.extend(["--mem_swt_level", str(args.mem_swt_level)])
-        for attr in ("wadm_cnn_kernels", "wadm_group_blocks", "wadm_d_group", "wadm_pool_head_dim"):
+        for attr in ("wadm_cnn_kernels", "wadm_group_blocks", "wadm_d_group", "wadm_mem_d_group", "wadm_pool_head_dim"):
             val = getattr(args, attr, None)
             if val is not None:
                 vals = val if isinstance(val, (list, tuple)) else [val]
                 cmd_train.extend([f"--{attr}"] + [str(v) for v in vals])
-        for attr in ("wadm_cpu_anchor", "wadm_mem_anchor", "wadm_grouping"):
-            val = getattr(args, attr, None)
-            if val is not None:
-                cmd_train.extend([f"--{attr}", str(val)])
-        if getattr(args, "wadm_no_mem_gate", False):
-            cmd_train.append("--wadm_no_mem_gate")
 
         total_times["training"] = run(cmd_train, "Step 2: Training")
 
