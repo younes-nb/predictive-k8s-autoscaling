@@ -6,9 +6,11 @@ import shutil
 import tempfile
 import time
 import gc
+import json
+import hashlib
 import math
 import multiprocessing as mp
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, as_completed, BrokenExecutor
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, os.pardir))
@@ -17,9 +19,27 @@ if REPO_ROOT not in sys.path:
 
 _n_cpus = os.cpu_count() or 1
 _NUM_WORKERS = 0.9
-os.environ.setdefault(
-    "POLARS_MAX_THREADS", str(max(1, int(_n_cpus * _NUM_WORKERS)))
-)
+
+
+def _pre_scan_polars_threads():
+    for i, a in enumerate(sys.argv):
+        if a == "--polars_threads" and i + 1 < len(sys.argv):
+            try:
+                return max(1, int(sys.argv[i + 1]))
+            except ValueError:
+                return None
+        if a.startswith("--polars_threads="):
+            try:
+                return max(1, int(a.split("=", 1)[1]))
+            except ValueError:
+                return None
+    return None
+
+
+_polars_threads = _pre_scan_polars_threads()
+if _polars_threads is None:
+    _polars_threads = int(os.environ.get("POLARS_MAX_THREADS") or 48)
+os.environ["POLARS_MAX_THREADS"] = str(_polars_threads)
 
 import polars as pl
 import numpy as np
@@ -33,8 +53,8 @@ from shared.features import FEATURE_SETS, get_feature_set, tables_for_feature_se
 
 from preprocessing.parquet_utils import (
     list_parquet_parts,
-    build_table_agg,
     discover_unique_services,
+    _parquet_fingerprint,
 )
 
 _WORKER_CTX = {}
@@ -45,7 +65,9 @@ def save_chunk(out_dir, shard_idx, chunk_idx, shard_data, sync=False):
     saved_any = False
 
     try:
-        with tempfile.TemporaryDirectory(dir="/dev/shm") as tmp_dir:
+        # Stage in out_dir (same filesystem): the move below becomes an atomic
+        # rename, and we avoid filling /dev/shm when 57 workers write concurrently.
+        with tempfile.TemporaryDirectory(dir=out_dir) as tmp_dir:
             tmp_base = os.path.join(tmp_dir, base_name)
 
             for split, (Xs, Ys, Ss) in shard_data.items():
@@ -71,18 +93,64 @@ def save_chunk(out_dir, shard_idx, chunk_idx, shard_data, sync=False):
     return saved_any
 
 
-def _agg_exprs_for_table(table_exprs, table_name):
-    import polars as pl
+def _part_agg_plan(table_exprs, table_name, time_col):
+    """Return (per-part agg exprs, fold exprs, final exprs) for exact per-part aggregation.
 
-    exprs = []
+    Per-part frames keep intermediate columns (_s/_c/_l/_t). The fold merge re-aggregates
+    them incrementally (associative for mean/sum/max), keeping at most two part frames in
+    memory; final exprs project the intermediate columns to the real feature names.
+    """
+    part_exprs = []
+    fold_exprs = []
+    final_exprs = []
     for feat_name, raw_col in table_exprs[table_name]:
         if table_name == "msresource":
-            exprs.append(pl.col(raw_col).mean().alias(feat_name))
+            s, c = f"{feat_name}_s", f"{feat_name}_c"
+            part_exprs += [
+                pl.col(raw_col).sum().alias(s),
+                pl.col(raw_col).count().alias(c),
+            ]
+            fold_exprs += [pl.col(s).sum().alias(s), pl.col(c).sum().alias(c)]
+            final_exprs.append((pl.col(s) / pl.col(c)).alias(feat_name))
         elif table_name == "msrtmcre":
-            exprs.append(pl.col(raw_col).sum().alias(feat_name))
+            s = f"{feat_name}_s"
+            part_exprs.append(pl.col(raw_col).sum().alias(s))
+            fold_exprs.append(pl.col(s).sum().alias(s))
+            final_exprs.append(pl.col(s).alias(feat_name))
         else:
-            exprs.append(pl.col(raw_col).last().alias(feat_name))
-    return exprs
+            l, t = f"{feat_name}_l", f"{feat_name}_t"
+            part_exprs += [
+                pl.col(raw_col).last().alias(l),
+                pl.col(time_col).max().alias(t),
+            ]
+            fold_exprs += [
+                pl.col(l).sort_by(pl.col(t), descending=True).first().alias(l),
+                pl.col(t).max().alias(t),
+            ]
+            final_exprs.append(pl.col(l).alias(feat_name))
+    return part_exprs, fold_exprs, final_exprs
+
+
+def _merge_part_frames(part_frames, fold_exprs, id_cols):
+    if not part_frames:
+        return None
+    merged = part_frames[0]
+    for frame in part_frames[1:]:
+        combined = pl.concat([merged, frame], how="vertical")
+        merged = (
+            combined.lazy()
+            .group_by(["_t"] + id_cols)
+            .agg(fold_exprs)
+            .collect(engine="streaming")
+        )
+        del combined
+        gc.collect()
+    return merged.sort(["_t"] + id_cols)
+
+
+def _finalize_merged(merged, final_exprs, id_cols):
+    key_cols = [c for c in ["_t"] + id_cols if c in merged.columns]
+    return merged.select([*[pl.col(c) for c in key_cols], *final_exprs])
 
 
 def _process_service_group(group_idx, service_ids):
@@ -96,16 +164,24 @@ def _process_service_group(group_idx, service_ids):
         return (group_idx, 0, 0.0, True)
 
     t0 = time.time()
-    arrays = ctx["service_arrays"]
+    arrays = ctx.get("service_arrays")
+    big = ctx.get("big_array")
+    index = ctx.get("service_index")
     target_indices = ctx["target_indices"]
 
     shard_data = {"train": ([], [], []), "val": ([], [], []), "test": ([], [], [])}
     n_processed = 0
 
     for ms_id in service_ids:
-        feat_raw = arrays.get(ms_id)
-        if feat_raw is None:
-            continue
+        if big is not None:
+            pos = index.get(ms_id)
+            if pos is None:
+                continue
+            feat_raw = big[pos[0]:pos[0] + pos[1]]
+        else:
+            feat_raw = arrays.get(ms_id)
+            if feat_raw is None:
+                continue
 
         n = len(feat_raw)
         idx_tr = int(n * args_dict["train_frac"])
@@ -146,6 +222,83 @@ def _process_service_group(group_idx, service_ids):
     return (group_idx, n_processed, time.time() - t0, False)
 
 
+def _service_arrays_paths(out_dir):
+    return (
+        os.path.join(out_dir, "_service_arrays.npy"),
+        os.path.join(out_dir, "_service_index.json"),
+    )
+
+
+def _arrays_signature(args, base_table):
+    fp = _parquet_fingerprint(DATASET_TABLES[base_table]["parquet_dir"])
+    blob = {
+        "feature_set": args.feature_set,
+        "freq": args.freq,
+        "time_col": args.time_col,
+        "service_col": args.service_col,
+        "input_len": args.input_len,
+        "pred_horizon": args.pred_horizon,
+        "max_services": args.max_services,
+        "subset_seed": args.subset_seed,
+        "base_parts": fp,
+    }
+    return hashlib.md5(json.dumps(blob, sort_keys=True).encode()).hexdigest()
+
+
+def _arrays_cache_valid(arrays_path, index_path, signature):
+    if not (os.path.exists(arrays_path) and os.path.exists(index_path)):
+        return False
+    try:
+        with open(index_path, "r") as f:
+            data = json.load(f)
+        return data.get("signature") == signature
+    except (OSError, ValueError):
+        return False
+
+
+def _save_service_arrays(service_arrays, arrays_path, index_path, signature):
+    total = sum(len(a) for a in service_arrays.values())
+    channels = next(iter(service_arrays.values())).shape[1]
+    big = np.empty((total, channels), dtype="float32")
+    index = {}
+    off = 0
+    for ms_id in sorted(service_arrays):
+        a = service_arrays[ms_id]
+        big[off:off + len(a)] = a
+        index[ms_id] = [int(off), int(len(a))]
+        off += len(a)
+    np.save(arrays_path, big)
+    with open(index_path, "w") as f:
+        json.dump({"signature": signature, "index": index}, f)
+    del big
+    gc.collect()
+    print(f"Service arrays cached: {os.path.basename(arrays_path)} "
+          f"({total} rows x {channels} ch, {len(service_arrays)} services)",
+          flush=True)
+
+
+def _reexec():
+    """Re-exec a fresh interpreter so the ~50GB aggregation memory is reclaimed
+    (polars/mimalloc arenas are NOT returned to the OS on del/gc)."""
+    tail = []
+    skip_next = False
+    for a in sys.argv[1:]:
+        if skip_next:
+            skip_next = False
+            continue
+        if a == "--phase":
+            skip_next = True
+            continue
+        if a.startswith("--phase="):
+            continue
+        tail.append(a)
+    tail += ["--phase", "windows"]
+    argv = [sys.executable, os.path.abspath(__file__)] + tail
+    print("Aggregation done; re-executing in a fresh process to reclaim memory...",
+          flush=True)
+    os.execv(sys.executable, argv)
+
+
 def main():
     p = argparse.ArgumentParser(
         description="Build windows: join tables, create sliding windows, split train/val/test."
@@ -173,6 +326,9 @@ def main():
                     help="Services per worker group; 0 = auto-size to the worker pool (default: 0)")
     p.add_argument("--num_workers", type=float, default=0.9,
                     help="Fraction of CPU cores to use (default: 0.9)")
+    p.add_argument("--polars_threads", type=int, default=48,
+                    help="Polars thread pool size for aggregation/sort; aggregation is CPU-bound and scales "
+                         "~linearly with threads (peak RAM barely changes), default: %(default)s")
     p.add_argument("--recompute", action="store_true",
                     help="Delete cached done markers and shards, forcing a full rebuild")
     p.add_argument("--no_service_cache", action="store_true",
@@ -181,6 +337,8 @@ def main():
                     help="Force rebuild of the unique-service discovery cache")
     p.add_argument("--sync", action="store_true",
                     help="Run os.sync() after saving each chunk (durability; slower)")
+    p.add_argument("--phase", choices=["auto", "windows"], default="auto",
+                    help=argparse.SUPPRESS)
 
     args = p.parse_args()
 
@@ -221,7 +379,7 @@ def main():
 
     print(
         f"Discovering unique services across {len(base_parts)} base shards "
-        f"(polars parallel across all cores)..."
+        f"(polars parallel across all cores)...", flush=True
     )
     all_services_list = discover_unique_services(
         DATASET_TABLES[base_table]["parquet_dir"],
@@ -229,7 +387,7 @@ def main():
         use_cache=not args.no_service_cache,
         refresh=args.refresh_service_cache,
     )
-    print(f"Total unique services: {len(all_services_list)}")
+    print(f"Total unique services: {len(all_services_list)}", flush=True)
 
     if args.max_services and len(all_services_list) > args.max_services:
         rng = np.random.default_rng(args.subset_seed)
@@ -241,13 +399,17 @@ def main():
 
     os.makedirs(args.out_dir, exist_ok=True)
 
+    for stale in glob.glob(os.path.join(args.out_dir, "tmp*")):
+        if os.path.isdir(stale):
+            shutil.rmtree(stale, ignore_errors=True)
+
     if args.recompute:
         cached = glob.glob(os.path.join(args.out_dir, "part-*.done")) + \
                  glob.glob(os.path.join(args.out_dir, "part-*_chunk-*.npy"))
         for f in cached:
             os.remove(f)
         if cached:
-            print(f"Removed {len(cached)} cached artifacts for recompute")
+            print(f"Removed {len(cached)} cached artifacts for recompute", flush=True)
 
     if args.batch_size and args.batch_size > 0:
         group_size = args.batch_size
@@ -279,9 +441,29 @@ def main():
         "feature_set": args.feature_set,
     }
 
+    arrays_path, index_path = _service_arrays_paths(args.out_dir)
+    signature = _arrays_signature(args, base_table)
+
+    if args.phase == "windows" or _arrays_cache_valid(arrays_path, index_path, signature):
+        _phase_windows(args, args_dict, target_indices, all_services_list,
+                       groups_to_run, group_size, num_workers,
+                       arrays_path, index_path)
+    else:
+        _phase_aggregate(args, args_dict, target_indices, feature_names,
+                         table_parts, needed_tables, table_exprs, base_table,
+                         effective_id_cols, all_services_list,
+                         arrays_path, index_path, signature)
+        _reexec()
+
+
+def _phase_aggregate(args, args_dict, target_indices, feature_names,
+                     table_parts, needed_tables, table_exprs, base_table,
+                     effective_id_cols, all_services_list,
+                     arrays_path, index_path, signature):
     agg_frames = {}
     agg_order = [base_table] + [t for t in needed_tables if t != base_table]
     for t in agg_order:
+        t0 = time.time()
         parts = table_parts[t]
         schema = pl.scan_parquet(parts).collect_schema().names()
         has_service = args.service_col in schema
@@ -293,20 +475,40 @@ def main():
                 *[raw for _, raw in table_exprs[t]],
             ])
         )
-        lf = pl.scan_parquet(parts, low_memory=True).select(need_cols)
-        if has_service:
-            lf = lf.filter(pl.col(args.service_col).is_in(all_services_list))
+        part_exprs, fold_exprs, final_exprs = _part_agg_plan(table_exprs, t, args.time_col)
+        part_frames = []
+        with tqdm(total=len(parts), desc=f"Aggregating table '{t}'", unit="part",
+                  bar_format=("{desc}: {percentage:5.1f}%|{bar}| "
+                              "{n_fmt}/{total_fmt} [{elapsed}<{remaining}, "
+                              "{rate_fmt}]")) as pbar:
+            for part in parts:
+                lf = (
+                    pl.scan_parquet(part, low_memory=True)
+                    .select(need_cols)
+                    .with_columns(pl.col(args.time_col).cast(pl.Datetime))
+                )
+                if has_service:
+                    lf = lf.filter(pl.col(args.service_col).is_in(all_services_list))
+                lf = lf.with_columns(
+                    pl.col(args.time_col).dt.truncate(args.freq).alias("_t")
+                )
+                part_frames.append(
+                    lf.group_by(["_t"] + effective_id_cols)
+                    .agg(part_exprs)
+                    .collect(engine="streaming")
+                )
+                pbar.update(1)
 
-        agg_frames[t] = build_table_agg(
-            lf, args.time_col, effective_id_cols, args.freq, table_exprs[t],
-            agg_exprs=_agg_exprs_for_table(table_exprs, t),
-        ).collect(engine="streaming")
-        print(f"Table '{t}' aggregated: {agg_frames[t].height} rows")
+        merged = _merge_part_frames(part_frames, fold_exprs, effective_id_cols)
+        agg_frames[t] = _finalize_merged(merged, final_exprs, effective_id_cols)
+        print(f"  Table '{t}' aggregated: {agg_frames[t].height} rows "
+              f"in {time.time() - t0:.1f}s", flush=True)
 
     if base_table not in agg_frames or agg_frames[base_table].is_empty():
         print("No base-table data after aggregation; nothing to do.")
         return
 
+    t_join = time.time()
     joined = agg_frames[base_table].lazy()
     join_keys = FEATURE_SETS[args.feature_set].get("join_keys", {})
     for t in agg_order:
@@ -323,16 +525,11 @@ def main():
         if is_resource:
             joined = joined.with_columns(pl.col(feat).clip(0.0, 1.0))
 
-    sort_cols = list(
-        set(effective_id_cols).intersection(joined.collect_schema().names())
-    ) + ["_t"]
-
-    joined_df = (
-        joined.drop_nulls(feature_names)
-        .collect(engine="streaming")
-        .sort(sort_cols)
-    )
-    print(f"Joined/clean table: {joined_df.height} rows")
+    # No re-sort here: _merge_part_frames already orders by (_t, id_cols), so rows
+    # within each service are in _t order; group_by below preserves it.
+    joined_df = joined.drop_nulls(feature_names).collect(engine="streaming")
+    print(f"Joined/clean table: {joined_df.height} rows "
+          f"in {time.time() - t_join:.1f}s", flush=True)
 
     if joined_df.height == 0:
         print("No valid rows after join/filtering; nothing to do.")
@@ -340,6 +537,9 @@ def main():
 
     group_cols = [c for c in effective_id_cols if c in joined_df.columns]
     service_arrays = {}
+    pbar_arr = tqdm(desc="Building service arrays", unit="svc",
+                    bar_format=("{desc}: {elapsed} [{rate_fmt}]"))
+    n_svc = 0
     for ms_key, g in joined_df.group_by(group_cols, maintain_order=True):
         if g.height < args.input_len + args.pred_horizon:
             continue
@@ -350,18 +550,42 @@ def main():
         service_arrays[ms_id] = np.stack(
             [feat_arrays[f] for f in feature_names], axis=1
         )
+        n_svc += 1
+        pbar_arr.set_description(f"Building service arrays ({n_svc})")
+        pbar_arr.update(1)
+    pbar_arr.close()
     del joined_df
     gc.collect()
-    print(f"Service feature arrays: {len(service_arrays)} services")
+    print(f"Service feature arrays: {len(service_arrays)} services "
+          f"in {time.time() - t_join:.1f}s", flush=True)
 
     if not service_arrays:
         print("No services with enough data after filtering; nothing to do.")
         return
 
+    # Free the big aggregated frames before writing the cache file.
+    del agg_frames
+    del joined
+    gc.collect()
+
+    _save_service_arrays(service_arrays, arrays_path, index_path, signature)
+
+
+def _phase_windows(args, args_dict, target_indices, all_services_list,
+                   groups_to_run, group_size, num_workers,
+                   arrays_path, index_path):
+    with open(index_path, "r") as f:
+        data = json.load(f)
+    big = np.load(arrays_path, mmap_mode="r")
+    index = data["index"]
+    print(f"Loaded service arrays (mmap): {big.shape[0]} rows x {big.shape[1]} ch, "
+          f"{len(index)} services", flush=True)
+
     global _WORKER_CTX
     _WORKER_CTX = {
         "args_dict": args_dict,
-        "service_arrays": service_arrays,
+        "big_array": big,
+        "service_index": index,
         "target_indices": target_indices,
         "sync": args.sync,
     }
@@ -372,7 +596,8 @@ def main():
         end_idx = min(start_idx + group_size, len(all_services_list))
         tasks.append((gi, all_services_list[start_idx:end_idx]))
 
-    print(f"Processing {len(tasks)} groups with {num_workers} workers (group_size={group_size})")
+    print(f"Processing {len(tasks)} groups with {num_workers} workers "
+          f"(group_size={group_size})", flush=True)
 
     pbar = tqdm(total=len(tasks), desc="Building windows", unit="group",
                 bar_format=("{desc}: {percentage:5.1f}%|{bar}| "
@@ -388,14 +613,37 @@ def main():
             _process_service_group(gi, ids)
             pbar.update(1)
     else:
-        with ProcessPoolExecutor(max_workers=num_workers, **pool_kwargs) as executor:
-            futures = {
-                executor.submit(_process_service_group, gi, ids): gi
-                for gi, ids in tasks
-            }
-            for future in as_completed(futures):
-                future.result()
-                pbar.update(1)
+        # Retry loop: groups are idempotent (done-marker guarded), so if the pool
+        # breaks (worker OOM-killed/terminated), recreate it and re-run leftovers.
+        # Give up loudly only if the pool breaks 3x with no progress (livelock).
+        remaining = {gi: ids for gi, ids in tasks}
+        last_progress = len(remaining)
+        consecutive_breaks = 0
+        while remaining:
+            try:
+                executor = ProcessPoolExecutor(max_workers=num_workers, **pool_kwargs)
+                try:
+                    futures = {
+                        executor.submit(_process_service_group, gi, ids): gi
+                        for gi, ids in remaining.items()
+                    }
+                    for future in as_completed(futures):
+                        gi = futures[future]
+                        future.result()
+                        pbar.update(1)
+                        remaining.pop(gi, None)
+                finally:
+                    executor.shutdown(wait=False, cancel_futures=True)
+            except BrokenExecutor:
+                if len(remaining) < last_progress:
+                    consecutive_breaks = 0
+                last_progress = len(remaining)
+                consecutive_breaks += 1
+                if consecutive_breaks > 3:
+                    raise
+                print(f"\n[WARN] Worker pool broke; {len(remaining)} groups left, "
+                      f"retrying...", flush=True)
+                time.sleep(5)
 
     pbar.close()
     print("\nAll service groups processed.")
