@@ -1,11 +1,14 @@
 import argparse
+import ctypes
 import glob
 import logging
+import multiprocessing as mp
 import os
 import shutil
 import sys
 import time
 import gc
+import threading
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import replace
 from datetime import datetime
@@ -23,6 +26,8 @@ from shared.config_preprocessing_defaults import PREPROCESSING
 from shared.features import get_feature_set
 from preprocessing.swt.config import CFG
 from preprocessing.swt.decomposition import decompose_window
+
+_PROGRESS = {"windows_done": None, "shards_done": None, "cur_shard_idx": None}
 
 
 class _TehranFormatter(logging.Formatter):
@@ -80,9 +85,18 @@ def _memory_aware_workers(requested, per_worker, max_fraction=0.8):
 def _decompose_shard(task):
     (shard_x_path, shard_y_path, shard_sid_path,
      shard_out_x_path, shard_out_y_path, shard_out_sid_path, shard_out_last_path,
-     cpu_cfg, mem_cfg, feature_idx_cpu, feature_idx_mem, has_mem) = task
+     cpu_cfg, mem_cfg, feature_idx_cpu, feature_idx_mem, has_mem, shard_idx) = task
 
     t0 = time.time()
+
+    # Shared progress objects are set as module globals before the pool forks,
+    # so workers inherit them (Synchronized objects can't be pickled through
+    # the task queue).
+    windows_done = _PROGRESS["windows_done"]
+    shards_done = _PROGRESS["shards_done"]
+    cur_shard_idx = _PROGRESS["cur_shard_idx"]
+    with cur_shard_idx.get_lock():
+        cur_shard_idx.value = shard_idx
 
     X = np.load(shard_x_path, mmap_mode="r")
     Y = np.load(shard_y_path)
@@ -137,6 +151,8 @@ def _decompose_shard(task):
         if n_kept:
             out_mmap[offset:offset + n_kept] = X_dec_chunk[keep_chunk]
             offset += n_kept
+        with windows_done.get_lock():
+            windows_done.value += m
         del X_dec_chunk, X_chunk, keep_chunk
         gc.collect()
 
@@ -163,6 +179,9 @@ def _decompose_shard(task):
     np.save(shard_out_last_path, last[keep])
     np.save(shard_out_y_path, Y[keep])
     np.save(shard_out_sid_path, S[keep])
+
+    with shards_done.get_lock():
+        shards_done.value += 1
 
     elapsed = time.time() - t0
     return (os.path.basename(shard_x_path), n_kept_total, N - n_kept_total, elapsed)
@@ -215,6 +234,7 @@ def main() -> None:
 
     splits = ["train", "val", "test"]
     shard_tasks = []
+    shard_names = []
     for split in splits:
         x_shards = sorted(glob.glob(os.path.join(args.windows_dir, f"part-*_X_{split}.npy")))
         for x_path in x_shards:
@@ -235,6 +255,7 @@ def main() -> None:
                 logging.info("Shard %s already done, skipping", base)
                 continue
 
+            shard_names.append(os.path.basename(x_path))
             shard_tasks.append((
                 x_path, y_path, sid_path,
                 out_x, out_y, out_sid, out_last,
@@ -245,27 +266,72 @@ def main() -> None:
         logging.info("No shards to process")
         return
 
-    logging.info("Processing %d shards with %d workers", len(shard_tasks), num_workers)
+    # Total windows across all shards, read from .npy headers only (cheap).
+    total_windows = 0
+    for t in shard_tasks:
+        total_windows += np.load(t[0], mmap_mode="r").shape[0]
+
+    # Shared progress state: workers update these (inherited at fork), a monitor
+    # thread in the parent renders them.
+    windows_done = mp.Value(ctypes.c_longlong, 0)
+    shards_done = mp.Value(ctypes.c_longlong, 0)
+    cur_shard_idx = mp.Value(ctypes.c_longlong, -1)
+    global _PROGRESS
+    _PROGRESS = {
+        "windows_done": windows_done,
+        "shards_done": shards_done,
+        "cur_shard_idx": cur_shard_idx,
+    }
+    shard_tasks = [t + (i,) for i, t in enumerate(shard_tasks)]
+
+    logging.info("Processing %d shards (%d windows) with %d workers",
+                 len(shard_tasks), total_windows, num_workers)
 
     t_start = time.time()
-    total_windows = 0
+    kept_windows = 0
     total_skipped = 0
 
-    with ProcessPoolExecutor(max_workers=num_workers) as executor:
+    with ProcessPoolExecutor(max_workers=num_workers,
+                             mp_context=mp.get_context("fork")) as executor:
         futures = {executor.submit(_decompose_shard, t): t for t in shard_tasks}
-        pbar = tqdm(total=len(shard_tasks), desc="SWT Decomposition", unit="shard")
-        for future in as_completed(futures):
-            shard_key, n_windows, n_skipped, elapsed = future.result()
-            total_windows += n_windows
-            total_skipped += n_skipped
-            pbar.set_postfix_str(f"{shard_key} ({n_windows}w, {elapsed:.1f}s)")
-            pbar.update(1)
+        pbar = tqdm(
+            total=total_windows, desc="SWT Decomposition",
+            unit="", unit_scale=True,
+            bar_format=("{desc}: {percentage:5.1f}%|{bar}| "
+                        "{n_fmt}/{total_fmt} [{elapsed}<{remaining}, "
+                        "{rate_fmt}{postfix}]"),
+        )
+
+        stop_monitor = threading.Event()
+
+        def _monitor():
+            while not stop_monitor.is_set():
+                idx = cur_shard_idx.value
+                cur = shard_names[idx] if 0 <= idx < len(shard_names) else ""
+                pbar.set_postfix_str(
+                    f" {shards_done.value}/{len(shard_tasks)} shards | {cur}")
+                pbar.n = windows_done.value
+                pbar.refresh(nolock=True)
+                time.sleep(0.5)
+
+        monitor = threading.Thread(target=_monitor, daemon=True)
+        monitor.start()
+        try:
+            for future in as_completed(futures):
+                shard_key, n_windows, n_skipped, elapsed = future.result()
+                kept_windows += n_windows
+                total_skipped += n_skipped
+        finally:
+            stop_monitor.set()
+            monitor.join(timeout=2)
+        pbar.n = windows_done.value
+        pbar.refresh()
         pbar.close()
 
     elapsed = time.time() - t_start
     logging.info(
         "Preprocessing complete. Shards: %d | Windows: %d | Skipped: %d | Time: %.1fs",
-        len(shard_tasks), total_windows, total_skipped, elapsed,
+        len(shard_tasks), kept_windows, total_skipped, elapsed,
     )
 
 
