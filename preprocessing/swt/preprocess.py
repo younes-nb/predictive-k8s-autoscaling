@@ -5,6 +5,7 @@ import os
 import shutil
 import sys
 import time
+import gc
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import replace
 from datetime import datetime
@@ -47,6 +48,35 @@ def setup_logging(out_dir: str) -> None:
     logging.info("Preprocessing log: %s", log_path)
 
 
+def _chunk_and_per_worker_mem(input_len, total_channels, budget=0.9e9):
+    """Pick a per-worker processing chunk so RAM stays bounded (~budget bytes).
+
+    Each window costs `input_len * (n_in + n_out) * 4` bytes while a chunk is
+    being decomposed (input slice + 12-channel output buffer), plus base
+    interpreter overhead (~250MB).
+    """
+    per_window = input_len * (2 + total_channels) * 4
+    chunk = max(20_000, min(500_000, int(budget // max(per_window, 1))))
+    per_worker = chunk * per_window + 250e6
+    return chunk, per_worker
+
+
+def _memory_aware_workers(requested, per_worker, max_fraction=0.8):
+    """Cap workers so total peak RSS stays under ~max_fraction of free RAM."""
+    avail = None
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    avail = int(line.split()[1]) * 1024
+                    break
+    except OSError:
+        pass
+    if avail is None:
+        return requested
+    return max(1, min(requested, int(avail * max_fraction / per_worker)))
+
+
 def _decompose_shard(task):
     (shard_x_path, shard_y_path, shard_sid_path,
      shard_out_x_path, shard_out_y_path, shard_out_sid_path, shard_out_last_path,
@@ -54,50 +84,88 @@ def _decompose_shard(task):
 
     t0 = time.time()
 
-    X = np.load(shard_x_path).astype(np.float32)
+    X = np.load(shard_x_path, mmap_mode="r")
     Y = np.load(shard_y_path)
     S = np.load(shard_sid_path)
     N, input_len, _ = X.shape
 
-    last_cpu = X[:, -1, feature_idx_cpu]
+    last_cpu = np.asarray(X[:, -1, feature_idx_cpu], dtype=np.float32)
     if has_mem:
-        last_mem = X[:, -1, feature_idx_mem]
-        last = np.stack([last_cpu, last_mem], axis=-1)
+        last_mem = np.asarray(X[:, -1, feature_idx_mem], dtype=np.float32)
     else:
-        last = last_cpu
+        last_mem = None
 
     n_cpu_channels = cpu_cfg.SWT_LEVEL + 1
     n_mem_channels = (mem_cfg.SWT_LEVEL + 1) if has_mem else 0
     total_channels = n_cpu_channels + n_mem_channels
 
-    keep = np.ones(N, dtype=bool)
-    X_dec = np.zeros((N, input_len, total_channels), dtype=np.float32)
-    for i in range(N):
-        cpu_ch = decompose_window(X[i, :, feature_idx_cpu], cpu_cfg)
-        if cpu_ch is None:
-            keep[i] = False
-            continue
-        X_dec[i, :, :n_cpu_channels] = cpu_ch.T
-        if has_mem:
-            mem_ch = decompose_window(X[i, :, feature_idx_mem], mem_cfg)
-            if mem_ch is None:
-                keep[i] = False
+    out_dir = os.path.dirname(shard_out_x_path)
+    os.makedirs(out_dir, exist_ok=True)
+
+    chunk_size, _ = _chunk_and_per_worker_mem(input_len, total_channels)
+
+    # Stream X_dec into a full-size memmap at a running offset, writing only
+    # kept windows. RAM stays bounded to one chunk (~1GB), not the whole shard
+    # (~4GB for a 12-channel train shard).
+    tmp_x = shard_out_x_path + ".tmp"
+    out_mmap = np.lib.format.open_memmap(
+        tmp_x, mode="w+", dtype="float32",
+        shape=(N, input_len, total_channels),
+    )
+    keep = np.zeros(N, dtype=bool)
+    offset = 0
+    for a in range(0, N, chunk_size):
+        b = min(a + chunk_size, N)
+        X_chunk = X[a:b]
+        m = b - a
+        X_dec_chunk = np.zeros((m, input_len, total_channels), dtype=np.float32)
+        keep_chunk = np.ones(m, dtype=bool)
+        for i in range(m):
+            cpu_ch = decompose_window(X_chunk[i, :, feature_idx_cpu], cpu_cfg)
+            if cpu_ch is None:
+                keep_chunk[i] = False
                 continue
-            X_dec[i, :, n_cpu_channels:] = mem_ch.T
+            X_dec_chunk[i, :, :n_cpu_channels] = cpu_ch.T
+            if has_mem:
+                mem_ch = decompose_window(X_chunk[i, :, feature_idx_mem], mem_cfg)
+                if mem_ch is None:
+                    keep_chunk[i] = False
+                    continue
+                X_dec_chunk[i, :, n_cpu_channels:] = mem_ch.T
+        keep[a:b] = keep_chunk
+        n_kept = int(keep_chunk.sum())
+        if n_kept:
+            out_mmap[offset:offset + n_kept] = X_dec_chunk[keep_chunk]
+            offset += n_kept
+        del X_dec_chunk, X_chunk, keep_chunk
+        gc.collect()
 
-    n_skipped = int((~keep).sum())
-    X_dec = X_dec[keep]
-    last = last[keep]
-    Y = Y[keep]
-    S = S[keep]
+    n_kept_total = int(keep.sum())
+    del out_mmap
+    if n_kept_total != N:
+        # Rare: some windows skipped (constant signal -> std ~ 0). Compact into
+        # the final file with the true row count, streaming to stay bounded.
+        final = np.lib.format.open_memmap(
+            shard_out_x_path, mode="w+", dtype="float32",
+            shape=(n_kept_total, input_len, total_channels),
+        )
+        tmp = np.load(tmp_x, mmap_mode="r")
+        for a in range(0, n_kept_total, chunk_size):
+            b = min(a + chunk_size, n_kept_total)
+            final[a:b] = tmp[a:b]
+        del final, tmp
+        gc.collect()
+        os.remove(tmp_x)
+    else:
+        os.replace(tmp_x, shard_out_x_path)
 
-    np.save(shard_out_x_path, X_dec)
-    np.save(shard_out_last_path, last)
-    np.save(shard_out_y_path, Y)
-    np.save(shard_out_sid_path, S)
+    last = np.stack([last_cpu, last_mem], axis=-1) if has_mem else last_cpu
+    np.save(shard_out_last_path, last[keep])
+    np.save(shard_out_y_path, Y[keep])
+    np.save(shard_out_sid_path, S[keep])
 
     elapsed = time.time() - t0
-    return (os.path.basename(shard_x_path), len(X_dec), n_skipped, elapsed)
+    return (os.path.basename(shard_x_path), n_kept_total, N - n_kept_total, elapsed)
 
 
 def main() -> None:
@@ -128,6 +196,17 @@ def main() -> None:
     num_workers = max(1, int(n_cpus * args.num_workers))
 
     setup_logging(args.out_dir)
+
+    input_len = PREPROCESSING.INPUT_LEN
+    total_channels = (cpu_cfg.SWT_LEVEL + 1) + ((mem_cfg.SWT_LEVEL + 1) if has_mem else 0)
+    _, per_worker = _chunk_and_per_worker_mem(input_len, total_channels)
+    capped = _memory_aware_workers(num_workers, per_worker)
+    if capped != num_workers:
+        logging.info(
+            "Memory-aware worker cap: %d -> %d (per-worker ~%.1fGB)",
+            num_workers, capped, per_worker / 1e9,
+        )
+    num_workers = capped
 
     spec = get_feature_set(args.feature_set)
     feature_names = list(spec["features"])
