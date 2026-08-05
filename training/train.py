@@ -27,7 +27,7 @@ from shared.logging_utils import setup_logging
 from shared.features import target_features_for_feature_set
 from core.dataset import ShardedWindowsDataset
 
-from training.loss import weighted_mse, per_target_loss
+from training.loss import weighted_mse, per_target_loss, per_target_composite_loss
 from training.train_helpers import (
     head_slice_dataset_by_pct,
     load_resume_state,
@@ -153,9 +153,6 @@ def train(args):
 
     if not hasattr(args, "loss_mode"):
         setattr(args, "loss_mode", "per_target_mse")
-
-    if not hasattr(args, "mem_residual_reg") or getattr(args, "mem_residual_reg") is None:
-        setattr(args, "mem_residual_reg", TRAINING.MEM_RESIDUAL_REG)
 
     hyperparam_optimizer = getattr(
         args, "hyperparam_optimizer", TRAINING.HYPERPARAM_OPTIMIZER
@@ -372,14 +369,14 @@ def train(args):
             return weighted_mse(preds, y, w, under_penalty=args.under_penalty)
         if args.loss_mode == "joint_mse":
             loss = nn.functional.mse_loss(preds, y)
+        elif args.loss_mode == "per_target_composite":
+            loss = per_target_composite_loss(
+                preds, y, cpu_beta=args.huber_beta_cpu, mem_beta=args.huber_beta_mem,
+                lambda_cpu=args.loss_w_cpu, lambda_mem=args.loss_w_mem,
+            )
         else:
             mem_mode = "l1" if args.loss_mode == "per_target_mae" else "mse"
             loss = per_target_loss(preds, y, mem_mode=mem_mode)
-        reg = getattr(args, "mem_residual_reg", 0.0) or 0.0
-        if reg and hasattr(model, "memory_gate"):
-            gate = model.memory_gate()
-            if gate is not None:
-                loss = loss + reg * gate.pow(2).mean()
         return loss
 
     log_info("\n--- Starting Training Loop ---")
@@ -523,20 +520,25 @@ def main():
     p.add_argument("--epochs", type=int, default=TRAINING.EPOCHS)
     p.add_argument("--grad_clip", type=float, default=TRAINING.GRAD_CLIP)
     p.add_argument("--weight_decay", type=float, default=TRAINING.WEIGHT_DECAY)
+    p.add_argument("--huber_beta_cpu", type=float, default=0.002,
+                   help="Huber beta for CPU branch in per_target_composite loss (default 0.002)")
+    p.add_argument("--huber_beta_mem", type=float, default=0.002,
+                   help="Huber beta for memory branch in per_target_composite loss (default 0.002)")
+    p.add_argument("--loss_w_cpu", type=float, default=0.5,
+                   help="Weight on CPU branch loss in per_target_composite (default 0.5)")
+    p.add_argument("--loss_w_mem", type=float, default=0.5,
+                   help="Weight on memory branch loss in per_target_composite (default 0.5)")
     p.add_argument("--under_penalty", type=float, default=TRAINING.UNDER_PENALTY)
     p.add_argument(
         "--loss_mode",
         default="per_target_mse",
-        choices=["joint_mse", "per_target_mse", "per_target_mae"],
+        choices=["joint_mse", "per_target_mse", "per_target_mae", "per_target_composite"],
         help="joint_mse: MSE over all targets. per_target_*: equal-weight per target; "
              "per_target_mae uses L1 for the memory target.",
     )
     p.add_argument("--last_step_only", action=argparse.BooleanOptionalAction, default=True,
                    help="Compute loss only on the final horizon step (H-1); use --no-last_step_only "
                         "to average over all steps (default: on).")
-    p.add_argument("--mem_residual_reg", type=float, default=None,
-                   help="L2 penalty on the memory residual gate, pulling memory toward the trend "
-                        "anchor (default: config)")
     p.add_argument("--seed", type=int, default=TRAINING.SEED)
     p.add_argument("--cpu", action="store_true")
     p.add_argument("--num_workers", type=int, default=TRAINING.NUM_WORKERS)
@@ -580,6 +582,8 @@ def main():
                    help="Memory group hidden dim for wadm (ablation; default 24)")
     p.add_argument("--wadm_pool_head_dim", type=int, default=None,
                    help="Pooled-MLP head dim for wadm (ablation; default 128)")
+    p.add_argument("--wadm_cpu_recon", action=argparse.BooleanOptionalAction, default=True,
+                   help="Level-correction MLP on CPU branch (ablation; default on)")
 
     try:
         train(p.parse_args())

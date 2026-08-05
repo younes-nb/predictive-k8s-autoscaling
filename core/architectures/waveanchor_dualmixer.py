@@ -1,5 +1,4 @@
 import warnings
-from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -11,6 +10,7 @@ MEM_D_GROUP = 24
 N_GROUP_BLOCKS = 2
 POOL_HEAD_DIM = 128
 TREND_HIDDEN = 32
+N_ATTN_HEADS = 4
 
 
 class GroupCNN(nn.Module):
@@ -57,20 +57,45 @@ class MixerBlock(nn.Module):
 
 class TrendExtrapolator(nn.Module):
 
-    def __init__(self, input_len: int, pred_horizon: int, d_hidden: int = TREND_HIDDEN, dropout: float = 0.0):
+    def __init__(self, input_len: int, pred_horizon: int, in_channels: int = 1,
+                 d_hidden: int = TREND_HIDDEN, dropout: float = 0.0, use_recon: bool = False):
         super().__init__()
         self.pred_horizon = pred_horizon
+        self.use_recon = use_recon
+        self.base_proj = nn.Linear(1, 1)
+        self.base_proj.weight.data.fill_(1.0)
+        self.base_proj.bias.data.zero_()
+        pos = torch.arange(input_len, dtype=torch.float32) / input_len
+        self.pos_bias = nn.Parameter(pos * 1.5)
+        flat_dim = input_len * in_channels
+        self.recon = nn.Sequential(
+            nn.Linear(flat_dim, d_hidden),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_hidden, 1),
+        )
         self.drift = nn.Sequential(
             nn.Linear(input_len, d_hidden),
             nn.GELU(),
             nn.Dropout(dropout),
             nn.Linear(d_hidden, pred_horizon),
         )
+        nn.init.zeros_(self.recon[-1].weight)
+        nn.init.zeros_(self.recon[-1].bias)
         nn.init.zeros_(self.drift[-1].weight)
         nn.init.zeros_(self.drift[-1].bias)
 
-    def forward(self, a_l):
-        base = a_l[:, -1:].expand(-1, self.pred_horizon)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        a_l = x[:, :, 0]
+        scores = self.base_proj(a_l.unsqueeze(-1)).squeeze(-1)
+        scores = scores + self.pos_bias.unsqueeze(0)
+        w = torch.softmax(scores, dim=1)
+        level = (a_l * w).sum(dim=1, keepdim=True)
+        if self.use_recon:
+            xf = x.reshape(x.shape[0], -1)
+            level = level + self.recon(xf)
+            return level.expand(-1, self.pred_horizon) + self.drift(a_l)
+        base = level.expand(-1, self.pred_horizon)
         return base + self.drift(a_l)
 
 
@@ -83,10 +108,11 @@ class AnchorMixer(nn.Module):
         pred_horizon: int = 5,
         d_group: int = D_GROUP,
         dropout: float = 0.1,
-        residual_gate_init: Optional[float] = None,
         group_cnn_kernels=(3, 5),
         n_group_blocks: int = N_GROUP_BLOCKS,
         pool_head_dim: int = POOL_HEAD_DIM,
+        n_attn_heads: int = N_ATTN_HEADS,
+        use_recon: bool = False,
     ):
         super().__init__()
         self.pred_horizon = pred_horizon
@@ -99,15 +125,14 @@ class AnchorMixer(nn.Module):
         ])
         self.norm_out = nn.LayerNorm(d_group)
 
-        self.trend_extrapolator = TrendExtrapolator(input_len, pred_horizon, dropout=dropout)
+        self.trend_extrapolator = TrendExtrapolator(input_len, pred_horizon, in_channels=in_channels, dropout=dropout, use_recon=use_recon)
 
-        self.residual_gate = None
-        if residual_gate_init is not None:
-            self.residual_gate = nn.Parameter(
-                torch.full((pred_horizon,), float(residual_gate_init))
-            )
+        self.query = nn.Parameter(torch.randn(1, 1, d_group) * 0.02)
+        self.attn = nn.MultiheadAttention(
+            d_group, num_heads=n_attn_heads,
+            dropout=dropout, batch_first=True,
+        )
 
-        self.attn_proj = nn.Linear(d_group, 1)
         self.pool_head = nn.Sequential(
             nn.Linear(d_group + pred_horizon, pool_head_dim),
             nn.GELU(),
@@ -120,27 +145,23 @@ class AnchorMixer(nn.Module):
         if x.dim() == 2:
             x = x.unsqueeze(-1)
 
+        base_trend = self.trend_extrapolator(x)
+
         dev = x.device
         osc = self._osc_idx.to(dev)
-
-        base_trend = self.trend_extrapolator(x[:, :, 0])
 
         h = self.cnn_osc(x[:, :, osc])
         for blk in self.group_mix_osc:
             h = blk(h)
         h = self.norm_out(h)
 
-        logits = self.attn_proj(h).squeeze(-1)
-        w = torch.softmax(logits, dim=1)
-        pooled = (h * w.unsqueeze(-1)).sum(dim=1)
+        query = self.query.expand(h.shape[0], -1, -1)
+        pooled, _ = self.attn(query, h, h)
+        pooled = pooled.squeeze(1)
         head_in = torch.cat([pooled, base_trend], dim=1)
         delta = self.pool_head(head_in)
 
-        out = base_trend + delta
-        if self.residual_gate is not None:
-            out = base_trend + delta * self.residual_gate
-
-        return out
+        return base_trend + delta
 
 
 class WaveAnchorDualMixer(nn.Module):
@@ -159,7 +180,7 @@ class WaveAnchorDualMixer(nn.Module):
         d_group: int = D_GROUP,
         mem_d_group: int = MEM_D_GROUP,
         pool_head_dim: int = POOL_HEAD_DIM,
-        mem_residual_gate_init: Optional[float] = 0.01,
+        cpu_recon: bool = True,
     ):
         super().__init__()
         assert in_channels == cpu_channels + mem_channels
@@ -177,6 +198,7 @@ class WaveAnchorDualMixer(nn.Module):
             group_cnn_kernels=group_cnn_kernels,
             n_group_blocks=n_group_blocks,
             pool_head_dim=pool_head_dim,
+            use_recon=cpu_recon,
         )
 
         self.mem_mixer = AnchorMixer(
@@ -185,14 +207,11 @@ class WaveAnchorDualMixer(nn.Module):
             pred_horizon=pred_horizon,
             d_group=mem_d_group,
             dropout=dropout,
-            residual_gate_init=mem_residual_gate_init,
             group_cnn_kernels=group_cnn_kernels,
             n_group_blocks=n_group_blocks,
             pool_head_dim=pool_head_dim,
+            use_recon=True,
         )
-
-    def memory_gate(self):
-        return self.mem_mixer.residual_gate
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if x.dim() == 2:

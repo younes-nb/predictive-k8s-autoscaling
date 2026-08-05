@@ -49,7 +49,6 @@ class TrainingDefaults:
     TRAIN_PCT: float = 100.0
     VAL_PCT: float = 100.0
     TEST_PCT: float = 100.0
-    MEM_RESIDUAL_REG: float = 0.05
 
 
 TRAINING = TrainingDefaults()

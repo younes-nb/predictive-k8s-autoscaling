@@ -72,6 +72,8 @@ def main():
                     help="Memory group hidden dim for wadm (ablation; default 24)")
     ap.add_argument("--wadm_pool_head_dim", type=int, default=None,
                     help="Pooled-MLP head dim for wadm (ablation; default 128)")
+    ap.add_argument("--wadm_cpu_recon", action=argparse.BooleanOptionalAction, default=True,
+                    help="Level-correction MLP on CPU branch (ablation; default on)")
     ap.add_argument(
         "--preprocess_approach",
         default="swt",
@@ -91,15 +93,23 @@ def main():
     ap.add_argument(
         "--loss_mode",
         default="per_target_mse",
-        choices=["joint_mse", "per_target_mse", "per_target_mae"],
-        help="joint_mse: MSE over all targets. per_target_mae: equal-weight per target with L1 memory loss.",
+        choices=["joint_mse", "per_target_mse", "per_target_mae", "per_target_composite"],
+        help="joint_mse: MSE over all targets. per_target_mae: equal-weight per target with L1 memory loss. "
+             "per_target_composite: CPU MSE + Huber/MSE composite for memory (baseline loss).",
     )
     ap.add_argument("--last_step_only", action=argparse.BooleanOptionalAction, default=True,
                     help="Compute loss only on the final horizon step (H-1); use --no-last_step_only "
                          "to average over all steps (default: on).")
-    ap.add_argument("--mem_residual_reg", type=float, default=None,
-                    help="L2 penalty on the memory residual gate, pulling memory toward the trend "
-                         "anchor (default: config)")
+    ap.add_argument("--weight_decay", type=float, default=None,
+                    help="L2 weight decay for the optimizer (default: config)")
+    ap.add_argument("--huber_beta_cpu", type=float, default=None,
+                    help="Huber beta for CPU branch in per_target_composite loss (default 0.002)")
+    ap.add_argument("--huber_beta_mem", type=float, default=None,
+                    help="Huber beta for memory branch in per_target_composite loss (default 0.002)")
+    ap.add_argument("--loss_w_cpu", type=float, default=None,
+                    help="Weight on CPU branch loss in per_target_composite (default 0.5)")
+    ap.add_argument("--loss_w_mem", type=float, default=None,
+                    help="Weight on memory branch loss in per_target_composite (default 0.5)")
     ap.add_argument(
         "--train_pct",
         type=float,
@@ -252,8 +262,16 @@ def main():
         cmd_train.extend(["--loss_mode", args.loss_mode])
         if args.last_step_only:
             cmd_train.append("--last_step_only")
-        if getattr(args, "mem_residual_reg", None) is not None:
-            cmd_train.extend(["--mem_residual_reg", str(args.mem_residual_reg)])
+        if getattr(args, "weight_decay", None) is not None:
+            cmd_train.extend(["--weight_decay", str(args.weight_decay)])
+        if getattr(args, "huber_beta_cpu", None) is not None:
+            cmd_train.extend(["--huber_beta_cpu", str(args.huber_beta_cpu)])
+        if getattr(args, "huber_beta_mem", None) is not None:
+            cmd_train.extend(["--huber_beta_mem", str(args.huber_beta_mem)])
+        if getattr(args, "loss_w_cpu", None) is not None:
+            cmd_train.extend(["--loss_w_cpu", str(args.loss_w_cpu)])
+        if getattr(args, "loss_w_mem", None) is not None:
+            cmd_train.extend(["--loss_w_mem", str(args.loss_w_mem)])
         if args.resume_training:
             cmd_train.append("--resume_training")
         if args.cpu:
@@ -269,6 +287,10 @@ def main():
             if val is not None:
                 vals = val if isinstance(val, (list, tuple)) else [val]
                 cmd_train.extend([f"--{attr}"] + [str(v) for v in vals])
+        if args.wadm_cpu_recon:
+            cmd_train.append("--wadm_cpu_recon")
+        else:
+            cmd_train.append("--no-wadm_cpu_recon")
 
         total_times["training"] = run(cmd_train, "Step 2: Training")
 

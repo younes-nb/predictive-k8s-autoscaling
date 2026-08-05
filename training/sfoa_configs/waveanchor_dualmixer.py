@@ -31,6 +31,9 @@ def build_model(hyperparams, input_size, args, num_targets, device):
     pool_head_dim = getattr(args, "wadm_pool_head_dim", None)
     if pool_head_dim is None:
         pool_head_dim = POOL_HEAD_DIM
+    cpu_recon = getattr(args, "wadm_cpu_recon", None)
+    if cpu_recon is None:
+        cpu_recon = True
     return WaveAnchorDualMixer(
         in_channels=input_size,
         input_len=args.input_len,
@@ -44,4 +47,5 @@ def build_model(hyperparams, input_size, args, num_targets, device):
         d_group=d_group,
         mem_d_group=mem_d_group,
         pool_head_dim=pool_head_dim,
+        cpu_recon=cpu_recon,
     ).to(device)
