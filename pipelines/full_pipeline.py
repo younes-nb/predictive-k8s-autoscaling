@@ -30,6 +30,8 @@ def main():
     ap.add_argument("--skip_preprocessing_approach", action="store_true", help="Skip the preprocessing approach step (swt/cskv/smoothing)")
     ap.add_argument("--recompute_preprocessing", action="store_true", help="Recompute the preprocessing approach output, ignoring cached shards")
     ap.add_argument("--windows_dir", default=PATHS.WINDOWS_DIR, help="Output directory for window datasets")
+    ap.add_argument("--model_name", default="model.pt",
+        help="Filename for the final model checkpoint (saved in the models dir; default: %(default)s)")
     ap.add_argument("--input_len", type=int, default=PREPROCESSING.INPUT_LEN,
         help="Sliding window input length; changing it auto-rebuilds the windows (default: %(default)s)")
     ap.add_argument("--skip_preprocessing", action="store_true", help="Skip the entire preprocessing pipeline (fetch+ingest+windows)")
@@ -210,7 +212,7 @@ def main():
         run(base_cmd_w + ["--split", "train"], "Weights Generation (Train)")
         run(base_cmd_w + ["--split", "val"], "Weights Generation (Val)")
 
-    current_checkpoint = PATHS.CHECKPOINT_PATH
+    current_checkpoint = os.path.join(os.path.dirname(PATHS.CHECKPOINT_PATH), args.model_name)
 
     gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 0
 

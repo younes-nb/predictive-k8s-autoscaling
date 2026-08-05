@@ -19,7 +19,7 @@ class Paths:
     PARQUET_THRESHOLD_MSRTMCRE: str = "/dataset/threshold/msrtmcre"
     WINDOWS_DIR: str = "/dataset/windows"
     MODELS_DIR: str = "/proj/k8sautoscaledl-PG0/models"
-    CHECKPOINT_PATH: str = os.path.join(MODELS_DIR, "model_global.pt")
+    CHECKPOINT_PATH: str = os.path.join(MODELS_DIR, "model.pt")
     LOGS_DIR: str = "/proj/k8sautoscaledl-PG0/logs"
     RESUME_STATE_FILE: str = "/proj/k8sautoscaledl-PG0/train_resume_state.pt"
 
