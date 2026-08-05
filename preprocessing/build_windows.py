@@ -31,7 +31,11 @@ from shared.config_paths import PATHS, DATASET_TABLES
 from shared.config_preprocessing_defaults import PREPROCESSING
 from shared.features import FEATURE_SETS, get_feature_set, tables_for_feature_set, table_to_feature_exprs, FEATURES
 
-from preprocessing.parquet_utils import list_parquet_parts, build_table_agg
+from preprocessing.parquet_utils import (
+    list_parquet_parts,
+    build_table_agg,
+    discover_unique_services,
+)
 
 _WORKER_CTX = {}
 
@@ -171,6 +175,10 @@ def main():
                     help="Fraction of CPU cores to use (default: 0.9)")
     p.add_argument("--recompute", action="store_true",
                     help="Delete cached done markers and shards, forcing a full rebuild")
+    p.add_argument("--no_service_cache", action="store_true",
+                    help="Bypass the unique-service discovery cache and scan parquet directly")
+    p.add_argument("--refresh_service_cache", action="store_true",
+                    help="Force rebuild of the unique-service discovery cache")
     p.add_argument("--sync", action="store_true",
                     help="Run os.sync() after saving each chunk (durability; slower)")
 
@@ -215,13 +223,12 @@ def main():
         f"Discovering unique services across {len(base_parts)} base shards "
         f"(polars parallel across all cores)..."
     )
-    all_services_df = (
-        pl.scan_parquet(base_parts, low_memory=True)
-        .select(args.service_col)
-        .unique()
-        .collect(engine="streaming")
+    all_services_list = discover_unique_services(
+        DATASET_TABLES[base_table]["parquet_dir"],
+        args.service_col,
+        use_cache=not args.no_service_cache,
+        refresh=args.refresh_service_cache,
     )
-    all_services_list = sorted(all_services_df[args.service_col].to_list())
     print(f"Total unique services: {len(all_services_list)}")
 
     if args.max_services and len(all_services_list) > args.max_services:

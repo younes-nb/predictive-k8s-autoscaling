@@ -9,6 +9,7 @@ class Paths:
     PARQUET_ROOT: str = "/dataset/parquet"
     RAW_MSRESOURCE: str = "/dataset/raw/msresource"
     PARQUET_MSRESOURCE: str = "/dataset/parquet/msresource"
+    SERVICE_CACHE_FILE: str = "/dataset/parquet/.service_cache.json"
     RAW_NODE: str = "/dataset/raw/node"
     PARQUET_NODE: str = "/dataset/parquet/node"
     RAW_MSRTMCRE: str = "/dataset/raw/msrtmcre"

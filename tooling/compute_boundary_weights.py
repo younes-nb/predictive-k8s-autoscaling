@@ -6,19 +6,18 @@ REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, os.pardir))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-import glob
 import json
 import argparse
 from pathlib import Path
 from typing import Dict
 
 import numpy as np
-import polars as pl
 import torch
 
 from shared.config_paths import PATHS, DATASET_TABLES
 from shared.config_training_defaults import TRAINING
 
+from preprocessing.parquet_utils import discover_unique_services
 from tooling.utils import find_shards, hist_update, hist_quantile
 
 
@@ -53,19 +52,9 @@ def main():
                 name_to_cluster = json.load(f)
 
             pq_dir = DATASET_TABLES["msresource"]["parquet_dir"]
-            all_parts = sorted(glob.glob(os.path.join(pq_dir, "*.parquet")))
-            all_services = set()
-            for p in all_parts:
-                try:
-                    all_services.update(
-                        pl.scan_parquet(p)
-                        .select("msname")
-                        .unique()
-                        .collect()["msname"]
-                        .to_list()
-                    )
-                except:
-                    continue
+            all_services = set(
+                discover_unique_services(pq_dir, "msname")
+            )
 
             sorted_names = sorted(list(all_services))
             sid_to_cluster = {
