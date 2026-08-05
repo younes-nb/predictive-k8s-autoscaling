@@ -27,7 +27,7 @@ from shared.logging_utils import setup_logging
 from shared.features import target_features_for_feature_set
 from core.dataset import ShardedWindowsDataset
 
-from training.loss import weighted_mse, per_target_loss, per_target_composite_loss
+from training.loss import weighted_mse, per_target_loss, per_target_huber_loss
 from training.train_helpers import (
     head_slice_dataset_by_pct,
     load_resume_state,
@@ -369,8 +369,8 @@ def train(args):
             return weighted_mse(preds, y, w, under_penalty=args.under_penalty)
         if args.loss_mode == "joint_mse":
             loss = nn.functional.mse_loss(preds, y)
-        elif args.loss_mode == "per_target_composite":
-            loss = per_target_composite_loss(
+        elif args.loss_mode == "per_target_huber":
+            loss = per_target_huber_loss(
                 preds, y, cpu_beta=args.huber_beta_cpu, mem_beta=args.huber_beta_mem,
                 lambda_cpu=args.loss_w_cpu, lambda_mem=args.loss_w_mem,
             )
@@ -520,19 +520,18 @@ def main():
     p.add_argument("--epochs", type=int, default=TRAINING.EPOCHS)
     p.add_argument("--grad_clip", type=float, default=TRAINING.GRAD_CLIP)
     p.add_argument("--weight_decay", type=float, default=TRAINING.WEIGHT_DECAY)
-    p.add_argument("--huber_beta_cpu", type=float, default=0.002,
-                   help="Huber beta for CPU branch in per_target_composite loss (default 0.002)")
+    p.add_argument("--huber_beta_cpu", type=float, default=0.01,
+                   help="Huber beta for CPU branch in per_target_huber loss (default 0.01)")
     p.add_argument("--huber_beta_mem", type=float, default=0.002,
-                   help="Huber beta for memory branch in per_target_composite loss (default 0.002)")
+                   help="Huber beta for memory branch in per_target_huber loss (default 0.002)")
     p.add_argument("--loss_w_cpu", type=float, default=0.5,
-                   help="Weight on CPU branch loss in per_target_composite (default 0.5)")
+                   help="Weight on CPU branch loss in per_target_huber (default 0.5)")
     p.add_argument("--loss_w_mem", type=float, default=0.5,
-                   help="Weight on memory branch loss in per_target_composite (default 0.5)")
-    p.add_argument("--under_penalty", type=float, default=TRAINING.UNDER_PENALTY)
+                   help="Weight on memory branch loss in per_target_huber (default 0.5)")
     p.add_argument(
         "--loss_mode",
         default="per_target_mse",
-        choices=["joint_mse", "per_target_mse", "per_target_mae", "per_target_composite"],
+        choices=["joint_mse", "per_target_mse", "per_target_mae", "per_target_huber"],
         help="joint_mse: MSE over all targets. per_target_*: equal-weight per target; "
              "per_target_mae uses L1 for the memory target.",
     )

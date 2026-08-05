@@ -4,10 +4,10 @@ import torch
 import torch.nn as nn
 
 
-def per_target_composite_loss(
+def per_target_huber_loss(
     preds,
     target,
-    cpu_beta: float = 0.002,
+    cpu_beta: float = 0.01,
     mem_beta: float = 0.002,
     lambda_cpu: float = 0.5,
     lambda_mem: float = 0.5,

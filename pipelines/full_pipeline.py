@@ -93,9 +93,9 @@ def main():
     ap.add_argument(
         "--loss_mode",
         default="per_target_mse",
-        choices=["joint_mse", "per_target_mse", "per_target_mae", "per_target_composite"],
+        choices=["joint_mse", "per_target_mse", "per_target_mae", "per_target_huber"],
         help="joint_mse: MSE over all targets. per_target_mae: equal-weight per target with L1 memory loss. "
-             "per_target_composite: CPU MSE + Huber/MSE composite for memory (baseline loss).",
+             "per_target_huber: per-target weighted Huber loss with independent betas (winning loss).",
     )
     ap.add_argument("--last_step_only", action=argparse.BooleanOptionalAction, default=True,
                     help="Compute loss only on the final horizon step (H-1); use --no-last_step_only "
@@ -103,13 +103,13 @@ def main():
     ap.add_argument("--weight_decay", type=float, default=None,
                     help="L2 weight decay for the optimizer (default: config)")
     ap.add_argument("--huber_beta_cpu", type=float, default=None,
-                    help="Huber beta for CPU branch in per_target_composite loss (default 0.002)")
+                    help="Huber beta for CPU branch in per_target_huber loss (default 0.01)")
     ap.add_argument("--huber_beta_mem", type=float, default=None,
-                    help="Huber beta for memory branch in per_target_composite loss (default 0.002)")
+                    help="Huber beta for memory branch in per_target_huber loss (default 0.002)")
     ap.add_argument("--loss_w_cpu", type=float, default=None,
-                    help="Weight on CPU branch loss in per_target_composite (default 0.5)")
+                    help="Weight on CPU branch loss in per_target_huber (default 0.5)")
     ap.add_argument("--loss_w_mem", type=float, default=None,
-                    help="Weight on memory branch loss in per_target_composite (default 0.5)")
+                    help="Weight on memory branch loss in per_target_huber (default 0.5)")
     ap.add_argument(
         "--train_pct",
         type=float,
