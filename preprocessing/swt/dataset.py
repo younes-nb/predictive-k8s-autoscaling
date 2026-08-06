@@ -1,12 +1,19 @@
 import argparse
+import bisect
 import glob
 import logging
 import os
+import sys
 import time
 
 import numpy as np
 import torch
 from torch.utils.data import Dataset
+
+THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, "..", ".."))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
 
 from preprocessing.swt.config import CFG as SWT_CFG, channel_dirs_for
 
@@ -48,11 +55,13 @@ class SwtDataset(Dataset):
                 "Run swt/preprocess.py first."
             )
 
+        self._x_shards = []
+        self._y_shards = []
+        self._last_shards = []
+        self._offsets = [0]
+        n_windows = 0
         n_shards = len(x_files)
-        all_X = []
-        all_y = []
-        all_last = []
-        for i, xf in enumerate(x_files):
+        for xf in x_files:
             base = os.path.basename(xf).replace(f"_X_{split}.npy", "")
             yf = os.path.join(preprocess_dir, f"{base}_y_{split}.npy")
             sf = os.path.join(preprocess_dir, f"{base}_sid_{split}.npy")
@@ -62,53 +71,48 @@ class SwtDataset(Dataset):
                 logger.warning("Missing y/sid for shard %s, skipping", base)
                 continue
 
-            X = np.load(xf)
-            y = np.load(yf)
-            last = np.load(lf) if os.path.exists(lf) else None
+            X = np.load(xf, mmap_mode="r")
+            y = np.load(yf, mmap_mode="r")
 
             if len(X) != len(y):
                 logger.warning("X/y length mismatch in shard %s, skipping", base)
                 continue
 
+            last = np.load(lf, mmap_mode="r") if os.path.exists(lf) else None
             if last is not None and len(last) != len(X):
                 logger.warning("last length mismatch in shard %s, skipping", base)
                 last = None
 
-            all_X.append(X)
-            all_y.append(y)
-            all_last.append(last)
+            self._x_shards.append(X)
+            self._y_shards.append(y)
+            self._last_shards.append(last)
+            n_windows += len(X)
+            self._offsets.append(n_windows)
 
-        if not all_X:
+        self.n_windows = n_windows
+
+        if not self._x_shards:
             logger.warning("SwtDataset[%s]: no valid windows found in %s", split, preprocess_dir)
-            self.X = torch.empty((0, self.n_channels), dtype=torch.float32)
-            if self.has_mem:
-                self.y = torch.empty((0, 2), dtype=torch.float32)
-                self.last = torch.empty((0, 2), dtype=torch.float32)
-            else:
-                self.y = torch.empty((0,), dtype=torch.float32)
-                self.last = torch.empty((0,), dtype=torch.float32)
-        else:
-            self.X = torch.from_numpy(np.concatenate(all_X, axis=0))
-            self.y = torch.from_numpy(np.concatenate(all_y, axis=0))
-            if all_last[0] is not None:
-                self.last = torch.from_numpy(np.concatenate(all_last, axis=0))
-            else:
-                if self.has_mem:
-                    self.last = torch.zeros(len(self.X), 2, dtype=torch.float32)
-                else:
-                    self.last = torch.zeros(len(self.X), dtype=torch.float32)
 
         logger.info(
-            "SwtDataset[%s]: %d windows, X=%s, y=%s from %d shards in %.1fs",
-            split, len(self.X), tuple(self.X.shape), tuple(self.y.shape),
-            n_shards, time.time() - t_start,
+            "SwtDataset[%s]: %d windows, %d channels from %d shards in %.1fs",
+            split, n_windows, self.n_channels, n_shards, time.time() - t_start,
         )
 
     def __len__(self) -> int:
-        return len(self.X)
+        return self.n_windows
 
     def __getitem__(self, idx: int):
-        return self.X[idx], self.y[idx], self.last[idx]
+        i = bisect.bisect_right(self._offsets, idx) - 1
+        local = idx - self._offsets[i]
+        x = np.array(self._x_shards[i][local], copy=True, order="C")
+        y = np.array(self._y_shards[i][local], copy=True, order="C")
+        last = self._last_shards[i]
+        if last is not None:
+            last = np.array(last[local], copy=True, order="C")
+        else:
+            last = np.zeros(2, dtype=np.float32) if self.has_mem else np.zeros((), dtype=np.float32)
+        return x, y, last
 
 
 def _smoke_check(preprocess_dir: str, split: str,
