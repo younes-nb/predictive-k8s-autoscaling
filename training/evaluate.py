@@ -205,7 +205,7 @@ def _load_test_dataset(args, ckpt_args, device, log_info, feature_set_name="cpu"
         raise ValueError(f"Unknown preprocess_approach: {preprocess_approach}")
 
 
-def _benchmark_single_sample_inference(model, accelerator, args, ckpt_args, device, log_info):
+def _prepare_benchmark_indices(args, ckpt_args, log_info):
     input_len = ckpt_args.get("input_len", PREPROCESSING.INPUT_LEN)
     horizon = ckpt_args.get("pred_horizon", PREPROCESSING.PRED_HORIZON)
     preprocess_approach = ckpt_args.get("preprocess_approach", "none")
@@ -219,7 +219,7 @@ def _benchmark_single_sample_inference(model, accelerator, args, ckpt_args, devi
     raw_ds = head_slice_dataset_by_pct(raw_ds, pct)
     if len(raw_ds) == 0:
         log_info("No raw windows found for inference latency benchmark.")
-        return
+        return None, None
 
     if n_bench <= 0:
         indices = list(range(len(raw_ds)))
@@ -243,10 +243,15 @@ def _benchmark_single_sample_inference(model, accelerator, args, ckpt_args, devi
         indices = _valid
         if not indices:
             log_info("No valid windows after filtering near-zero std; skipping benchmark.")
-            return
+            return None, None
 
-    raw_model = accelerator.unwrap_model(model)
-    raw_model.eval()
+    return raw_ds, indices
+
+
+def _run_single_sample_benchmark(raw_ds, indices, model, device, args, ckpt_args, log_info, label):
+    preprocess_approach = ckpt_args.get("preprocess_approach", "none")
+
+    model.eval()
 
     bench_workers = getattr(args, "bench_workers", 0)
     use_parallel = device.type == "cpu"
@@ -261,7 +266,7 @@ def _benchmark_single_sample_inference(model, accelerator, args, ckpt_args, devi
         with ThreadPoolExecutor(max_workers=bench_workers) as executor:
             futures = {
                 executor.submit(
-                    _benchmark_worker, idx, raw_ds, raw_model,
+                    _benchmark_worker, idx, raw_ds, model,
                     preprocess_approach, device, args,
                 ): idx
                 for idx in indices
@@ -274,12 +279,12 @@ def _benchmark_single_sample_inference(model, accelerator, args, ckpt_args, devi
     else:
         for idx in tqdm(indices, desc="Benchmark", unit="sample"):
             latencies.append(
-                _benchmark_worker(idx, raw_ds, raw_model, preprocess_approach, device, args)
+                _benchmark_worker(idx, raw_ds, model, preprocess_approach, device, args)
             )
 
     latencies = np.array(latencies)
 
-    log_info("\n=== Single-Sample Inference Latency Benchmark ===")
+    log_info(f"\n=== Single-Sample Inference Latency Benchmark ({label}) ===")
     log_info(f"Preprocessing:       {preprocess_approach}")
     log_info(f"Samples Benchmarked: {len(latencies)}")
     log_info(f"Min:     {np.min(latencies):.3f} ms")
@@ -390,9 +395,32 @@ def evaluate(args):
     model, test_loader = accelerator.prepare(model, test_loader)
 
     if accelerator.is_local_main_process:
-        _benchmark_single_sample_inference(
-            model, accelerator, args, ckpt_args, device, log_info,
-        )
+        raw_ds, bench_indices = _prepare_benchmark_indices(args, ckpt_args, log_info)
+        if raw_ds is not None:
+            raw_model = accelerator.unwrap_model(model)
+            if device.type != "cpu":
+                _run_single_sample_benchmark(
+                    raw_ds, bench_indices, raw_model, device,
+                    args, ckpt_args, log_info, label=str(device),
+                )
+                cpu_model = _build_model_from_checkpoint(
+                    checkpoint, input_size, torch.device("cpu")
+                )
+                cpu_missing, _ = cpu_model.load_state_dict(
+                    checkpoint["model_state_dict"], strict=False
+                )
+                if cpu_missing:
+                    raise RuntimeError(f"Checkpoint missing keys (cpu): {sorted(cpu_missing)[:10]}")
+                _run_single_sample_benchmark(
+                    raw_ds, bench_indices, cpu_model, torch.device("cpu"),
+                    args, ckpt_args, log_info, label="cpu",
+                )
+                del cpu_model
+            else:
+                _run_single_sample_benchmark(
+                    raw_ds, bench_indices, raw_model, device,
+                    args, ckpt_args, log_info, label="cpu",
+                )
     accelerator.wait_for_everyone()
 
     all_preds = []
