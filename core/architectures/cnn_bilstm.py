@@ -11,7 +11,7 @@ class CnnBiLSTM(nn.Module):
     def __init__(
         self,
         in_channels: int = 7,
-        input_len: int = 60,
+        input_len: int = 128,
         pred_horizon: int = 5,
         kernel_sizes: tuple = (2, 4, 8),
         conv1_out_ch: int = 32,

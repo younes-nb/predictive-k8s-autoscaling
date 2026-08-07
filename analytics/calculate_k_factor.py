@@ -43,7 +43,7 @@ def main():
     test_ds = ShardedWindowsDataset(
         args.windows_dir,
         "test",
-        ckpt_args.get("input_len", 60),
+        ckpt_args.get("input_len", 128),
         ckpt_args.get("pred_horizon", 5),
     )
 

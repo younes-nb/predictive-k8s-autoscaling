@@ -104,7 +104,7 @@ class AnchorMixer(nn.Module):
     def __init__(
         self,
         in_channels: int = 6,
-        input_len: int = 64,
+        input_len: int = 128,
         pred_horizon: int = 5,
         d_group: int = D_GROUP,
         dropout: float = 0.1,
@@ -169,7 +169,7 @@ class WaveAnchorDualMixer(nn.Module):
     def __init__(
         self,
         in_channels: int = 12,
-        input_len: int = 64,
+        input_len: int = 128,
         pred_horizon: int = 5,
         cpu_channels: int = 6,
         mem_channels: int = 6,

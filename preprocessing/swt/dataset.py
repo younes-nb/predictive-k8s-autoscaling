@@ -25,7 +25,7 @@ class SwtDataset(Dataset):
         self,
         preprocess_dir: str,
         split: str,
-        input_len: int = 60,
+        input_len: int = 128,
         pred_horizon: int = 5,
         feature_set: str = "cpu",
         swt_level: int = SWT_CFG.SWT_LEVEL,

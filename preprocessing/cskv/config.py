@@ -18,7 +18,7 @@ def set_seed(seed: int = 42) -> None:
 
 @dataclass(frozen=True)
 class CskvConfig:
-    INPUT_LEN: int = 60
+    INPUT_LEN: int = 128
 
     KERNEL_SIZES: tuple = (2, 4, 8)
     CONV1_OUT_CH: int = 32

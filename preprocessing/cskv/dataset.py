@@ -35,7 +35,7 @@ class CskvDataset(Dataset):
         self,
         preprocess_dir: str,
         split: str,
-        input_len: int = 30,
+        input_len: int = 128,
         pred_horizon: int = 1,
     ):
         assert split in ("train", "val", "test"), f"Unknown split: {split}"
