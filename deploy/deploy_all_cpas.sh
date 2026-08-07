@@ -3,7 +3,12 @@
 NAMESPACE="online-boutique"
 IMAGE="docker.io/younesnb/predictive-k8s-autoscaler:v1.0.0"
 PROMETHEUS_URL="http://prometheus-stack-kube-prom-prometheus.monitoring.svc.cluster.local:9090"
-FEATURE_SET="cpu_mem_traffic_diff"
+FEATURE_SET="cpu_mem_both"
+MODEL_TYPE="wadm"
+PREPROCESS_APPROACH="swt"
+WINDOW_SIZE="64"
+SWT_LEVEL="5"
+MEM_SWT_LEVEL="5"
 RESIDUAL="true"
 
 for DEPLOYMENT in $(kubectl get deployments -n $NAMESPACE -o jsonpath='{.items[*].metadata.name}'); do
@@ -32,6 +37,16 @@ spec:
             value: "${PROMETHEUS_URL}"
           - name: FEATURE_SET
             value: "${FEATURE_SET}"
+          - name: MODEL_TYPE
+            value: "${MODEL_TYPE}"
+          - name: PREPROCESS_APPROACH
+            value: "${PREPROCESS_APPROACH}"
+          - name: WINDOW_SIZE
+            value: "${WINDOW_SIZE}"
+          - name: SWT_LEVEL
+            value: "${SWT_LEVEL}"
+          - name: MEM_SWT_LEVEL
+            value: "${MEM_SWT_LEVEL}"
           - name: RESIDUAL
             value: "${RESIDUAL}"
           - name: TARGET_DEPLOYMENT

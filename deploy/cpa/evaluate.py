@@ -29,7 +29,6 @@ def main():
         use_prediction = data.get("use_prediction", False)
         current_load = float(data.get("current_load", 0.0))
         current_memory = float(data.get("current_memory", 0.0))
-        current_mcr = float(data.get("current_mcr", 0.0))
         current_replicas = int(data.get("current_replicas", 1))
         metric_duration = float(data.get("duration_seconds", 0.0))
 
@@ -42,10 +41,13 @@ def main():
         now = time.time()
         mode = "Reactive"
         predicted_load_final = 0.0
+        predicted_memory_final = 0.0
 
-        if use_prediction and len(history_metrics) >= 60:
+        if use_prediction and len(history_metrics) >= config.WINDOW_SIZE:
             x_tensor = (
-                torch.tensor(history_metrics).float().view(1, 60, config.INPUT_SIZE)
+                torch.tensor(history_metrics)
+                .float()
+                .view(1, config.WINDOW_SIZE, config.INPUT_SIZE)
             )
             model = utils.load_model()
 
@@ -56,7 +58,11 @@ def main():
                     raw_preds[0] if isinstance(raw_preds, tuple) else raw_preds
                 )
                 preds_tensor = torch.clamp(preds_tensor, min=0.0, max=1.0)
-                predicted_load_final = preds_tensor[0, -1].item()
+                if config.NUM_TARGETS > 1:
+                    predicted_load_final = preds_tensor[0, -1, 0].item()
+                    predicted_memory_final = preds_tensor[0, -1, 1].item()
+                else:
+                    predicted_load_final = preds_tensor[0, -1].item()
 
             if config.THRESHOLD_MODE == "static":
                 adaptive_threshold = config.BASE_THRESHOLD
@@ -81,13 +87,19 @@ def main():
         safe_threshold = adaptive_threshold if adaptive_threshold > 0 else 0.75
 
         if is_predicting:
-            load_to_scale_on = predicted_load_final
+            cpu_to_scale = predicted_load_final
+            mem_to_scale = predicted_memory_final
         else:
-            load_to_scale_on = current_load
+            cpu_to_scale = current_load
+            mem_to_scale = current_memory
 
-        raw_desired = int(
-            np.ceil(current_replicas * (load_to_scale_on / safe_threshold))
-        )
+        desired_cpu = current_replicas * (cpu_to_scale / safe_threshold)
+        raw_desired = int(np.ceil(desired_cpu))
+
+        if config.NUM_TARGETS > 1:
+            desired_mem = current_replicas * (mem_to_scale / safe_threshold)
+            raw_desired = max(raw_desired, int(np.ceil(desired_mem)))
+
         raw_desired = max(config.MIN_REPLICAS, min(config.MAX_REPLICAS, raw_desired))
 
         rec_history.append({"time": now, "replicas": raw_desired})
@@ -109,8 +121,8 @@ def main():
             utils.get_tehran_time(),
             current_load,
             current_memory,
-            current_mcr,
             predicted_load_final,
+            predicted_memory_final,
             adaptive_threshold,
             model_sigma,
             total_inference_time,
@@ -119,7 +131,7 @@ def main():
 
         output = {
             "targetReplicas": int(final_rec),
-            "logs": f"Mode: {mode}, Load: {load_to_scale_on:.2f}, Pred: {predicted_load_final:.2f}, Thr: {adaptive_threshold:.3f}, Sigma: {model_sigma:.4f}",
+            "logs": f"Mode: {mode}, Load: {cpu_to_scale:.2f}, Mem: {mem_to_scale:.2f}, PredLoad: {predicted_load_final:.2f}, PredMem: {predicted_memory_final:.2f}, Thr: {adaptive_threshold:.3f}, Sigma: {model_sigma:.4f}",
         }
         sys.stdout.write(json.dumps(output))
 

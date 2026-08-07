@@ -4,6 +4,10 @@ import numpy as np
 import config
 import utils
 
+if config.PREPROCESS_APPROACH == "swt":
+    from preprocessing.swt.config import CFG as SWT_CFG
+    from preprocessing.swt.decomposition import decompose_window
+
 
 def smooth_window(window_data, window_size=5):
     if not window_data or len(window_data) < window_size:
@@ -64,21 +68,9 @@ def get_aggregated_window():
             mem_query, start_time, end_time, grid_timestamps
         )
 
-    mcr_buckets = None
-    if "traffic" in config.FEATURE_SET:
-        mcr_query = (
-            f"sum(rate(istio_requests_total{{destination_workload='{config.DEPLOYMENT}', "
-            f"destination_workload_namespace='{config.NAMESPACE}', reporter='destination'}}[1m])) by (pod)"
-        )
-        mcr_buckets = fetch_metric_buckets(
-            mcr_query, start_time, end_time, grid_timestamps
-        )
-
     final_window = []
     use_prediction = True
     prev_cpu = None
-    prev_mcr = None
-    epsilon = 1e-6
 
     for i in range(config.WINDOW_SIZE):
         c_vals = cpu_buckets[i]
@@ -87,15 +79,11 @@ def get_aggregated_window():
         has_mem = ("mem" not in config.FEATURE_SET) or bool(
             mem_buckets and mem_buckets[i]
         )
-        has_mcr = ("traffic" not in config.FEATURE_SET) or bool(
-            mcr_buckets and mcr_buckets[i]
-        )
 
-        if not (has_cpu and has_mem and has_mcr):
+        if not (has_cpu and has_mem):
             use_prediction = False
-            final_window.append([0.0] * config.INPUT_SIZE)
+            final_window.append([0.0] * config.RAW_INPUT_SIZE)
             prev_cpu = 0.0
-            prev_mcr = 0.0
         else:
             avg_cpu = sum(c_vals) / len(c_vals)
             avg_cpu = max(0.0, min(1.0, avg_cpu))
@@ -109,27 +97,31 @@ def get_aggregated_window():
                 avg_mem = max(0.0, min(1.0, avg_mem))
                 row.append(avg_mem)
 
-            if "traffic" in config.FEATURE_SET:
-                avg_mcr = sum(mcr_buckets[i]) / len(mcr_buckets[i])
-                if config.FEATURE_SET == "cpu_mem_traffic_diff":
-                    log_ret = (
-                        np.log(avg_mcr + epsilon) - np.log(prev_mcr + epsilon)
-                        if prev_mcr is not None
-                        else 0.0
-                    )
-                    row.append(np.tanh(log_ret))
-                else:
-                    row.append(avg_mcr)
-                prev_mcr = avg_mcr
-            elif config.FEATURE_SET.endswith("_diff"):
+            if config.FEATURE_SET.endswith("_diff"):
                 row.append(np.clip(cpu_diff, -1.0, 1.0))
 
             final_window.append(row)
 
     if use_prediction:
-        final_window = smooth_window(final_window, window_size=5)
+        if config.PREPROCESS_APPROACH == "swt":
+            final_window = apply_swt(final_window)
+        else:
+            final_window = smooth_window(final_window, window_size=5)
 
     return final_window, use_prediction
+
+
+def apply_swt(window_data):
+    arr = np.asarray(window_data, dtype=np.float32)
+    channels = []
+    for col in range(arr.shape[1]):
+        signal = arr[:, col]
+        dec = decompose_window(signal, SWT_CFG)
+        if dec is None:
+            dec = np.zeros((SWT_CFG.SWT_LEVEL + 1, len(signal)), dtype=np.float32)
+            dec[0] = signal
+        channels.append(dec.T)
+    return np.concatenate(channels, axis=1).tolist()
 
 
 def main():
@@ -162,15 +154,6 @@ def main():
     current_mem = float(res_mem[0]["value"][1]) if res_mem else 0.0
     current_mem = max(0.0, min(1.0, current_mem))
 
-    q_mcr = (
-        f"sum(rate(istio_requests_total{{destination_workload='{config.DEPLOYMENT}', "
-        f"destination_workload_namespace='{config.NAMESPACE}', reporter='destination'}}[1m]))"
-    )
-    res_mcr = utils.query_prometheus(q_mcr)
-
-    current_mcr_total = float(res_mcr[0]["value"][1]) if res_mcr else 0.0
-    current_mcr = current_mcr_total / current_replicas if current_replicas > 0 else 0.0
-
     t_end = time.time()
 
     print(
@@ -180,7 +163,6 @@ def main():
                 "use_prediction": use_prediction,
                 "current_load": current_load,
                 "current_memory": current_mem,
-                "current_mcr": current_mcr,
                 "current_replicas": current_replicas,
                 "duration_seconds": t_end - t_start,
             }

@@ -9,8 +9,12 @@ DEPLOYMENT = os.getenv(
     "HCPA_RESOURCE_NAME", os.getenv("TARGET_DEPLOYMENT", "fallback-name")
 )
 FEATURE_SET = os.getenv("FEATURE_SET", "cpu")
+MODEL_TYPE = os.getenv("MODEL_TYPE") or None
+PREPROCESS_APPROACH = os.getenv("PREPROCESS_APPROACH", "none")
+SWT_LEVEL = int(os.getenv("SWT_LEVEL", "5"))
+MEM_SWT_LEVEL = int(os.getenv("MEM_SWT_LEVEL", "5"))
 THRESHOLD_MODE = os.getenv("THRESHOLD_MODE", "adaptive")
-WINDOW_SIZE = 60
+WINDOW_SIZE = int(os.getenv("WINDOW_SIZE", "64" if PREPROCESS_APPROACH == "swt" else "60"))
 STABILIZATION_WINDOW_SECONDS = 300
 UNCERTAINTY_INTERVAL_SECONDS = 600
 BASE_THRESHOLD = 0.75
@@ -18,14 +22,18 @@ MIN_THRESHOLD = 0.60
 MIN_REPLICAS = 1
 MAX_REPLICAS = 20
 MODEL_PATH = "/app/model.pt"
-if FEATURE_SET == "cpu_mem_traffic_diff":
-    INPUT_SIZE = 3
-elif FEATURE_SET in ["cpu_mem_traffic", "cpu_mem_diff"]:
-    INPUT_SIZE = 3
-elif FEATURE_SET in ["cpu_mem", "cpu_diff"]:
-    INPUT_SIZE = 2
+if FEATURE_SET in ["cpu_mem", "cpu_diff", "cpu_mem_both"]:
+    RAW_INPUT_SIZE = 2
 else:
-    INPUT_SIZE = 1
+    RAW_INPUT_SIZE = 1
+
+if PREPROCESS_APPROACH == "swt":
+    INPUT_SIZE = (SWT_LEVEL + 1) + (
+        (MEM_SWT_LEVEL + 1) if FEATURE_SET == "cpu_mem_both" else 0
+    )
+else:
+    INPUT_SIZE = RAW_INPUT_SIZE
+NUM_TARGETS = 2 if FEATURE_SET == "cpu_mem_both" else 1
 HIDDEN_SIZE = 128
 NUM_LAYERS = 3
 DROPOUT = 0.3

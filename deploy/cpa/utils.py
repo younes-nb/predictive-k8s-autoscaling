@@ -6,7 +6,7 @@ import sys
 import torch
 import requests
 import config
-from core.models import RNNForecaster
+import model_builder
 
 
 def query_prometheus(query, is_range=False, params=None):
@@ -61,19 +61,14 @@ def save_state(history, prev_threshold, prev_sigma, last_time):
 
 
 def load_model():
-    model = RNNForecaster(
-        input_size=config.INPUT_SIZE,
-        hidden_size=config.HIDDEN_SIZE,
-        num_layers=config.NUM_LAYERS,
-        dropout=config.DROPOUT,
-        horizon=config.HORIZON,
-        rnn_type=config.RNN_TYPE,
-        bidirectional=config.BIDIRECTIONAL,
-    )
     if os.path.exists(config.MODEL_PATH):
         checkpoint = torch.load(config.MODEL_PATH, map_location="cpu")
+        model_type = config.MODEL_TYPE or checkpoint.get("model_type", "lstm")
+        model = model_builder.build_model(checkpoint, model_type)
         state_dict = checkpoint.get("model_state_dict", checkpoint)
         model.load_state_dict(state_dict)
+    else:
+        model = model_builder.build_model({}, config.MODEL_TYPE or "lstm")
     model.eval()
     return model
 
@@ -84,7 +79,10 @@ def get_adaptive_threshold(model, x_window):
     with torch.no_grad():
         preds = model(x_batch)
 
-    sigma = preds[:, -1].std().item()
+    if config.NUM_TARGETS > 1:
+        sigma = preds[:, -1, 0].std().item()
+    else:
+        sigma = preds[:, -1].std().item()
     raw_threshold = config.BASE_THRESHOLD - (config.K_FACTOR * sigma)
     clamped_threshold = max(config.MIN_THRESHOLD, raw_threshold)
 
@@ -110,8 +108,8 @@ def log_metrics(
     timestamp,
     curr_cpu,
     curr_mem,
-    curr_mcr,
     pred_cpu,
+    pred_mem,
     threshold,
     sigma,
     inf_time,
@@ -120,9 +118,9 @@ def log_metrics(
     if not os.path.exists(config.EXPERIMENT_METRICS_FILE):
         with open(config.EXPERIMENT_METRICS_FILE, "w") as f:
             f.write(
-                "timestamp,cpu,memory,mcr,pred_cpu,threshold,sigma,inference_time_s,replicas\n"
+                "timestamp,cpu,memory,pred_cpu,pred_mem,threshold,sigma,inference_time_s,replicas\n"
             )
     with open(config.EXPERIMENT_METRICS_FILE, "a") as f:
         f.write(
-            f"{timestamp},{curr_cpu:.4f},{curr_mem:.4f},{curr_mcr:.4f},{pred_cpu:.4f},{threshold:.4f},{sigma:.4f},{inf_time:.4f},{replicas}\n"
+            f"{timestamp},{curr_cpu:.4f},{curr_mem:.4f},{pred_cpu:.4f},{pred_mem:.4f},{threshold:.4f},{sigma:.4f},{inf_time:.4f},{replicas}\n"
         )
