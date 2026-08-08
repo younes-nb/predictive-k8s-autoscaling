@@ -153,7 +153,7 @@ def _load_test_dataset(args, ckpt_args, device, log_info, feature_set_name="cpu"
 
     if preprocess_approach in ("none", "smoothing"):
         test_ds = ShardedWindowsDataset(
-            args.windows_dir, split, input_len, horizon, use_weights=False
+            args.windows_dir, split, input_len, horizon
         )
         total_test_samples = len(test_ds)
         test_ds = head_slice_dataset_by_pct(test_ds, pct)
@@ -212,7 +212,7 @@ def _prepare_benchmark_indices(args, ckpt_args, log_info):
     n_bench = getattr(args, "inference_bench_samples", 0)
 
     raw_ds = ShardedWindowsDataset(
-        args.windows_dir, getattr(args, "split", "test"), input_len, horizon, use_weights=False,
+        args.windows_dir, getattr(args, "split", "test"), input_len, horizon,
     )
     split = getattr(args, "split", "test")
     pct = getattr(args, "val_pct", None) if split == "val" else getattr(args, "test_pct", 100.0)
@@ -469,7 +469,7 @@ def evaluate(args):
     split = args.split
     pct = args.val_pct if split == "val" else args.test_pct
     raw_test_ds = ShardedWindowsDataset(
-        args.windows_dir, split, input_len, horizon, use_weights=False
+        args.windows_dir, split, input_len, horizon
     )
     raw_test_ds = head_slice_dataset_by_pct(raw_test_ds, pct)
     raw_second_lasts = []

@@ -26,14 +26,7 @@ class TrainingDefaults:
     LR_MIN: float = 1e-6
     GRAD_CLIP: float = 1.0
     WEIGHT_DECAY: float = 1e-4
-    UNDER_PENALTY: float = 1
     SEED: int = 42
-    USE_WEIGHTS: bool = False
-    GAMMA: float = 20.0
-    DELTA: float = 0.08
-    THETA_MODE: str = "adaptive"
-    THETA_BASE: float = 0.75
-    THETA_MIN: float = 0.60
     BIDIRECTIONAL: bool = False
     PROBABILISTIC_TRAINING: bool = False
     QUANTILES: Tuple[float, ...] = (0.5, 0.9, 0.95)

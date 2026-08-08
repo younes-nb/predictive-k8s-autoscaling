@@ -13,7 +13,6 @@ from shared.config_paths import PATHS
 from shared.config_training_defaults import TRAINING
 from shared.features import target_features_for_feature_set
 from shared.logging_utils import setup_logging
-from .loss import weighted_mse
 from .train_helpers import load_resume_state, save_resume_state
 
 
@@ -859,19 +858,13 @@ def run_sfoa_search(
                 epoch_batches = 0
                 epoch_start = _time.time()
                 for batch in train_loader:
-                    if args.use_weights:
-                        x, y, w, _ = batch
-                    else:
-                        x, y, _ = batch
-                        w = None
+                    x, y, _ = batch
                     x = x.to(eval_device)
                     y = y.to(eval_device)
-                    if w is not None:
-                        w = w.to(eval_device)
 
                     optimizer.zero_grad()
                     preds = model(x)
-                    loss = weighted_mse(preds, y, w, under_penalty=args.under_penalty)
+                    loss = torch.nn.functional.mse_loss(preds, y)
                     loss.backward()
                     optimizer.step()
                     epoch_loss_sum += loss.item() * x.size(0)
@@ -885,17 +878,11 @@ def run_sfoa_search(
                 val_cnt = 0
                 with torch.no_grad():
                     for batch in val_loader:
-                        if args.use_weights:
-                            xb, yb, wb, _ = batch
-                        else:
-                            xb, yb, _ = batch
-                            wb = None
+                        xb, yb, _ = batch
                         xb = xb.to(eval_device)
                         yb = yb.to(eval_device)
-                        if wb is not None:
-                            wb = wb.to(eval_device)
                         preds = model(xb)
-                        vloss = weighted_mse(preds, yb, wb, under_penalty=args.under_penalty)
+                        vloss = torch.nn.functional.mse_loss(preds, yb)
                         val_accum += vloss.item() * xb.size(0)
                         val_cnt += xb.size(0)
                 avg_val = val_accum / max(1, val_cnt)

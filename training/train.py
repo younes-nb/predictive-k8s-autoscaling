@@ -27,7 +27,7 @@ from shared.logging_utils import setup_logging
 from shared.features import target_features_for_feature_set
 from core.dataset import ShardedWindowsDataset
 
-from training.loss import weighted_mse, per_target_loss, per_target_huber_loss
+from training.loss import per_target_loss, per_target_huber_loss
 from training.train_helpers import (
     head_slice_dataset_by_pct,
     load_resume_state,
@@ -49,10 +49,10 @@ def _build_model(model_type, input_size, args, num_targets, hyperparams, device)
 def _load_datasets(args, preprocess_approach):
     if preprocess_approach in ("none", "smoothing"):
         train_ds = ShardedWindowsDataset(
-            args.windows_dir, "train", args.input_len, args.pred_horizon, args.use_weights
+            args.windows_dir, "train", args.input_len, args.pred_horizon
         )
         val_ds = ShardedWindowsDataset(
-            args.windows_dir, "val", args.input_len, args.pred_horizon, args.use_weights
+            args.windows_dir, "val", args.input_len, args.pred_horizon
         )
         return train_ds, val_ds
     elif preprocess_approach == "swt":
@@ -361,12 +361,10 @@ def train(args):
     if accelerator.mixed_precision == "fp16":
         log_info("AMP (FP16 mixed precision) enabled via Accelerate")
 
-    def _compute_loss(model, preds, y, w):
+    def _compute_loss(model, preds, y):
         if args.last_step_only:
             preds = preds[..., -1:, :]
             y = y[..., -1:, :]
-        if w is not None:
-            return weighted_mse(preds, y, w, under_penalty=args.under_penalty)
         if args.loss_mode == "joint_mse":
             loss = nn.functional.mse_loss(preds, y)
         elif args.loss_mode == "per_target_huber":
@@ -388,17 +386,13 @@ def train(args):
         train_samples_seen = 0
 
         for batch in train_loader:
-            if args.use_weights:
-                x, y, w, _ = batch
-            else:
-                x, y, _ = batch
-                w = None
+            x, y, _ = batch
 
             optimizer.zero_grad()
 
             with accelerator.autocast():
                 preds = model(x)
-                loss = _compute_loss(model, preds, y, w)
+                loss = _compute_loss(model, preds, y)
 
             accelerator.backward(loss)
 
@@ -420,14 +414,10 @@ def train(args):
 
         with torch.no_grad():
             for batch in val_loader:
-                if args.use_weights:
-                    x, y, w, _ = batch
-                else:
-                    x, y, _ = batch
-                    w = None
+                x, y, _ = batch
 
                 preds = model(x)
-                loss = _compute_loss(model, preds, y, w)
+                loss = _compute_loss(model, preds, y)
 
                 val_loss_accum += loss.item() * x.size(0)
                 val_samples_seen += x.size(0)
@@ -513,7 +503,6 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--windows_dir", required=True)
     p.add_argument("--checkpoint_path", default=DEFAULT_CHECKPOINT_PATH)
-    p.add_argument("--use_weights", action="store_true")
     p.add_argument("--input_len", type=int, default=PREPROCESSING.INPUT_LEN)
     p.add_argument("--pred_horizon", type=int, default=PREPROCESSING.PRED_HORIZON)
     p.add_argument("--batch_size", type=int, default=TRAINING.BATCH_SIZE)

@@ -159,7 +159,6 @@ def run_smoke_test(args):
     dataset = ShardedWindowsDataset(
         args.windows_dir, "train",
         args.input_len, args.pred_horizon,
-        use_weights=False,
     )
     total = len(dataset)
     n_samples = min(args.num_samples, total)

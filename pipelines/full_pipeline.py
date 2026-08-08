@@ -35,7 +35,6 @@ def main():
     ap.add_argument("--input_len", type=int, default=PREPROCESSING.INPUT_LEN,
         help="Sliding window input length; changing it auto-rebuilds the windows (default: %(default)s)")
     ap.add_argument("--skip_preprocessing", action="store_true", help="Skip the entire preprocessing pipeline (fetch+ingest+windows)")
-    ap.add_argument("--skip_weights", action="store_true", help="Skip boundary weight computation")
     ap.add_argument("--skip_training", action="store_true", help="Skip the training step")
     ap.add_argument("--skip_testing", action="store_true", help="Skip the evaluation step")
     ap.add_argument("--cpu", action="store_true", help="Force CPU execution (no GPU/DDP)")
@@ -150,9 +149,6 @@ def main():
     )
     train_script = os.path.join(REPO_ROOT, "training", "train.py")
     test_script = os.path.join(REPO_ROOT, "training", "evaluate.py")
-    compute_weights_script = os.path.join(
-        REPO_ROOT, "tooling", "compute_boundary_weights.py"
-    )
 
     total_times = {}
 
@@ -200,18 +196,6 @@ def main():
 
         total_times["preprocessing"] = run(cmd_pre, "Step 1: Preprocessing")
 
-    if TRAINING.USE_WEIGHTS and not args.skip_training and not args.skip_weights:
-        base_cmd_w = [
-            sys.executable,
-            compute_weights_script,
-            "--windows_dir",
-            args.windows_dir,
-            "--theta_mode",
-            TRAINING.THETA_MODE,
-        ]
-        run(base_cmd_w + ["--split", "train"], "Weights Generation (Train)")
-        run(base_cmd_w + ["--split", "val"], "Weights Generation (Val)")
-
     current_checkpoint = os.path.join(os.path.dirname(PATHS.CHECKPOINT_PATH), args.model_name)
 
     gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 0
@@ -253,8 +237,6 @@ def main():
         if args.preprocess_approach in ("swt", "cskv"):
             cmd_train.extend(["--preprocess_dir", os.path.join(args.windows_dir, args.preprocess_approach)])
             cmd_train.extend(["--dataset_workers", str(args.dataset_workers)])
-        if TRAINING.USE_WEIGHTS:
-            cmd_train.append("--use_weights")
         cmd_train.extend(["--hyperparam_optimizer", args.hyperparam_optimizer])
         cmd_train.extend(["--sfoa_train_pct", str(args.sfoa_train_pct)])
         cmd_train.extend(["--sfoa_val_pct", str(args.sfoa_val_pct)])

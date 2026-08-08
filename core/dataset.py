@@ -1,4 +1,3 @@
-import logging
 import os
 import glob
 import re
@@ -16,12 +15,10 @@ class ShardedWindowsDataset(Dataset):
         split: str,
         input_len: int,
         horizon: int,
-        use_weights: bool = False,
     ):
         self.input_len = int(input_len)
         self.horizon = int(horizon)
         self.split = split
-        self.use_weights = use_weights
         self.shard_paths = []
         self.valid_indices = []
 
@@ -38,7 +35,6 @@ class ShardedWindowsDataset(Dataset):
             base = x_path.replace(f"_X_{split}.npy", "")
             y_path = base + f"_y_{split}.npy"
             sid_path = base + f"_sid_{split}.npy"
-            w_path = base + f"_w_{split}.npy"
 
             if not (os.path.exists(y_path) and os.path.exists(sid_path)):
                 continue
@@ -51,15 +47,7 @@ class ShardedWindowsDataset(Dataset):
                     "X": x_path,
                     "y": y_path,
                     "sid": sid_path,
-                    "w": (
-                        w_path
-                        if (self.use_weights and os.path.exists(w_path))
-                        else None
-                    ),
                 }
-
-                if self.use_weights and shard_info["w"] is None:
-                    print(f"[WARN] Weights requested but file missing: {w_path}")
 
                 shard_list_idx = len(self.shard_paths)
                 self.shard_paths.append(shard_info)
@@ -96,11 +84,6 @@ class ShardedWindowsDataset(Dataset):
                 "X": np.load(paths["X"], mmap_mode="r"),
                 "y": np.load(paths["y"], mmap_mode="r"),
                 "sid": np.load(paths["sid"], mmap_mode="r"),
-                "w": (
-                    np.load(paths["w"], mmap_mode="r")
-                    if paths["w"] is not None
-                    else None
-                ),
             }
 
         cache = self._mmap_cache[shard_list_idx]
@@ -115,17 +98,5 @@ class ShardedWindowsDataset(Dataset):
         x_t = torch.from_numpy(x_arr).float()
         y_t = torch.from_numpy(y_arr).float()
         sid_t = torch.tensor(sid_val, dtype=torch.long)
-
-        if cache["w"] is not None:
-            try:
-                w_val = float(cache["w"][local_idx])
-                w_t = torch.tensor(w_val, dtype=torch.float32)
-                return x_t, y_t, w_t, sid_t
-            except (EOFError, ValueError) as exc:
-                logging.warning(
-                    "[Dataset] Weight read failed for shard %s: %s. "
-                    "Falling back to uniform weight=1.0.",
-                    paths.get("w", "?"), exc,
-                )
 
         return x_t, y_t, sid_t
