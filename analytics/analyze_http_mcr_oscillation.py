@@ -137,9 +137,10 @@ def query_mcrtmcr_oscillations(con, mcr_dir, window_ms, in_clause,
     return df
 
 
-def query_winner_mcr(con, mcr_dir, msname, win_start, win_end, g_min, g_max):
+def query_winner_mcr(con, mcr_dir, msname, win_start, win_end):
     """Query per-minute http_mcr for the winner window, min-max normalized to
-    [0, 1] using the global g_min/g_max over all candidates' windows."""
+    [0, 1] using the winner window's own min/max so the saved CSV always spans
+    the full [0, 1] range (min value -> 0.0, max value -> 1.0)."""
     sql = f"""
         SELECT msname, timestamp, SUM(http_mcr) AS http_mcr_raw
         FROM read_parquet('{mcr_dir}/*.parquet')
@@ -149,11 +150,13 @@ def query_winner_mcr(con, mcr_dir, msname, win_start, win_end, g_min, g_max):
         ORDER BY timestamp
     """
     df = con.execute(sql).df()
-    span = g_max - g_min
+    win_min = df["http_mcr_raw"].min()
+    win_max = df["http_mcr_raw"].max()
+    span = win_max - win_min
     if span > 0:
-        df["http_mcr"] = ((df["http_mcr_raw"] - g_min) / span).clip(0.0, 1.0)
+        df["http_mcr"] = ((df["http_mcr_raw"] - win_min) / span).clip(0.0, 1.0)
     else:
-        df["http_mcr"] = 0.0
+        df["http_mcr"] = 0.5
     return df[["msname", "timestamp", "http_mcr"]]
 
 
@@ -309,8 +312,7 @@ def main():
 
     # http_mcr table for the winner window
     mcr_full = query_winner_mcr(con, mcr_dir, winner["msname"],
-                                winner["win_start"], winner["win_end"],
-                                winner["g_min"], winner["g_max"])
+                                winner["win_start"], winner["win_end"])
     mcr_full.to_csv(f"{out_dir}/http_mcr_{winner['msname']}_{ts_str}.csv",
                     index=False)
 
