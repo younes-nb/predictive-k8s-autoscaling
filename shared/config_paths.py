@@ -46,7 +46,7 @@ DATASET_TABLES: Dict[str, Dict[str, Any]] = {
     },
     "msrtmcre": {
         "prefix": "MCRRTUpdate/MCRRTUpdate",
-        "ratio_min": 30,
+        "ratio_min": 3,
         "raw_dir": PATHS.RAW_MSRTMCRE,
         "parquet_dir": PATHS.PARQUET_MSRTMCRE,
         "key_cols": ["msname", "msinstanceid"],

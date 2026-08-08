@@ -1,8 +1,13 @@
 import argparse
+import glob
+import json
 import os
 import sys
 import tarfile
 import subprocess
+
+import polars as pl
+import pyarrow.parquet as pq
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, os.pardir))
@@ -14,6 +19,7 @@ from config.defaults import (
     PREPROCESSING,
     FEATURE_SETS,
     tables_for_feature_set,
+    table_to_raw_columns,
 )
 
 BASE_URL = "https://aliopentrace.oss-cn-beijing.aliyuncs.com/v2022MicroservicesTraces"
@@ -92,6 +98,145 @@ def extract_and_remove_tar(tar_path: str, out_dir: str) -> bool:
         return False
 
 
+def recover_orphan_parts(out_dir, raw_dir):
+    """Recover completed-but-unrenamed flush temps left by a crash.
+
+    A flush writes a temp parquet, drops a ``.tmp.done`` sentinel, deletes the
+    source CSVs, then renames the temp to its final name. If the process dies
+    in between, the temp (with sentinel) is promoted to its final part and any
+    remaining covered CSVs are removed; temps without a sentinel are discarded
+    (their CSVs are still present and will be re-ingested).
+    """
+    for done in glob.glob(os.path.join(out_dir, "part-*.parquet.tmp.done")):
+        try:
+            with open(done) as fh:
+                meta = json.load(fh)
+        except Exception:
+            print(f"[WARN] Unreadable sentinel {done}; leaving it.", file=sys.stderr)
+            continue
+
+        tmp = done[:-5]
+        final = os.path.join(out_dir, f"part-{meta['part']:05d}.parquet")
+        if os.path.exists(tmp) and not os.path.exists(final):
+            os.rename(tmp, final)
+            print(f"Recovered {tmp} -> {final}")
+
+        for name in meta.get("csvs", []):
+            p = os.path.join(raw_dir, name)
+            if os.path.exists(p):
+                try:
+                    os.remove(p)
+                except OSError as e:
+                    print(f"[WARN] Failed to remove {p}: {e}", file=sys.stderr)
+
+        try:
+            os.remove(done)
+        except OSError as e:
+            print(f"[WARN] Failed to remove {done}: {e}", file=sys.stderr)
+
+    for tmp in glob.glob(os.path.join(out_dir, "part-*.parquet.tmp")):
+        try:
+            os.remove(tmp)
+            print(f"Removed incomplete temp {tmp}")
+        except OSError as e:
+            print(f"[WARN] Failed to remove {tmp}: {e}", file=sys.stderr)
+
+
+def flush_batch(pending, out_dir, part_num, key_cols, feature_cols, scan_kwargs):
+    """Read pending CSV chunks into one Parquet part (zstd), then delete the CSVs.
+
+    Returns the next part index. Crash-safe: the part is written to a temp file
+    guarded by a ``.tmp.done`` sentinel and only renamed once the CSVs are gone,
+    so a re-run can recover or discard it without losing or duplicating data.
+    """
+    pending = [f for f in pending if os.path.exists(f)]
+    if not pending:
+        return part_num
+
+    tmp_path = os.path.join(out_dir, f"part-{part_num:05d}.parquet.tmp")
+    done_path = tmp_path + ".done"
+    out_path = os.path.join(out_dir, f"part-{part_num:05d}.parquet")
+
+    needed = {"timestamp", *key_cols, *feature_cols}
+    select_cols = ["timestamp", "timestamp_dt", *key_cols, *feature_cols]
+    select_cols = list(dict.fromkeys(select_cols))
+    sort_cols = ["timestamp_dt", *key_cols]
+
+    writer = None
+    total_rows = 0
+    processed = []
+
+    try:
+        for f in pending:
+            print(f"  Ingesting {f} ...")
+            try:
+                df = pl.read_csv(f, **scan_kwargs)
+
+                missing = needed - set(df.columns)
+                if missing:
+                    print(f"  [WARN] missing columns {sorted(list(missing))}; skipping.")
+                    continue
+
+                df = df.drop_nulls(subset=list(needed))
+                if df.height == 0:
+                    continue
+
+                df = df.with_columns(
+                    pl.from_epoch(pl.col("timestamp") / 1000, time_unit="s").alias(
+                        "timestamp_dt"
+                    )
+                )
+                df = df.select(select_cols).sort(sort_cols)
+                if df.height == 0:
+                    continue
+
+                table = df.to_arrow()
+                if writer is None:
+                    writer = pq.ParquetWriter(
+                        tmp_path, table.schema, compression="zstd"
+                    )
+                writer.write_table(table)
+                total_rows += table.num_rows
+                processed.append(f)
+            except Exception as e:
+                bad = f + ".bad"
+                print(f"[ERROR] Failed to ingest {f}: {e}", file=sys.stderr)
+                try:
+                    os.rename(f, bad)
+                except OSError:
+                    pass
+                raise RuntimeError(
+                    f"Batch flush failed on {f}; moved to {bad}. Re-run the fetch "
+                    "to resume; the incomplete temp will be discarded and this "
+                    "file retried."
+                ) from e
+    finally:
+        if writer is not None:
+            writer.close()
+
+    if not processed:
+        return part_num
+
+    with open(done_path, "w") as fh:
+        json.dump(
+            {"part": part_num, "csvs": [os.path.basename(f) for f in processed]},
+            fh,
+        )
+
+    for f in processed:
+        try:
+            os.remove(f)
+        except OSError as e:
+            print(f"[WARN] Failed to remove {f}: {e}", file=sys.stderr)
+
+    os.rename(tmp_path, out_path)
+    os.remove(done_path)
+
+    print(f"  Wrote {total_rows} rows -> {out_path}")
+
+    return part_num + 1
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="Download and extract Alibaba v2022 trace chunks."
@@ -107,6 +252,18 @@ def main():
         "--tables",
         nargs="+",
         default=None,
+    )
+    ap.add_argument(
+        "--ingest",
+        action="store_true",
+        help="Stream-consume mode: flush batches of extracted CSVs to Parquet "
+        "and delete them, so raw files never accumulate.",
+    )
+    ap.add_argument(
+        "--batch_size",
+        type=int,
+        default=20,
+        help="Chunks per Parquet flush when --ingest is set.",
     )
 
     args = ap.parse_args()
@@ -143,6 +300,44 @@ def main():
         print(f"indices: {start_idx} .. {end_idx}")
         print(f"raw_dir: {raw_dir}")
 
+        key_cols = list(cfg.get("key_cols", []))
+        pending = []
+        part_num = 0
+        scan_kwargs = dict(
+            low_memory=True,
+            try_parse_dates=False,
+            infer_schema_length=50000,
+        )
+
+        if args.ingest:
+            out_dir = cfg["parquet_dir"]
+            os.makedirs(out_dir, exist_ok=True)
+            recover_orphan_parts(out_dir, raw_dir)
+            feature_cols = table_to_raw_columns(args.feature_set).get(table, [])
+            if not feature_cols:
+                print(
+                    f"ERROR: feature_set='{args.feature_set}' provides no columns for "
+                    f"table='{table}'. Pass a feature set that includes columns for "
+                    f"this table.",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+            existing_parts = glob.glob(os.path.join(out_dir, "part-*.parquet"))
+            part_num = len(existing_parts)
+            print(
+                f"Ingest mode ON: existing parts={len(existing_parts)}, "
+                f"next part idx={part_num}, batch_size={args.batch_size}"
+            )
+            print(f"Ingesting columns: {feature_cols}")
+
+        def maybe_flush():
+            nonlocal pending, part_num
+            if args.ingest and len(pending) >= args.batch_size:
+                part_num = flush_batch(
+                    pending, out_dir, part_num, key_cols, feature_cols, scan_kwargs
+                )
+                pending = []
+
         for idx in range(start_idx, end_idx + 1):
             url = f"{BASE_URL}/{cfg['prefix']}_{idx}.tar.gz"
             tar_path = os.path.join(raw_dir, f"{table}_{idx}.tar.gz")
@@ -152,7 +347,13 @@ def main():
 
             marker_path = os.path.join(raw_dir, f"{table}_{idx}.extracted")
 
-            if os.path.exists(expected_csv_path) or os.path.exists(marker_path):
+            if os.path.exists(expected_csv_path):
+                if args.ingest:
+                    pending.append(expected_csv_path)
+                    maybe_flush()
+                continue
+
+            if os.path.exists(marker_path):
                 print(
                     f"Data for {table} (idx {idx}) already extracted. Skipping download."
                 )
@@ -168,8 +369,16 @@ def main():
             ok = extract_and_remove_tar(tar_path, raw_dir)
             if ok:
                 open(marker_path, "a").close()
+                if args.ingest:
+                    pending.append(expected_csv_path)
+                    maybe_flush()
             else:
                 continue
+
+        if args.ingest and pending:
+            part_num = flush_batch(
+                pending, out_dir, part_num, key_cols, feature_cols, scan_kwargs
+            )
 
     print("\nDone downloading and extracting.")
 
