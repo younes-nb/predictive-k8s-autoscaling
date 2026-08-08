@@ -6,6 +6,7 @@ import numpy as np
 import traceback
 import config
 import utils
+import online_correction
 
 
 def main():
@@ -33,15 +34,17 @@ def main():
         metric_duration = float(data.get("duration_seconds", 0.0))
 
         state = utils.load_state()
-        adaptive_threshold = state["prev_threshold"]
-        model_sigma = state.get("prev_sigma", 0.0)
         rec_history = state["history"]
-        last_uncertainty_time = state["last_uncertainty_time"]
 
         now = time.time()
         mode = "Reactive"
         predicted_load_final = 0.0
         predicted_memory_final = 0.0
+        delta_load = 0.0
+        delta_mem = 0.0
+
+        if config.RESIDUAL_CORRECTION:
+            online_correction.finalize(state, now, current_load, current_memory)
 
         if use_prediction and len(history_metrics) >= config.WINDOW_SIZE:
             x_tensor = (
@@ -64,27 +67,23 @@ def main():
                 else:
                     predicted_load_final = preds_tensor[0, -1].item()
 
-            if config.THRESHOLD_MODE == "static":
-                adaptive_threshold = config.BASE_THRESHOLD
-                model_sigma = 0.0
-                mode = "Predictive (Static Threshold)"
-            elif (now - last_uncertainty_time) >= config.UNCERTAINTY_INTERVAL_SECONDS:
-                adaptive_threshold, model_sigma = utils.get_adaptive_threshold(
-                    model, x_tensor
+            if config.RESIDUAL_CORRECTION:
+                online_correction.record_prediction(
+                    state, now, predicted_load_final, predicted_memory_final
                 )
-                last_uncertainty_time = now
-                mode = "Predictive (New Adaptive Threshold)"
-            else:
-                mode = "Predictive (Cached Adaptive Threshold)"
+                delta_load, delta_mem = online_correction.compute_delta(state)
+                predicted_load_final = min(1.0, predicted_load_final + delta_load)
+                if config.NUM_TARGETS > 1:
+                    predicted_memory_final = min(
+                        1.0, predicted_memory_final + delta_mem
+                    )
 
+            mode = "Predictive"
         elif use_prediction:
             mode = "Predictive (Waiting for data)"
-        else:
-            adaptive_threshold = config.BASE_THRESHOLD
-            model_sigma = 0.0
 
         is_predicting = mode.startswith("Predictive") and predicted_load_final > 0
-        safe_threshold = adaptive_threshold if adaptive_threshold > 0 else 0.75
+        safe_threshold = config.BASE_THRESHOLD
 
         if is_predicting:
             cpu_to_scale = predicted_load_final
@@ -108,11 +107,13 @@ def main():
             for x in rec_history
             if x["time"] > (now - config.STABILIZATION_WINDOW_SECONDS)
         ]
-        final_rec = raw_desired if raw_desired > current_replicas else max(window)
-
-        utils.save_state(
-            rec_history, adaptive_threshold, model_sigma, last_uncertainty_time
+        final_rec = (
+            raw_desired
+            if raw_desired > current_replicas
+            else (max(window) if window else raw_desired)
         )
+
+        utils.save_state(state)
 
         t_end_eval = time.time()
         total_inference_time = metric_duration + (t_end_eval - t_start_eval)
@@ -123,15 +124,20 @@ def main():
             current_memory,
             predicted_load_final,
             predicted_memory_final,
-            adaptive_threshold,
-            model_sigma,
+            delta_load,
+            delta_mem,
             total_inference_time,
             current_replicas,
         )
 
+        logs = (
+            f"Mode: {mode}, Load: {cpu_to_scale:.2f}, Mem: {mem_to_scale:.2f}, "
+            f"PredLoad: {predicted_load_final:.2f}, PredMem: {predicted_memory_final:.2f}, "
+            f"DeltaLoad: {delta_load:.4f}, DeltaMem: {delta_mem:.4f}"
+        )
         output = {
             "targetReplicas": int(final_rec),
-            "logs": f"Mode: {mode}, Load: {cpu_to_scale:.2f}, Mem: {mem_to_scale:.2f}, PredLoad: {predicted_load_final:.2f}, PredMem: {predicted_memory_final:.2f}, Thr: {adaptive_threshold:.3f}, Sigma: {model_sigma:.4f}",
+            "logs": logs,
         }
         sys.stdout.write(json.dumps(output))
 

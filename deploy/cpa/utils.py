@@ -7,6 +7,7 @@ import torch
 import requests
 import config
 import model_builder
+import online_correction
 
 
 def query_prometheus(query, is_range=False, params=None):
@@ -24,38 +25,28 @@ def query_prometheus(query, is_range=False, params=None):
 
 
 def load_state():
+    defaults = {
+        "history": [],
+        **online_correction.empty_state(),
+    }
     if os.path.exists(config.STATE_FILE):
         try:
             with open(config.STATE_FILE, "r") as f:
-                return json.load(f)
-        except:
+                loaded = json.load(f)
+            for k, v in defaults.items():
+                loaded.setdefault(k, v)
+            return loaded
+        except Exception:
             pass
-    return {
-        "history": [],
-        "prev_threshold": config.BASE_THRESHOLD,
-        "prev_sigma": 0.0,
-        "last_uncertainty_time": 0,
-    }
+    return defaults
 
 
-def save_state(history, prev_threshold, prev_sigma, last_time):
-    now = time.time()
-    valid_history = [
-        x
-        for x in history
-        if x["time"] > (now - config.STABILIZATION_WINDOW_SECONDS - 60)
-    ]
+def save_state(state):
+    history = state.get("history", [])[-200:]
+    payload = {**state, "history": history}
     try:
         with open(config.STATE_FILE, "w") as f:
-            json.dump(
-                {
-                    "history": valid_history,
-                    "prev_threshold": prev_threshold,
-                    "prev_sigma": prev_sigma,
-                    "last_uncertainty_time": last_time,
-                },
-                f,
-            )
+            json.dump(payload, f)
     except Exception as e:
         sys.stderr.write(f"State Save Error: {e}\n")
 
@@ -73,27 +64,11 @@ def load_model():
     return model
 
 
-def get_adaptive_threshold(model, x_window):
-    model.train()
-    x_batch = x_window.repeat(config.MC_REPEATS, 1, 1)
-    with torch.no_grad():
-        preds = model(x_batch)
-
-    if config.NUM_TARGETS > 1:
-        sigma = preds[:, -1, 0].std().item()
-    else:
-        sigma = preds[:, -1].std().item()
-    raw_threshold = config.BASE_THRESHOLD - (config.K_FACTOR * sigma)
-    clamped_threshold = max(config.MIN_THRESHOLD, raw_threshold)
-
-    return clamped_threshold, sigma
-
-
 def log_to_file(msg):
     try:
         with open("/tmp/cpa_debug.log", "a") as f:
             f.write(f"{time.ctime()} - {msg}\n")
-    except:
+    except Exception:
         pass
 
 
@@ -110,17 +85,17 @@ def log_metrics(
     curr_mem,
     pred_cpu,
     pred_mem,
-    threshold,
-    sigma,
+    delta_cpu,
+    delta_mem,
     inf_time,
     replicas,
 ):
     if not os.path.exists(config.EXPERIMENT_METRICS_FILE):
         with open(config.EXPERIMENT_METRICS_FILE, "w") as f:
             f.write(
-                "timestamp,cpu,memory,pred_cpu,pred_mem,threshold,sigma,inference_time_s,replicas\n"
+                "timestamp,cpu,memory,pred_cpu,pred_mem,delta_cpu,delta_mem,inference_time_s,replicas\n"
             )
     with open(config.EXPERIMENT_METRICS_FILE, "a") as f:
         f.write(
-            f"{timestamp},{curr_cpu:.4f},{curr_mem:.4f},{pred_cpu:.4f},{pred_mem:.4f},{threshold:.4f},{sigma:.4f},{inf_time:.4f},{replicas}\n"
+            f"{timestamp},{curr_cpu:.4f},{curr_mem:.4f},{pred_cpu:.4f},{pred_mem:.4f},{delta_cpu:.4f},{delta_mem:.4f},{inf_time:.4f},{replicas}\n"
         )

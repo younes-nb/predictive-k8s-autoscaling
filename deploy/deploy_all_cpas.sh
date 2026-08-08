@@ -10,6 +10,11 @@ WINDOW_SIZE="128"
 SWT_LEVEL="5"
 MEM_SWT_LEVEL="5"
 RESIDUAL="true"
+RESIDUAL_CORRECTION="false"
+AR_ORDER="2"
+FORGETTING_FACTOR="0.95"
+QUANTILE_ALPHA="0.9"
+RESIDUAL_WINDOW="${WINDOW_SIZE}"
 
 for DEPLOYMENT in $(kubectl get deployments -n $NAMESPACE -o jsonpath='{.items[*].metadata.name}'); do
     
@@ -49,6 +54,16 @@ spec:
             value: "${MEM_SWT_LEVEL}"
           - name: RESIDUAL
             value: "${RESIDUAL}"
+          - name: RESIDUAL_CORRECTION
+            value: "${RESIDUAL_CORRECTION}"
+          - name: AR_ORDER
+            value: "${AR_ORDER}"
+          - name: FORGETTING_FACTOR
+            value: "${FORGETTING_FACTOR}"
+          - name: QUANTILE_ALPHA
+            value: "${QUANTILE_ALPHA}"
+          - name: RESIDUAL_WINDOW
+            value: "${RESIDUAL_WINDOW}"
           - name: TARGET_DEPLOYMENT
             value: "${DEPLOYMENT}"
           - name: TARGET_NAMESPACE

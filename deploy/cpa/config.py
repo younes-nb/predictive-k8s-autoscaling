@@ -13,12 +13,9 @@ MODEL_TYPE = os.getenv("MODEL_TYPE") or None
 PREPROCESS_APPROACH = os.getenv("PREPROCESS_APPROACH", "none")
 SWT_LEVEL = int(os.getenv("SWT_LEVEL", "5"))
 MEM_SWT_LEVEL = int(os.getenv("MEM_SWT_LEVEL", "5"))
-THRESHOLD_MODE = os.getenv("THRESHOLD_MODE", "adaptive")
 WINDOW_SIZE = int(os.getenv("WINDOW_SIZE", "128"))
 STABILIZATION_WINDOW_SECONDS = 300
-UNCERTAINTY_INTERVAL_SECONDS = 600
 BASE_THRESHOLD = 0.75
-MIN_THRESHOLD = 0.60
 MIN_REPLICAS = 1
 MAX_REPLICAS = 20
 MODEL_PATH = "/app/model.pt"
@@ -41,7 +38,17 @@ HORIZON = 5
 RNN_TYPE = "lstm"
 BIDIRECTIONAL = False
 RESIDUAL = os.getenv("RESIDUAL", "false").lower() == "true"
-MC_REPEATS = 25
-K_FACTOR = 20.0
-STATE_FILE = "/tmp/cpa_state.json"
-EXPERIMENT_METRICS_FILE = "/tmp/experiment_metrics.csv"
+
+RESIDUAL_CORRECTION = os.getenv("RESIDUAL_CORRECTION", "false").lower() == "true"
+AR_ORDER = int(os.getenv("AR_ORDER", "2"))
+FORGETTING_FACTOR = float(os.getenv("FORGETTING_FACTOR", "0.95"))
+QUANTILE_ALPHA = float(os.getenv("QUANTILE_ALPHA", "0.9"))
+RESIDUAL_WINDOW = int(os.getenv("RESIDUAL_WINDOW", str(WINDOW_SIZE)))
+RLS_P0 = float(os.getenv("RLS_P0", "1.0"))
+AR_ORDER = max(1, min(AR_ORDER, RESIDUAL_WINDOW))
+RESIDUAL_WINDOW = max(AR_ORDER, RESIDUAL_WINDOW)
+
+STATE_FILE = os.getenv("STATE_FILE", "/tmp/cpa_state.json")
+EXPERIMENT_METRICS_FILE = os.getenv(
+    "EXPERIMENT_METRICS_FILE", "/tmp/experiment_metrics.csv"
+)
