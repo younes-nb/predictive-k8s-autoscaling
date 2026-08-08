@@ -37,7 +37,7 @@ from training.sfoa_search import run_sfoa_search
 from training.sfoa_configs import get_config
 
 
-MODEL_TYPES = ("lstm", "gru", "bilstm", "bigrue", "cnn_bilstm", "wadm")
+MODEL_TYPES = ("lstm", "gru", "bilstm", "bigrue", "cnn_bilstm", "dlinear", "wadm")
 PREPROCESS_APPROACHES = ("none", "smoothing", "swt", "cskv")
 
 

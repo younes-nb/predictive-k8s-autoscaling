@@ -2,6 +2,7 @@ from types import SimpleNamespace
 from .rnn import SEARCH_SPACE as RNN_SEARCH_SPACE, DEFAULTS as RNN_DEFAULTS, build_model as rnn_build_model
 from .bilstm import SEARCH_SPACE as BILSTM_SEARCH_SPACE, DEFAULTS as BILSTM_DEFAULTS, build_model as bilstm_build_model
 from .cnn_bilstm import SEARCH_SPACE as CNN_SEARCH_SPACE, DEFAULTS as CNN_DEFAULTS, build_model as cnn_build_model
+from .dlinear import SEARCH_SPACE as DLIN_SEARCH_SPACE, DEFAULTS as DLIN_DEFAULTS, build_model as dlin_build_model
 from .waveanchor_dualmixer import SEARCH_SPACE as WADM_SEARCH_SPACE, DEFAULTS as WADM_DEFAULTS, build_model as wadm_build_model
 
 _REGISTRY = {
@@ -10,6 +11,7 @@ _REGISTRY = {
     "bilstm":     ("bilstm", BILSTM_SEARCH_SPACE, BILSTM_DEFAULTS, bilstm_build_model),
     "bigrue":     ("rnn", RNN_SEARCH_SPACE, RNN_DEFAULTS, rnn_build_model),
     "cnn_bilstm": ("cnn_bilstm", CNN_SEARCH_SPACE, CNN_DEFAULTS, cnn_build_model),
+    "dlinear": ("dlinear", DLIN_SEARCH_SPACE, DLIN_DEFAULTS, dlin_build_model),
     "wadm": ("wadm", WADM_SEARCH_SPACE, WADM_DEFAULTS, wadm_build_model),
     "freq_mixer_dualpath": ("wadm", WADM_SEARCH_SPACE, WADM_DEFAULTS, wadm_build_model),
 }
