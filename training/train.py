@@ -47,12 +47,21 @@ def _build_model(model_type, input_size, args, num_targets, hyperparams, device)
 
 
 def _load_datasets(args, preprocess_approach):
-    if preprocess_approach in ("none", "smoothing"):
+    if preprocess_approach == "none":
         train_ds = ShardedWindowsDataset(
             args.windows_dir, "train", args.input_len, args.pred_horizon
         )
         val_ds = ShardedWindowsDataset(
             args.windows_dir, "val", args.input_len, args.pred_horizon
+        )
+        return train_ds, val_ds
+    elif preprocess_approach == "smoothing":
+        smooth_dir = getattr(args, "preprocess_dir", None) or args.windows_dir
+        train_ds = ShardedWindowsDataset(
+            smooth_dir, "train", args.input_len, args.pred_horizon
+        )
+        val_ds = ShardedWindowsDataset(
+            smooth_dir, "val", args.input_len, args.pred_horizon
         )
         return train_ds, val_ds
     elif preprocess_approach == "swt":
@@ -555,7 +564,7 @@ def main():
         choices=list(PREPROCESS_APPROACHES),
         help="Preprocessing approach used: none, smoothing, swt, cskv",
     )
-    p.add_argument("--preprocess_dir", default=None, help="Decomposition output dir (for swt/cskv)")
+    p.add_argument("--preprocess_dir", default=None, help="Preprocessing output dir (for smoothing/swt/cskv)")
     p.add_argument("--dataset_workers", type=int, default=0, help="Workers for swt/cskv dataset loading")
     p.add_argument("--swt_level", type=int, default=None, help="SWT level for CPU (swt only, default: config)")
     p.add_argument("--mem_swt_level", type=int, default=None, help="SWT level for memory (swt only, default: config)")

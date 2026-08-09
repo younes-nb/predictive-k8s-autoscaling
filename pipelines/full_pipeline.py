@@ -234,7 +234,7 @@ def main():
             "--input_len",
             str(args.input_len),
         ]
-        if args.preprocess_approach in ("swt", "cskv"):
+        if args.preprocess_approach in ("swt", "cskv", "smoothing"):
             cmd_train.extend(["--preprocess_dir", os.path.join(args.windows_dir, args.preprocess_approach)])
             cmd_train.extend(["--dataset_workers", str(args.dataset_workers)])
         cmd_train.extend(["--hyperparam_optimizer", args.hyperparam_optimizer])
@@ -290,8 +290,10 @@ def main():
             "--input_len",
             str(args.input_len),
         ]
-        if args.preprocess_approach in ("swt", "cskv"):
+        if args.preprocess_approach in ("swt", "cskv", "smoothing"):
             cmd_test.extend(["--preprocess_dir", os.path.join(args.windows_dir, args.preprocess_approach)])
+        if args.preprocess_approach == "smoothing":
+            cmd_test.extend(["--smoothing_window", str(args.smooth_window)])
         if args.cpu:
             cmd_test.append("--cpu")
         cmd_test.extend(["--test_pct", str(args.test_pct)])

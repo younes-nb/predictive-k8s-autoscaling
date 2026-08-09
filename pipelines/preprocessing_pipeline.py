@@ -127,10 +127,12 @@ def main():
 
     if not args.skip_preprocessing_approach:
         if args.preprocess_approach == "smoothing":
+            smooth_out = os.path.join(args.windows_dir, "smoothing")
             cmd_smooth = [
                 sys.executable, smooth_script,
                 "--windows_dir", args.windows_dir,
-                "--smooth_window", str(args.smooth_window),
+                "--out_dir", smooth_out,
+                "--smoothing_window", str(args.smooth_window),
             ]
             run(cmd_smooth, "Step 3b: Smoothing")
         elif args.preprocess_approach == "swt":

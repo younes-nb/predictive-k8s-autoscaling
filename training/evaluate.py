@@ -54,7 +54,8 @@ def _preprocess_raw_window(x_np, preprocess_approach, args=None):
         return x_np
     elif preprocess_approach == "smoothing":
         from preprocessing.smooth_windows import smooth_array
-        return smooth_array(x_np, window_size=5)
+        window_size = getattr(args, "smoothing_window", 5) if args is not None else 5
+        return smooth_array(x_np, window_size=window_size)
     elif preprocess_approach == "swt":
         from dataclasses import replace
         from preprocessing.swt.decomposition import decompose_window
@@ -151,9 +152,27 @@ def _load_test_dataset(args, ckpt_args, device, log_info, feature_set_name="cpu"
     model_type = ckpt_args.get("model_type", "lstm")
     preprocess_approach = ckpt_args.get("preprocess_approach", "none")
 
-    if preprocess_approach in ("none", "smoothing"):
+    if preprocess_approach == "none":
         test_ds = ShardedWindowsDataset(
             args.windows_dir, split, input_len, horizon
+        )
+        total_test_samples = len(test_ds)
+        test_ds = head_slice_dataset_by_pct(test_ds, pct)
+        log_info(f"{split.capitalize()} samples (Total): {total_test_samples}")
+        log_info(
+            f"{split.capitalize()} samples (Used):  {len(test_ds)}/{total_test_samples} "
+            f"({float(pct):g}%)"
+        )
+        if len(test_ds) > 0:
+            first_x, *_ = test_ds[0]
+            input_size = first_x.shape[-1]
+        else:
+            input_size = 1
+        return test_ds, input_size
+    elif preprocess_approach == "smoothing":
+        smooth_dir = getattr(args, "preprocess_dir", None) or args.windows_dir
+        test_ds = ShardedWindowsDataset(
+            smooth_dir, split, input_len, horizon
         )
         total_test_samples = len(test_ds)
         test_ds = head_slice_dataset_by_pct(test_ds, pct)
@@ -532,7 +551,8 @@ def main():
         choices=["test", "val"],
         help="Which split to evaluate on (default: %(default)s)",
     )
-    p.add_argument("--preprocess_dir", default=None, help="Decomposition output dir (for swt/cskv)")
+    p.add_argument("--preprocess_dir", default=None, help="Preprocessing output dir (for smoothing/swt/cskv)")
+    p.add_argument("--smoothing_window", type=int, default=5, help="Moving average window size (for 'smoothing' approach)")
     p.add_argument("--seed", type=int, default=TRAINING.SEED, help="Random seed for reproducibility")
     p.add_argument(
         "--inference_bench_samples", type=int, default=1000,
