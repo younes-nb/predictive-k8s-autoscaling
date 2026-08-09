@@ -22,7 +22,7 @@ warnings.filterwarnings(
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 
 from accelerate import Accelerator, InitProcessGroupKwargs
 from tqdm import tqdm
@@ -144,6 +144,19 @@ def _build_model_from_checkpoint(checkpoint, input_size, device):
     return cfg.build_model(hyperparams, input_size, SimpleNamespace(**ckpt_args), num_targets, device)
 
 
+def _filter_near_constant_windows(ds, target_idxs):
+    valid = []
+    for i in range(len(ds)):
+        x, *_ = ds[i]
+        x_np = x.numpy()
+        if any(np.std(x_np[:, f].astype(np.float64)) < 1e-12 for f in target_idxs):
+            continue
+        valid.append(i)
+    if len(valid) == len(ds):
+        return ds
+    return Subset(ds, valid)
+
+
 def _load_test_dataset(args, ckpt_args, device, log_info, feature_set_name="cpu"):
     split = getattr(args, "split", "test")
     pct = getattr(args, "val_pct", None) if split == "val" else getattr(args, "test_pct", 100.0)
@@ -152,10 +165,15 @@ def _load_test_dataset(args, ckpt_args, device, log_info, feature_set_name="cpu"
     model_type = ckpt_args.get("model_type", "lstm")
     preprocess_approach = ckpt_args.get("preprocess_approach", "none")
 
+    target_features = target_features_for_feature_set(feature_set_name)
+    feature_names = feature_names_for_feature_set(feature_set_name)
+    target_idxs_in_features = [feature_names.index(f) for f in target_features]
+
     if preprocess_approach == "none":
         test_ds = ShardedWindowsDataset(
             args.windows_dir, split, input_len, horizon
         )
+        test_ds = _filter_near_constant_windows(test_ds, target_idxs_in_features)
         total_test_samples = len(test_ds)
         test_ds = head_slice_dataset_by_pct(test_ds, pct)
         log_info(f"{split.capitalize()} samples (Total): {total_test_samples}")
@@ -174,6 +192,7 @@ def _load_test_dataset(args, ckpt_args, device, log_info, feature_set_name="cpu"
         test_ds = ShardedWindowsDataset(
             smooth_dir, split, input_len, horizon
         )
+        test_ds = _filter_near_constant_windows(test_ds, target_idxs_in_features)
         total_test_samples = len(test_ds)
         test_ds = head_slice_dataset_by_pct(test_ds, pct)
         log_info(f"{split.capitalize()} samples (Total): {total_test_samples}")
@@ -487,18 +506,25 @@ def evaluate(args):
     horizon = ckpt_args.get("pred_horizon", PREPROCESSING.PRED_HORIZON)
     split = args.split
     pct = args.val_pct if split == "val" else args.test_pct
-    raw_test_ds = ShardedWindowsDataset(
-        args.windows_dir, split, input_len, horizon
-    )
-    raw_test_ds = head_slice_dataset_by_pct(raw_test_ds, pct)
-    raw_second_lasts = []
-    for idx in range(len(raw_test_ds)):
-        x_raw, *_ = raw_test_ds[idx]
-        x_np = x_raw.numpy()
-        if any(np.std(x_np[:, f].astype(np.float64)) < 1e-12 for f in target_idxs_in_features):
-            continue
-        raw_second_lasts.append(x_np[-2, :])
-    y_second_last_all = np.stack(raw_second_lasts, axis=0)
+    if preprocess_approach in ("none", "smoothing"):
+        second_lasts = []
+        for idx in range(len(test_ds)):
+            x_win, *_ = test_ds[idx]
+            second_lasts.append(x_win.numpy()[-2, :])
+        y_second_last_all = np.stack(second_lasts, axis=0)
+    else:
+        raw_test_ds = ShardedWindowsDataset(
+            args.windows_dir, split, input_len, horizon
+        )
+        raw_test_ds = head_slice_dataset_by_pct(raw_test_ds, pct)
+        raw_second_lasts = []
+        for idx in range(len(raw_test_ds)):
+            x_raw, *_ = raw_test_ds[idx]
+            x_np = x_raw.numpy()
+            if any(np.std(x_np[:, f].astype(np.float64)) < 1e-12 for f in target_idxs_in_features):
+                continue
+            raw_second_lasts.append(x_np[-2, :])
+        y_second_last_all = np.stack(raw_second_lasts, axis=0)
     if y_second_last_all.ndim == 1:
         y_second_last_all = y_second_last_all[:, np.newaxis]
 
