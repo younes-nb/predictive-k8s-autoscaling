@@ -115,6 +115,8 @@ def query_mcrtmcr_oscillations(con, mcr_dir, window_ms, in_clause,
         final AS (
             SELECT l.msname,
                    STDDEV((l.http_mcr_sum - s.g_min) / NULLIF(s.g_max - s.g_min, 0)) AS oscillation,
+                   AVG(l.http_mcr_sum) AS avg_mcr,
+                   STDDEV(l.http_mcr_sum) AS std_mcr,
                    MIN(l.timestamp) AS win_start,
                    MAX(l.timestamp) AS win_end,
                    COUNT(*) AS n_points,
@@ -128,8 +130,8 @@ def query_mcrtmcr_oscillations(con, mcr_dir, window_ms, in_clause,
             CROSS JOIN stats s
             GROUP BY l.msname
         )
-        SELECT msname, oscillation, win_start, win_end, n_points, n_nonzero,
-               g_min, g_max, max_ts, test_len, n_rows
+        SELECT msname, oscillation, avg_mcr, std_mcr, win_start, win_end,
+               n_points, n_nonzero, g_min, g_max, max_ts, test_len, n_rows
         FROM final
         ORDER BY oscillation DESC
     """
@@ -220,10 +222,11 @@ def plot_timeseries(df_mcr: pd.DataFrame, df_res: pd.DataFrame,
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Find the microservice with the highest http_mcr oscillation over "
-        "the last N hours of its data -- restricted to the model's TEST split as "
-        "defined by build_windows.py -- and plot its http_mcr plus CPU/memory "
-        "utilization for that window."
+        description="Find the microservice with the highest http_mcr oscillation "
+        "over the last N hours of its data -- restricted to the model's TEST "
+        "split as defined by build_windows.py -- ranked by --score (oscillation, "
+        "avg mcr, or both), and plot its http_mcr plus CPU/memory utilization "
+        "for that window."
     )
     parser.add_argument("--parquet_dir", type=str, default=None,
                         help="Root containing msrtmcre/ and msresource/ subdirs. "
@@ -233,6 +236,12 @@ def parse_args():
     parser.add_argument("--out_dir", type=str, default=Paths.ANALYTICS_OUT_DIR)
     parser.add_argument("--window_hours", type=float, default=DEFAULT_WINDOW_HOURS)
     parser.add_argument("--min_points_ratio", type=float, default=DEFAULT_MIN_POINTS_RATIO)
+    parser.add_argument("--score", type=str, default="both",
+                        choices=["oscillation", "mcr", "both"],
+                        help="Ranking score for the winner: 'oscillation' = highest "
+                             "normalized std (old behavior, may pick a low-load "
+                             "window), 'mcr' = highest average http_mcr, 'both' = "
+                             "product of oscillation and normalized avg_mcr.")
     parser.add_argument("--train_frac", type=float, default=PREPROCESSING.TRAIN_FRAC)
     parser.add_argument("--val_frac", type=float, default=PREPROCESSING.VAL_FRAC)
     parser.add_argument("--test_start_ms", type=int, default=TEST_START_MS)
@@ -240,17 +249,39 @@ def parse_args():
 
 
 def print_eval_results(df: pd.DataFrame) -> None:
-    cols = ["msname", "oscillation", "win_start", "win_end", "n_points", "n_nonzero",
-            "g_min", "g_max", "max_ts", "test_len", "n_rows"]
+    cols = ["msname", "oscillation", "avg_mcr", "std_mcr", "win_start", "win_end",
+            "n_points", "n_nonzero", "g_min", "g_max", "max_ts", "test_len", "n_rows"]
     show = df.head(20).copy()
     for _, r in show.iterrows():
         print(f"{r['msname']:<12} {r['oscillation']:>7.3f} "
+              f"avg={r['avg_mcr']:>9.3g} std={r['std_mcr']:>9.3g} "
               f"start={datetime.fromtimestamp(r['win_start']/1000):%Y-%m-%d %H:%M} "
               f"end={datetime.fromtimestamp(r['win_end']/1000):%Y-%m-%d %H:%M} "
               f"pts={int(r['n_points']):>3d} nz={int(r['n_nonzero']):>3d} "
               f"g=[{r['g_min']:.3g},{r['g_max']:.3g}] "
               f"test_len={int(r['test_len']):>4d} n_rows={int(r['n_rows']):>6d}")
     print()
+
+
+def compute_score(df: pd.DataFrame, mode: str) -> pd.DataFrame:
+    """Rank candidates by a score. `oscillation` is the std of the window's
+    min-max-normalized http_mcr (shape only, unitless); `avg_mcr` is the raw
+    average load over the window. Rank by:
+      * oscillation: current behavior (highest normalized std).
+      * mcr:         highest average load.
+      * both:        product of oscillation and min-max-normalized avg_mcr, so
+                     a window must be both oscillating AND carry meaningful load.
+    """
+    df = df.copy()
+    if mode == "oscillation":
+        df["score"] = df["oscillation"]
+    elif mode == "mcr":
+        df["score"] = df["avg_mcr"]
+    else:
+        span = df["avg_mcr"].max() - df["avg_mcr"].min()
+        mcr_norm = ((df["avg_mcr"] - df["avg_mcr"].min()) / span) if span > 0 else 0.0
+        df["score"] = df["oscillation"] * mcr_norm
+    return df.sort_values("score", ascending=False)
 
 
 def main():
@@ -292,6 +323,7 @@ def main():
     log("Filtering candidates...")
     valid = df.dropna(subset=["oscillation"])
     valid = valid[valid["n_points"] >= max(1, int(expected * args.min_points_ratio))]
+    valid = compute_score(valid, args.score)
     print_eval_results(valid)
 
     if valid.empty:
@@ -300,7 +332,8 @@ def main():
 
     winner = valid.iloc[0]
     log(f"Winner: {winner['msname']} "
-        f"(oscillation={winner['oscillation']:.3f}, window "
+        f"(score={winner['score']:.3f}, oscillation={winner['oscillation']:.3f}, "
+        f"avg_mcr={winner['avg_mcr']:.3g}, window "
         f"{datetime.fromtimestamp(winner['win_start']/1000):%Y-%m-%d %H:%M} -> "
         f"{datetime.fromtimestamp(winner['win_end']/1000):%Y-%m-%d %H:%M}, "
         f"test_len={int(winner['test_len'])} min, max_ts="
