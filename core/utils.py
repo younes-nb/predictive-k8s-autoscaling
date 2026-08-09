@@ -32,5 +32,8 @@ def moving_average(a: np.ndarray, window: int):
         return a
     if window > n:
         window = n
+    pad_size = window // 2
+    padded = np.pad(a, (pad_size, pad_size), mode="edge")
     kernel = np.ones(window, dtype=a.dtype) / float(window)
-    return np.convolve(a, kernel, mode="same")
+    out = np.convolve(padded, kernel, mode="valid")
+    return out[:n]

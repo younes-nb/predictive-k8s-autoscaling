@@ -144,7 +144,7 @@ def _build_model_from_checkpoint(checkpoint, input_size, device):
     return cfg.build_model(hyperparams, input_size, SimpleNamespace(**ckpt_args), num_targets, device)
 
 
-def _filter_near_constant_windows(ds, target_idxs):
+def _near_constant_valid_indices(ds, target_idxs):
     valid = []
     for i in range(len(ds)):
         x, *_ = ds[i]
@@ -152,6 +152,11 @@ def _filter_near_constant_windows(ds, target_idxs):
         if any(np.std(x_np[:, f].astype(np.float64)) < 1e-12 for f in target_idxs):
             continue
         valid.append(i)
+    return valid
+
+
+def _filter_near_constant_windows(ds, target_idxs):
+    valid = _near_constant_valid_indices(ds, target_idxs)
     if len(valid) == len(ds):
         return ds
     return Subset(ds, valid)
@@ -189,10 +194,14 @@ def _load_test_dataset(args, ckpt_args, device, log_info, feature_set_name="cpu"
         return test_ds, input_size
     elif preprocess_approach == "smoothing":
         smooth_dir = getattr(args, "preprocess_dir", None) or args.windows_dir
-        test_ds = ShardedWindowsDataset(
+        smooth_ds = ShardedWindowsDataset(
             smooth_dir, split, input_len, horizon
         )
-        test_ds = _filter_near_constant_windows(test_ds, target_idxs_in_features)
+        raw_ds = ShardedWindowsDataset(
+            args.windows_dir, split, input_len, horizon
+        )
+        valid = _near_constant_valid_indices(raw_ds, target_idxs_in_features)
+        test_ds = Subset(smooth_ds, valid) if len(valid) < len(smooth_ds) else smooth_ds
         total_test_samples = len(test_ds)
         test_ds = head_slice_dataset_by_pct(test_ds, pct)
         log_info(f"{split.capitalize()} samples (Total): {total_test_samples}")
@@ -507,10 +516,19 @@ def evaluate(args):
     split = args.split
     pct = args.val_pct if split == "val" else args.test_pct
     if preprocess_approach in ("none", "smoothing"):
+        raw_ref = ShardedWindowsDataset(
+            args.windows_dir, split, input_len, horizon
+        )
+        valid = _near_constant_valid_indices(raw_ref, target_idxs_in_features)
+        raw_ref = Subset(raw_ref, valid) if len(valid) < len(raw_ref) else raw_ref
+        raw_ref = head_slice_dataset_by_pct(raw_ref, pct)
+        last_lasts = []
         second_lasts = []
-        for idx in range(len(test_ds)):
-            x_win, *_ = test_ds[idx]
-            second_lasts.append(x_win.numpy()[-2, :])
+        for idx in range(len(raw_ref)):
+            x_np = raw_ref[idx][0].numpy()
+            last_lasts.append(x_np[-1, :])
+            second_lasts.append(x_np[-2, :])
+        y_last_all = np.stack(last_lasts, axis=0)
         y_second_last_all = np.stack(second_lasts, axis=0)
     else:
         raw_test_ds = ShardedWindowsDataset(
@@ -527,6 +545,8 @@ def evaluate(args):
         y_second_last_all = np.stack(raw_second_lasts, axis=0)
     if y_second_last_all.ndim == 1:
         y_second_last_all = y_second_last_all[:, np.newaxis]
+    if y_last_all.ndim == 1:
+        y_last_all = y_last_all[:, np.newaxis]
 
     log_info("\n=== Inference Summary ===")
     log_info(f"Model: {model_type}")
