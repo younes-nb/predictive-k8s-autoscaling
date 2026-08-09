@@ -63,17 +63,17 @@ def main():
         default=PREPROCESSING.MAX_SERVICES,
         help="Limit number of services for faster testing (0 = all)",
     )
-    ap.add_argument("--wadm_cnn_kernels", type=int, nargs="+", default=None,
-                    help="GroupCNN kernel sizes for wadm (ablation; default (3,5))")
-    ap.add_argument("--wadm_group_blocks", type=int, default=None,
-                    help="Group MixerBlocks per group for wadm (ablation; default 3, 0 disables)")
-    ap.add_argument("--wadm_d_group", type=int, default=None,
-                    help="CPU group hidden dim for wadm (ablation; default 64)")
-    ap.add_argument("--wadm_mem_d_group", type=int, default=None,
-                    help="Memory group hidden dim for wadm (ablation; default 24)")
-    ap.add_argument("--wadm_pool_head_dim", type=int, default=None,
-                    help="Pooled-MLP head dim for wadm (ablation; default 128)")
-    ap.add_argument("--wadm_cpu_recon", action=argparse.BooleanOptionalAction, default=True,
+    ap.add_argument("--dpam_cnn_kernels", type=int, nargs="+", default=None,
+                    help="MultiKernelConv1D kernel sizes for dpam (ablation; default (3,5))")
+    ap.add_argument("--dpam_group_blocks", type=int, default=None,
+                    help="Group MixerBlocks per group for dpam (ablation; default 3, 0 disables)")
+    ap.add_argument("--dpam_d_group", type=int, default=None,
+                    help="CPU group hidden dim for dpam (ablation; default 64)")
+    ap.add_argument("--dpam_mem_d_group", type=int, default=None,
+                    help="Memory group hidden dim for dpam (ablation; default 24)")
+    ap.add_argument("--dpam_pool_head_dim", type=int, default=None,
+                    help="Pooled-MLP head dim for dpam (ablation; default 128)")
+    ap.add_argument("--dpam_cpu_recon", action=argparse.BooleanOptionalAction, default=True,
                     help="Level-correction MLP on CPU branch (ablation; default on)")
     ap.add_argument(
         "--preprocess_approach",
@@ -84,8 +84,8 @@ def main():
     ap.add_argument(
         "--model_type",
         default="lstm",
-        choices=["lstm", "gru", "bilstm", "bigrue", "cnn_bilstm", "dlinear", "wadm"],
-        help="Model architecture: lstm/gru (unidirectional), bilstm/bigrue (bidirectional), cnn_bilstm, dlinear (linear decomposition baseline), wadm (WaveAnchorDualMixer)",
+        choices=["lstm", "gru", "bilstm", "bigrue", "cnn_bilstm", "dlinear", "dpam"],
+        help="Model architecture: lstm/gru (unidirectional), bilstm/bigrue (bidirectional), cnn_bilstm, dlinear (linear decomposition baseline), dpam (DualPathAnchorMixer)",
     )
     ap.add_argument("--smooth_window", type=int, default=5, help="Moving average window size for 'smoothing' approach (default: %(default)s)")
     ap.add_argument("--dataset_workers", type=int, default=0, help="Dataloader workers for swt/cskv datasets (default: %(default)s)")
@@ -266,15 +266,15 @@ def main():
                 cmd_train.extend(["--swt_level", str(args.swt_level)])
             if args.mem_swt_level is not None:
                 cmd_train.extend(["--mem_swt_level", str(args.mem_swt_level)])
-        for attr in ("wadm_cnn_kernels", "wadm_group_blocks", "wadm_d_group", "wadm_mem_d_group", "wadm_pool_head_dim"):
+        for attr in ("dpam_cnn_kernels", "dpam_group_blocks", "dpam_d_group", "dpam_mem_d_group", "dpam_pool_head_dim"):
             val = getattr(args, attr, None)
             if val is not None:
                 vals = val if isinstance(val, (list, tuple)) else [val]
                 cmd_train.extend([f"--{attr}"] + [str(v) for v in vals])
-        if args.wadm_cpu_recon:
-            cmd_train.append("--wadm_cpu_recon")
+        if args.dpam_cpu_recon:
+            cmd_train.append("--dpam_cpu_recon")
         else:
-            cmd_train.append("--no-wadm_cpu_recon")
+            cmd_train.append("--no-dpam_cpu_recon")
 
         total_times["training"] = run(cmd_train, "Step 2: Training")
 

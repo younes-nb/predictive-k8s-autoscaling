@@ -61,9 +61,9 @@ def build_cnn_bilstm(checkpoint, model_type):
     )
 
 
-def build_wadm(checkpoint, model_type):
+def build_dpam(checkpoint, model_type):
     from core.architectures.waveanchor_dualmixer import (
-        WaveAnchorDualMixer,
+        DualPathAnchorMixer,
         N_GROUP_BLOCKS,
         D_GROUP,
         MEM_D_GROUP,
@@ -82,26 +82,26 @@ def build_wadm(checkpoint, model_type):
             swt_level = SWT_CFG.SWT_LEVEL
         if mem_swt_level is None:
             mem_swt_level = SWT_CFG.MEM_SWT_LEVEL
-    kernels = _get(ckpt_args, hyperparams, "wadm_cnn_kernels", None)
+    kernels = _get(ckpt_args, hyperparams, "dpam_cnn_kernels", None)
     if kernels is None:
         kernels = (3, 5)
-    n_group_blocks = _get(ckpt_args, hyperparams, "wadm_group_blocks", None)
+    n_group_blocks = _get(ckpt_args, hyperparams, "dpam_group_blocks", None)
     if n_group_blocks is None:
         n_group_blocks = N_GROUP_BLOCKS
-    d_group = _get(ckpt_args, hyperparams, "wadm_d_group", None)
+    d_group = _get(ckpt_args, hyperparams, "dpam_d_group", None)
     if d_group is None:
         d_group = D_GROUP
-    mem_d_group = _get(ckpt_args, hyperparams, "wadm_mem_d_group", None)
+    mem_d_group = _get(ckpt_args, hyperparams, "dpam_mem_d_group", None)
     if mem_d_group is None:
         mem_d_group = MEM_D_GROUP
-    pool_head_dim = _get(ckpt_args, hyperparams, "wadm_pool_head_dim", None)
+    pool_head_dim = _get(ckpt_args, hyperparams, "dpam_pool_head_dim", None)
     if pool_head_dim is None:
         pool_head_dim = POOL_HEAD_DIM
-    cpu_recon = _get(ckpt_args, hyperparams, "wadm_cpu_recon", None)
+    cpu_recon = _get(ckpt_args, hyperparams, "dpam_cpu_recon", None)
     if cpu_recon is None:
         cpu_recon = True
 
-    return WaveAnchorDualMixer(
+    return DualPathAnchorMixer(
         in_channels=_input_size(checkpoint, ckpt_args, hyperparams),
         input_len=_get(ckpt_args, hyperparams, "input_len", config.WINDOW_SIZE),
         pred_horizon=_get(ckpt_args, hyperparams, "pred_horizon", config.HORIZON),
@@ -124,7 +124,7 @@ BUILDERS = {
     "bilstm": build_rnn,
     "bigrue": build_rnn,
     "cnn_bilstm": build_cnn_bilstm,
-    "wadm": build_wadm,
+    "dpam": build_dpam,
 }
 
 

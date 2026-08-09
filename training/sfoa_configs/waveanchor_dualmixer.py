@@ -12,29 +12,29 @@ DEFAULTS = {
 def build_model(hyperparams, input_size, args, num_targets, device):
     from preprocessing.swt.config import CFG as SWT_CFG
     from core.architectures.waveanchor_dualmixer import (
-        WaveAnchorDualMixer, N_GROUP_BLOCKS, D_GROUP, MEM_D_GROUP, POOL_HEAD_DIM,
+        DualPathAnchorMixer, N_GROUP_BLOCKS, D_GROUP, MEM_D_GROUP, POOL_HEAD_DIM,
     )
     swt_level = getattr(args, "swt_level", SWT_CFG.SWT_LEVEL)
     mem_swt_level = getattr(args, "mem_swt_level", SWT_CFG.MEM_SWT_LEVEL)
-    kernels = getattr(args, "wadm_cnn_kernels", None)
+    kernels = getattr(args, "dpam_cnn_kernels", None)
     if kernels is None:
         kernels = (3, 5)
-    n_group_blocks = getattr(args, "wadm_group_blocks", None)
+    n_group_blocks = getattr(args, "dpam_group_blocks", None)
     if n_group_blocks is None:
         n_group_blocks = N_GROUP_BLOCKS
-    d_group = getattr(args, "wadm_d_group", None)
+    d_group = getattr(args, "dpam_d_group", None)
     if d_group is None:
         d_group = D_GROUP
-    mem_d_group = getattr(args, "wadm_mem_d_group", None)
+    mem_d_group = getattr(args, "dpam_mem_d_group", None)
     if mem_d_group is None:
         mem_d_group = MEM_D_GROUP
-    pool_head_dim = getattr(args, "wadm_pool_head_dim", None)
+    pool_head_dim = getattr(args, "dpam_pool_head_dim", None)
     if pool_head_dim is None:
         pool_head_dim = POOL_HEAD_DIM
-    cpu_recon = getattr(args, "wadm_cpu_recon", None)
+    cpu_recon = getattr(args, "dpam_cpu_recon", None)
     if cpu_recon is None:
         cpu_recon = True
-    return WaveAnchorDualMixer(
+    return DualPathAnchorMixer(
         in_channels=input_size,
         input_len=args.input_len,
         pred_horizon=args.pred_horizon,

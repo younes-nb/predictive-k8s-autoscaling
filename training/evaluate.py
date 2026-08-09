@@ -40,7 +40,7 @@ from types import SimpleNamespace
 from training.sfoa_configs import get_config
 
 
-MODEL_TYPES = ("lstm", "gru", "bilstm", "bigrue", "cnn_bilstm", "dlinear", "wadm")
+MODEL_TYPES = ("lstm", "gru", "bilstm", "bigrue", "cnn_bilstm", "dlinear", "dpam")
 PREPROCESS_APPROACHES = ("none", "smoothing", "swt", "cskv")
 
 

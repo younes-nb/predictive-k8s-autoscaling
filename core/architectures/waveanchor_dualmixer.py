@@ -13,7 +13,7 @@ TREND_HIDDEN = 32
 N_ATTN_HEADS = 4
 
 
-class GroupCNN(nn.Module):
+class MultiKernelConv1D(nn.Module):
 
     def __init__(self, in_ch, d_out, kernels=(3, 5), dropout=0.1):
         super().__init__()
@@ -118,7 +118,7 @@ class AnchorMixer(nn.Module):
         self.pred_horizon = pred_horizon
         self._osc_idx = torch.tensor(list(range(1, in_channels)), dtype=torch.long)
 
-        self.cnn_osc = GroupCNN(in_channels - 1, d_group, kernels=group_cnn_kernels, dropout=dropout)
+        self.cnn_osc = MultiKernelConv1D(in_channels - 1, d_group, kernels=group_cnn_kernels, dropout=dropout)
         self.group_mix_osc = nn.ModuleList([
             MixerBlock(input_len, d_group, dropout)
             for _ in range(n_group_blocks)
@@ -164,7 +164,7 @@ class AnchorMixer(nn.Module):
         return base_trend + delta
 
 
-class WaveAnchorDualMixer(nn.Module):
+class DualPathAnchorMixer(nn.Module):
 
     def __init__(
         self,

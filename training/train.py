@@ -37,7 +37,7 @@ from training.sfoa_search import run_sfoa_search
 from training.sfoa_configs import get_config
 
 
-MODEL_TYPES = ("lstm", "gru", "bilstm", "bigrue", "cnn_bilstm", "dlinear", "wadm")
+MODEL_TYPES = ("lstm", "gru", "bilstm", "bigrue", "cnn_bilstm", "dlinear", "dpam")
 PREPROCESS_APPROACHES = ("none", "smoothing", "swt", "cskv")
 
 
@@ -569,17 +569,17 @@ def main():
     p.add_argument("--swt_level", type=int, default=None, help="SWT level for CPU (swt only, default: config)")
     p.add_argument("--mem_swt_level", type=int, default=None, help="SWT level for memory (swt only, default: config)")
     p.add_argument("--max_services", type=int, default=0, help="Max services for swt/cskv")
-    p.add_argument("--wadm_cnn_kernels", type=int, nargs="+", default=None,
-                   help="GroupCNN kernel sizes for wadm (ablation; default (3,5))")
-    p.add_argument("--wadm_group_blocks", type=int, default=None,
-                   help="Group MixerBlocks per group for wadm (ablation; default 2)")
-    p.add_argument("--wadm_d_group", type=int, default=None,
-                   help="CPU group hidden dim for wadm (ablation; default 64)")
-    p.add_argument("--wadm_mem_d_group", type=int, default=None,
-                   help="Memory group hidden dim for wadm (ablation; default 24)")
-    p.add_argument("--wadm_pool_head_dim", type=int, default=None,
-                   help="Pooled-MLP head dim for wadm (ablation; default 128)")
-    p.add_argument("--wadm_cpu_recon", action=argparse.BooleanOptionalAction, default=True,
+    p.add_argument("--dpam_cnn_kernels", type=int, nargs="+", default=None,
+                   help="MultiKernelConv1D kernel sizes for dpam (ablation; default (3,5))")
+    p.add_argument("--dpam_group_blocks", type=int, default=None,
+                   help="Group MixerBlocks per group for dpam (ablation; default 2)")
+    p.add_argument("--dpam_d_group", type=int, default=None,
+                   help="CPU group hidden dim for dpam (ablation; default 64)")
+    p.add_argument("--dpam_mem_d_group", type=int, default=None,
+                   help="Memory group hidden dim for dpam (ablation; default 24)")
+    p.add_argument("--dpam_pool_head_dim", type=int, default=None,
+                   help="Pooled-MLP head dim for dpam (ablation; default 128)")
+    p.add_argument("--dpam_cpu_recon", action=argparse.BooleanOptionalAction, default=True,
                    help="Level-correction MLP on CPU branch (ablation; default on)")
 
     try:
