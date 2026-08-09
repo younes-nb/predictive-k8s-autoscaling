@@ -230,7 +230,7 @@ def parse_args():
                              "Defaults to Paths.PARQUET_ROOT.")
     parser.add_argument("--max_services", type=int, default=None)
     parser.add_argument("--seed", type=int, default=DEFAULT_SUBSET_SEED)
-    parser.add_argument("--out_dir", type=str, required=True)
+    parser.add_argument("--out_dir", type=str, default=Paths.ANALYTICS_OUT_DIR)
     parser.add_argument("--window_hours", type=float, default=DEFAULT_WINDOW_HOURS)
     parser.add_argument("--min_points_ratio", type=float, default=DEFAULT_MIN_POINTS_RATIO)
     parser.add_argument("--train_frac", type=float, default=PREPROCESSING.TRAIN_FRAC)
