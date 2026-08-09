@@ -1,5 +1,4 @@
 import csv
-import itertools
 import os
 import random
 import sys
@@ -40,7 +39,6 @@ GLOBAL = {
     "user_pool": _env_int("USER_POOL", 50),
     "test_hours": None,
 }
-SLOT_COUNTERS = {}   # minute index -> itertools.count(); slot k < counts[m] is one request
 MINUTE_STATS = {}    # minute index -> fired requests (for the end-of-test check)
 
 
@@ -61,18 +59,9 @@ def load_mcr_counts(csv_path: str, max_requests: int) -> list[int]:
     return counts
 
 
-def _next_slot(m: int) -> int:
-    """Atomically claim the next request slot for minute m.
-
-    User greenlets never preempt each other mid-call (no yield points here), so
-    the lazy per-minute counter is race-free. The pool as a whole fires exactly
-    counts[m] requests per minute because slots are claimed by a shared counter,
-    regardless of how many/few users are running."""
-    counter = SLOT_COUNTERS.get(m)
-    if counter is None:
-        counter = itertools.count()
-        SLOT_COUNTERS[m] = counter
-    return next(counter)
+def _hit(user):
+    func = random.choices(ENDPOINT_FUNCS, weights=ENDPOINT_WEIGHTS, k=1)[0]
+    func(user)
 
 
 @events.init_command_line_parser.add_listener
@@ -89,7 +78,7 @@ def _add_cli_args(parser):
     parser.add_argument(
         "--max-requests",
         type=int,
-        default=600,
+        default=50000,
         help="Request count per 1-minute interval when http_mcr == 1.0",
         env_var="MAX_REQUESTS",
     )
@@ -114,7 +103,6 @@ def _add_cli_args(parser):
 def _on_test_start(environment, **_kw):
     opts = environment.parsed_options
     counts = load_mcr_counts(opts.mcr_csv, opts.max_requests)
-    SLOT_COUNTERS.clear()
     MINUTE_STATS.clear()
     GLOBAL.update(
         counts=counts,
@@ -191,8 +179,8 @@ class DriverUser(FastHttpUser):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._cur_m = -1
-        self._next_target = 0.0
-        self._done = False
+        self._slot = -1
+        self._pending = None
 
     @task
     def drive(self):
@@ -205,31 +193,39 @@ class DriverUser(FastHttpUser):
         m = int((now - epoch) // 60)
         if m != self._cur_m:
             self._cur_m = m
-            self._next_target = epoch + m * 60
-            self._done = False
+            self._slot = -1
+            self._pending = None
 
-        if self._done:
-            gevent.sleep(1.0)
+        if self._pending is not None:
+            slot, fire_at = self._pending
+            if now < fire_at:
+                gevent.sleep(fire_at - now)
+                return
+            self._pending = None
+            gevent.spawn(self._hit)
             return
 
         count = GLOBAL["counts"][m % GLOBAL["n_minutes"]]
         if count == 0:
-            self._done = True
             gevent.sleep(1.0)
             return
 
-        if now < self._next_target:
-            gevent.sleep(max(0.05, self._next_target - now))
-            return
-
-        slot = _next_slot(m)
-        if slot < count:
-            gevent.spawn(self._hit)
-            step = 60.0 / count
-            self._next_target = epoch + m * 60 + (slot + 1) * step
-        else:
-            self._done = True
+        # Each user owns slots u, u+pool, u+2*pool, ... so the minute's
+        # requests are paced one every 60/count seconds (fire_at is an absolute
+        # time), instead of all firing in a burst at the top of the minute.
+        pool = GLOBAL["user_pool"]
+        slot = self._slot + pool
+        if slot >= count:
             gevent.sleep(1.0)
+            return
+        self._slot = slot
+
+        fire_at = epoch + m * 60 + slot * (60.0 / count)
+        if now < fire_at:
+            self._pending = (slot, fire_at)
+            gevent.sleep(fire_at - now)
+            return
+        gevent.spawn(self._hit)
 
     def _hit(self):
         func = random.choices(ENDPOINT_FUNCS, weights=ENDPOINT_WEIGHTS, k=1)[0]
