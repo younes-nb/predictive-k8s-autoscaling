@@ -144,6 +144,9 @@ def main():
 
     args = ap.parse_args()
 
+    if not args.model_name.endswith(".pt"):
+        args.model_name += ".pt"
+
     preprocess_script = os.path.join(
         REPO_ROOT, "pipelines", "preprocessing_pipeline.py"
     )
