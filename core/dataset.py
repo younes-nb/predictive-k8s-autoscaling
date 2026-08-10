@@ -95,8 +95,8 @@ class ShardedWindowsDataset(Dataset):
         if x_arr.ndim == 1:
             x_arr = x_arr[:, None]
 
-        x_t = torch.from_numpy(x_arr).float()
-        y_t = torch.from_numpy(y_arr).float()
+        x_t = torch.from_numpy(x_arr).half()
+        y_t = torch.from_numpy(y_arr).half()
         sid_t = torch.tensor(sid_val, dtype=torch.long)
 
         return x_t, y_t, sid_t

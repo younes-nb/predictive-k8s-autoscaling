@@ -9,6 +9,10 @@ if config.PREPROCESS_APPROACH == "swt":
     from preprocessing.swt.decomposition import decompose_window
 
 
+def _round2(value):
+    return round(float(value), 2)
+
+
 def smooth_window(window_data, window_size=5):
     if not window_data or len(window_data) < window_size:
         return window_data
@@ -87,7 +91,9 @@ def get_aggregated_window():
         else:
             avg_cpu = sum(c_vals) / len(c_vals)
             avg_cpu = max(0.0, min(1.0, avg_cpu))
+            avg_cpu = _round2(avg_cpu)
             cpu_diff = avg_cpu - prev_cpu if prev_cpu is not None else 0.0
+            cpu_diff = _round2(np.clip(cpu_diff, -1.0, 1.0))
             prev_cpu = avg_cpu
 
             row = [avg_cpu]
@@ -95,10 +101,11 @@ def get_aggregated_window():
             if "mem" in config.FEATURE_SET:
                 avg_mem = sum(mem_buckets[i]) / len(mem_buckets[i])
                 avg_mem = max(0.0, min(1.0, avg_mem))
+                avg_mem = _round2(avg_mem)
                 row.append(avg_mem)
 
             if config.FEATURE_SET.endswith("_diff"):
-                row.append(np.clip(cpu_diff, -1.0, 1.0))
+                row.append(cpu_diff)
 
             final_window.append(row)
 
@@ -107,6 +114,9 @@ def get_aggregated_window():
             final_window = apply_swt(final_window)
         else:
             final_window = smooth_window(final_window, window_size=5)
+            final_window = [
+                [_round2(v) for v in row] for row in final_window
+            ]
 
     return final_window, use_prediction
 
@@ -142,6 +152,7 @@ def main():
     if res_load:
         current_load = float(res_load[0]["value"][1])
         current_load = max(0.0, min(1.0, current_load))
+        current_load = _round2(current_load)
     else:
         last_point = history[-1] if history else 0.0
         current_load = last_point[0] if isinstance(last_point, list) else last_point
@@ -153,6 +164,7 @@ def main():
     res_mem = utils.query_prometheus(q_mem)
     current_mem = float(res_mem[0]["value"][1]) if res_mem else 0.0
     current_mem = max(0.0, min(1.0, current_mem))
+    current_mem = _round2(current_mem)
 
     t_end = time.time()
 

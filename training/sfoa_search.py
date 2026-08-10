@@ -54,6 +54,19 @@ def _int_arg(args, name: str, default) -> int:
         return int(default)
 
 
+def _amp_ctx(accelerator, device):
+    if accelerator is not None:
+        return accelerator.autocast()
+    return torch.autocast(device_type=device.type, enabled=(device.type == "cuda"))
+
+
+def _to_model_dtype(x, accelerator, device):
+    fp16 = accelerator is not None and accelerator.mixed_precision == "fp16"
+    if not fp16:
+        return x.float()
+    return x
+
+
 def _use_file_system_tensor_sharing() -> None:
     try:
         torch.multiprocessing.set_sharing_strategy("file_system")
@@ -726,6 +739,7 @@ def run_sfoa_search(
         torch.cuda.manual_seed_all(cand_seed)
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
+        torch.use_deterministic_algorithms(True)
 
         def _worker_init_fn(worker_id):
             wseed = cand_seed + worker_id
@@ -859,12 +873,13 @@ def run_sfoa_search(
                 epoch_start = _time.time()
                 for batch in train_loader:
                     x, y, _ = batch
-                    x = x.to(eval_device)
-                    y = y.to(eval_device)
+                    x = _to_model_dtype(x, accelerator, eval_device).to(eval_device)
+                    y = _to_model_dtype(y, accelerator, eval_device).to(eval_device)
 
                     optimizer.zero_grad()
-                    preds = model(x)
-                    loss = torch.nn.functional.mse_loss(preds, y)
+                    with _amp_ctx(accelerator, eval_device):
+                        preds = model(x)
+                        loss = torch.nn.functional.mse_loss(preds, y)
                     loss.backward()
                     optimizer.step()
                     epoch_loss_sum += loss.item() * x.size(0)
@@ -879,10 +894,11 @@ def run_sfoa_search(
                 with torch.no_grad():
                     for batch in val_loader:
                         xb, yb, _ = batch
-                        xb = xb.to(eval_device)
-                        yb = yb.to(eval_device)
-                        preds = model(xb)
-                        vloss = torch.nn.functional.mse_loss(preds, yb)
+                        xb = _to_model_dtype(xb, accelerator, eval_device).to(eval_device)
+                        yb = _to_model_dtype(yb, accelerator, eval_device).to(eval_device)
+                        with _amp_ctx(accelerator, eval_device):
+                            preds = model(xb)
+                            vloss = torch.nn.functional.mse_loss(preds, yb)
                         val_accum += vloss.item() * xb.size(0)
                         val_cnt += xb.size(0)
                 avg_val = val_accum / max(1, val_cnt)

@@ -101,7 +101,7 @@ def train(args):
     preprocess_approach = args.preprocess_approach
 
     timeout_kwargs = InitProcessGroupKwargs(timeout=timedelta(seconds=14400))
-    mixed_precision = "no"
+    mixed_precision = "fp16" if (not args.cpu and torch.cuda.is_available()) else "no"
     accelerator = Accelerator(cpu=args.cpu, mixed_precision=mixed_precision, kwargs_handlers=[timeout_kwargs])
     device = accelerator.device
 
@@ -396,6 +396,9 @@ def train(args):
 
         for batch in train_loader:
             x, y, _ = batch
+            if accelerator.mixed_precision != "fp16":
+                x = x.float()
+                y = y.float()
 
             optimizer.zero_grad()
 
@@ -424,9 +427,13 @@ def train(args):
         with torch.no_grad():
             for batch in val_loader:
                 x, y, _ = batch
+                if accelerator.mixed_precision != "fp16":
+                    x = x.float()
+                    y = y.float()
 
-                preds = model(x)
-                loss = _compute_loss(model, preds, y)
+                with accelerator.autocast():
+                    preds = model(x)
+                    loss = _compute_loss(model, preds, y)
 
                 val_loss_accum += loss.item() * x.size(0)
                 val_samples_seen += x.size(0)

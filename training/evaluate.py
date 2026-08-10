@@ -343,7 +343,8 @@ def _run_single_sample_benchmark(raw_ds, indices, model, device, args, ckpt_args
 
 def evaluate(args):
     timeout_kwargs = InitProcessGroupKwargs(timeout=timedelta(seconds=14400))
-    accelerator = Accelerator(cpu=args.cpu, kwargs_handlers=[timeout_kwargs])
+    mixed_precision = "fp16" if (not args.cpu and torch.cuda.is_available()) else "no"
+    accelerator = Accelerator(cpu=args.cpu, mixed_precision=mixed_precision, kwargs_handlers=[timeout_kwargs])
     device = accelerator.device
 
     seed = getattr(args, "seed", TRAINING.SEED)
@@ -353,6 +354,7 @@ def evaluate(args):
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+    torch.use_deterministic_algorithms(True)
 
     log_info = lambda msg: (
         logging.info(msg) if accelerator.is_local_main_process else None
@@ -479,9 +481,13 @@ def evaluate(args):
 
     for i, batch in enumerate(tqdm(test_loader, desc="Inference", unit="batch")):
         x, y = batch[0], batch[1]
+        if accelerator.mixed_precision != "fp16":
+            x = x.float()
+            y = y.float()
 
         with torch.no_grad():
-            mu = model(x)
+            with accelerator.autocast():
+                mu = model(x)
 
         if preprocess_approach in ("swt", "cskv"):
             batch_last = batch[2]
@@ -491,11 +497,11 @@ def evaluate(args):
 
         if accelerator.is_local_main_process:
             if preprocess_approach in ("swt", "cskv"):
-                y_last = gathered_last.cpu().numpy()
+                y_last = gathered_last.float().cpu().numpy()
             else:
-                y_last = gathered_x[:, -1, :].cpu().numpy()
-            all_preds.append(gathered_mu.cpu().numpy())
-            all_trues.append(gathered_y.cpu().numpy())
+                y_last = gathered_x[:, -1, :].float().cpu().numpy()
+            all_preds.append(gathered_mu.float().cpu().numpy())
+            all_trues.append(gathered_y.float().cpu().numpy())
             all_lasts.append(y_last)
 
     if not accelerator.is_local_main_process:

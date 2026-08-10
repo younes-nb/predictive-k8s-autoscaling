@@ -103,9 +103,9 @@ def _decompose_shard(task):
     S = np.load(shard_sid_path)
     N, input_len, _ = X.shape
 
-    last_cpu = np.asarray(X[:, -1, feature_idx_cpu], dtype=np.float32)
+    last_cpu = np.asarray(X[:, -1, feature_idx_cpu], dtype=np.float16)
     if has_mem:
-        last_mem = np.asarray(X[:, -1, feature_idx_mem], dtype=np.float32)
+        last_mem = np.asarray(X[:, -1, feature_idx_mem], dtype=np.float16)
     else:
         last_mem = None
 
@@ -123,7 +123,7 @@ def _decompose_shard(task):
     # (~4GB for a 12-channel train shard).
     tmp_x = shard_out_x_path + ".tmp"
     out_mmap = np.lib.format.open_memmap(
-        tmp_x, mode="w+", dtype="float32",
+        tmp_x, mode="w+", dtype="float16",
         shape=(N, input_len, total_channels),
     )
     keep = np.zeros(N, dtype=bool)
@@ -132,7 +132,7 @@ def _decompose_shard(task):
         b = min(a + chunk_size, N)
         X_chunk = X[a:b]
         m = b - a
-        X_dec_chunk = np.zeros((m, input_len, total_channels), dtype=np.float32)
+        X_dec_chunk = np.zeros((m, input_len, total_channels), dtype=np.float16)
         keep_chunk = np.ones(m, dtype=bool)
         for i in range(m):
             cpu_ch = decompose_window(X_chunk[i, :, feature_idx_cpu], cpu_cfg)
@@ -162,7 +162,7 @@ def _decompose_shard(task):
         # Rare: some windows skipped (constant signal -> std ~ 0). Compact into
         # the final file with the true row count, streaming to stay bounded.
         final = np.lib.format.open_memmap(
-            shard_out_x_path, mode="w+", dtype="float32",
+            shard_out_x_path, mode="w+", dtype="float16",
             shape=(n_kept_total, input_len, total_channels),
         )
         tmp = np.load(tmp_x, mmap_mode="r")
@@ -177,7 +177,7 @@ def _decompose_shard(task):
 
     last = np.stack([last_cpu, last_mem], axis=-1) if has_mem else last_cpu
     np.save(shard_out_last_path, last[keep])
-    np.save(shard_out_y_path, Y[keep])
+    np.save(shard_out_y_path, Y[keep].astype(np.float16))
     np.save(shard_out_sid_path, S[keep])
 
     with shards_done.get_lock():

@@ -85,9 +85,14 @@ def measure_throughput(
     def loss_fn(preds, y):
         return ((preds - y) ** 2).mean()
 
+    amp_ctx = torch.autocast(device_type=device.type, enabled=(device.type == "cuda"))
+
     for batch in loader:
         x = batch[0].to(device, non_blocking=pin_memory)
         y = batch[1].to(device, non_blocking=pin_memory)
+        if device.type == "cpu":
+            x = x.float()
+            y = y.float()
 
         if torch.cuda.is_available():
             start = torch.cuda.Event(enable_timing=True)
@@ -96,13 +101,15 @@ def measure_throughput(
             if mode == "eval":
                 with torch.no_grad():
                     start.record()
-                    _ = model(x)
+                    with amp_ctx:
+                        _ = model(x)
                     end.record()
             else:
                 optimizer.zero_grad()
                 start.record()
-                preds = model(x)
-                loss = loss_fn(preds, y)
+                with amp_ctx:
+                    preds = model(x)
+                    loss = loss_fn(preds, y)
                 loss.backward()
                 end.record()
                 optimizer.step()

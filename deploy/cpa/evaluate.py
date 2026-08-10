@@ -61,6 +61,7 @@ def main():
                     raw_preds[0] if isinstance(raw_preds, tuple) else raw_preds
                 )
                 preds_tensor = torch.clamp(preds_tensor, min=0.0, max=1.0)
+                preds_tensor = torch.round(preds_tensor * 100) / 100
                 if config.NUM_TARGETS > 1:
                     predicted_load_final = preds_tensor[0, -1, 0].item()
                     predicted_memory_final = preds_tensor[0, -1, 1].item()
@@ -77,6 +78,10 @@ def main():
                     predicted_memory_final = min(
                         1.0, predicted_memory_final + delta_mem
                     )
+
+            predicted_load_final = round(predicted_load_final, 2)
+            if config.NUM_TARGETS > 1:
+                predicted_memory_final = round(predicted_memory_final, 2)
 
             mode = "Predictive"
         elif use_prediction:

@@ -45,6 +45,9 @@ import polars as pl
 import numpy as np
 from tqdm import tqdm
 
+_WINDOW_DECIMALS = 2
+_WINDOW_DTYPE = np.float16
+
 from core.utils import windowize_multivariate
 
 from shared.config_paths import PATHS, DATASET_TABLES
@@ -60,7 +63,12 @@ from preprocessing.parquet_utils import (
 _WORKER_CTX = {}
 
 
-def save_chunk(out_dir, shard_idx, chunk_idx, shard_data, sync=False):
+def _quantize_windows(arr):
+    return np.round(arr, _WINDOW_DECIMALS).astype(_WINDOW_DTYPE)
+
+
+def save_chunk(out_dir, shard_idx, chunk_idx, shard_data, sync=False,
+               quantize_cols=None):
     base_name = f"part-{shard_idx:04d}_chunk-{chunk_idx:04d}"
     saved_any = False
 
@@ -72,8 +80,18 @@ def save_chunk(out_dir, shard_idx, chunk_idx, shard_data, sync=False):
 
             for split, (Xs, Ys, Ss) in shard_data.items():
                 if Xs:
-                    np.save(f"{tmp_base}_X_{split}.npy", np.concatenate(Xs))
-                    np.save(f"{tmp_base}_y_{split}.npy", np.concatenate(Ys))
+                    x_arr = np.concatenate(Xs)
+                    y_arr = np.concatenate(Ys)
+                    # Round utilization to 1e-2 and store as float16 when every
+                    # channel is a [0,1]-bounded resource feature; mixed feature
+                    # sets (unbounded call-rate columns) stay float32 to avoid
+                    # float16 overflow.
+                    if quantize_cols is not None and len(quantize_cols) >= x_arr.shape[-1]:
+                        x_arr = _quantize_windows(x_arr)
+                    if quantize_cols is not None:
+                        y_arr = _quantize_windows(y_arr)
+                    np.save(f"{tmp_base}_X_{split}.npy", x_arr)
+                    np.save(f"{tmp_base}_y_{split}.npy", y_arr)
                     np.save(f"{tmp_base}_sid_{split}.npy", np.concatenate(Ss))
                     saved_any = True
 
@@ -213,7 +231,8 @@ def _process_service_group(group_idx, service_ids):
                 shard_data[split_name][2].append(Ss)
                 n_processed += 1
 
-    save_chunk(out_dir, group_idx, 0, shard_data, sync=ctx["sync"])
+    save_chunk(out_dir, group_idx, 0, shard_data, sync=ctx["sync"],
+               quantize_cols=ctx.get("resource_indices"))
     open(done_marker, "a").close()
 
     del shard_data
@@ -360,6 +379,10 @@ def main():
     feature_names = list(spec["features"])
     target_features = list(spec["targets"])
     target_indices = [feature_names.index(f) for f in target_features]
+    resource_indices = [
+        i for i, f in enumerate(feature_names)
+        if "cpu" in f.lower() or "mem" in f.lower()
+    ]
 
     needed_tables = sorted(list(tables_for_feature_set(args.feature_set)))
     table_exprs = table_to_feature_exprs(args.feature_set)
@@ -439,6 +462,7 @@ def main():
         "val_frac": args.val_frac,
         "service_col": args.service_col,
         "feature_set": args.feature_set,
+        "resource_indices": resource_indices,
     }
 
     arrays_path, index_path = _service_arrays_paths(args.out_dir)
@@ -587,6 +611,7 @@ def _phase_windows(args, args_dict, target_indices, all_services_list,
         "big_array": big,
         "service_index": index,
         "target_indices": target_indices,
+        "resource_indices": args_dict["resource_indices"],
         "sync": args.sync,
     }
 

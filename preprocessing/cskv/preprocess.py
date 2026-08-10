@@ -56,7 +56,7 @@ def _decompose_shard(task):
 
     t0 = time.time()
 
-    X = np.load(shard_x_path).astype(np.float32)
+    X = np.load(shard_x_path)
     N, input_len, _ = X.shape
 
     last_cpu = X[:, -1, feature_idx_cpu]
@@ -66,7 +66,7 @@ def _decompose_shard(task):
     else:
         n_channels = cpu_cfg.VMD_K + cpu_cfg.N_CLUSTERS - 1
 
-    X_dec = np.zeros((N, input_len, n_channels), dtype=np.float32)
+    X_dec = np.zeros((N, input_len, n_channels), dtype=np.float16)
     for i in range(N):
         cpu_signal = X[i, :, feature_idx_cpu].astype(np.float64)
         decomposed = decompose_service_signal(cpu_signal, cpu_cfg, return_raw_imfs=no_clustering)
@@ -89,8 +89,8 @@ def _decompose_shard(task):
                     X_dec[i, :, k] = co_imfs[k][:input_len]
 
     np.save(shard_out_x_path, X_dec)
-    np.save(shard_out_last_path, last_cpu)
-    shutil.copy2(shard_y_path, shard_out_y_path)
+    np.save(shard_out_last_path, last_cpu.astype(np.float16))
+    np.save(shard_out_y_path, np.load(shard_y_path).astype(np.float16))
     shutil.copy2(shard_sid_path, shard_out_sid_path)
 
     elapsed = time.time() - t0

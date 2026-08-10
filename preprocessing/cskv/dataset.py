@@ -108,13 +108,13 @@ class CskvDataset(Dataset):
     def __getitem__(self, idx: int):
         i = bisect.bisect_right(self._offsets, idx) - 1
         local = idx - self._offsets[i]
-        x = np.array(self._x_shards[i][local], copy=True, order="C")
-        y = np.array(self._y_shards[i][local], copy=True, order="C")
+        x = np.array(self._x_shards[i][local], copy=True, order="C").astype(np.float16)
+        y = np.array(self._y_shards[i][local], copy=True, order="C").astype(np.float16)
         last = self._last_shards[i]
         if last is not None:
-            last = np.array(last[local], copy=True, order="C")
+            last = np.array(last[local], copy=True, order="C").astype(np.float16)
         else:
-            last = np.zeros((), dtype=np.float32)
+            last = np.zeros((), dtype=np.float16)
         return x, y, last
 
 

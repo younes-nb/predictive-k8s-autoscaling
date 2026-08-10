@@ -12,6 +12,10 @@ if REPO_ROOT not in sys.path:
 from core.utils import moving_average
 
 
+def _quantize_windows(arr):
+    return np.round(arr, 2).astype(np.float16)
+
+
 def smooth_array(arr, window_size):
     smoothed = np.empty_like(arr)
     for i in range(arr.shape[-1]):
@@ -72,8 +76,8 @@ def main():
                 X_smooth = X_smooth[:, :, 0]
 
             out_base = os.path.join(args.out_dir, os.path.basename(base))
-            np.save(f"{out_base}_X_{split}.npy", X_smooth)
-            np.save(f"{out_base}_y_{split}.npy", y)
+            np.save(f"{out_base}_X_{split}.npy", _quantize_windows(X_smooth))
+            np.save(f"{out_base}_y_{split}.npy", _quantize_windows(y))
             np.save(f"{out_base}_sid_{split}.npy", sid)
 
             print(f"  {os.path.basename(x_path)}: {n_samples} samples smoothed")
