@@ -1,0 +1,18 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: cpa-pods
+  namespace: monitoring
+  labels:
+    release: prometheus-stack
+spec:
+  podMetricsEndpoints:
+  - port: metrics
+    path: /metrics
+    interval: 30s
+  selector:
+    matchLabels:
+      app.kubernetes.io/managed-by: custom-pod-autoscaler-operator
+  namespaceSelector:
+    matchNames:
+    - online-boutique

@@ -3,7 +3,7 @@ WORKDIR /app
 
 RUN apt-get update && apt-get install -y curl tar && \
     pip install --no-cache-dir numpy requests torch --index-url https://download.pytorch.org/whl/cpu && \
-    pip install --no-cache-dir pywavelets==1.8.0 && \
+    pip install --no-cache-dir pywavelets==1.8.0 prometheus_client && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
 RUN curl -L https://github.com/jthomperoo/custom-pod-autoscaler/releases/download/v2.12.2/custom-pod-autoscaler-linux-amd64.tar.gz -o cpa.tar.gz && \

@@ -33,10 +33,16 @@ metadata:
 spec:
   template:
     spec:
+      volumes:
+      - name: metrics-vol
+        emptyDir: {}
       containers:
       - name: autoscaler
         image: ${IMAGE}
         imagePullPolicy: Always
+        volumeMounts:
+        - name: metrics-vol
+          mountPath: /app/metrics
         env:
           - name: PROMETHEUS_URL
             value: "${PROMETHEUS_URL}"
@@ -70,6 +76,29 @@ spec:
             valueFrom:
               fieldRef:
                 fieldPath: metadata.namespace
+          - name: EXPERIMENT_METRICS_FILE
+            value: "/app/metrics/experiment_metrics.csv"
+      - name: metrics-exporter
+        image: ${IMAGE}
+        imagePullPolicy: Always
+        command: ["python", "/app/metrics_exporter.py"]
+        ports:
+        - containerPort: 8000
+          name: metrics
+        volumeMounts:
+        - name: metrics-vol
+          mountPath: /app/metrics
+        env:
+          - name: EXPERIMENT_METRICS_FILE
+            value: "/app/metrics/experiment_metrics.csv"
+          - name: METRICS_PORT
+            value: "8000"
+          - name: TARGET_DEPLOYMENT
+            value: "${DEPLOYMENT}"
+          - name: POD_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.name
   scaleTargetRef:
     apiVersion: apps/v1
     kind: Deployment
