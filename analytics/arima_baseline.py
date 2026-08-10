@@ -1,5 +1,6 @@
 import argparse
 import json
+import logging
 import multiprocessing as mp
 import os
 import sys
@@ -7,6 +8,7 @@ from datetime import datetime
 
 import numpy as np
 import pandas as pd
+from numpy.lib.stride_tricks import sliding_window_view
 from tqdm import tqdm
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -16,6 +18,7 @@ if REPO_ROOT not in sys.path:
 
 from shared.config_paths import PATHS
 from shared.config_preprocessing_defaults import PREPROCESSING
+from shared.logging_utils import setup_logging
 from shared.features import (
     FEATURE_SETS,
     feature_names_for_feature_set,
@@ -26,9 +29,11 @@ from training.metrics import compute_metrics, METRIC_NAMES
 
 _CTX = {}
 
+NEAR_CONSTANT_STD = 1e-12
+
 
 def log(msg: str) -> None:
-    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}", flush=True)
+    logging.info(msg)
 
 
 def _load_service_arrays(windows_dir):
@@ -57,7 +62,31 @@ def _parse_order(value):
     return tuple(parts)
 
 
-def _forecast_target(series, cfg):
+def _near_constant_mask(block, cfg, idx_val, N):
+    """Per-position mask matching training/evaluate.py::_near_constant_valid_indices.
+
+    Position t is kept iff:
+      1. t >= input_len  -- the input window [idx_val+t-input_len, idx_val+t) lies
+         fully inside the test split, exactly like the windows evaluate.py scores
+         (earlier positions have no evaluate.py counterpart), and
+      2. every target channel has std >= NEAR_CONSTANT_STD over that window.
+    """
+    input_len = cfg["input_len"]
+    keep = np.ones(N, dtype=bool)
+    min_t = input_len
+    keep[:min_t] = False
+    if min_t >= N:
+        return keep
+    n_win = N - min_t
+    for f in cfg["target_idxs"]:
+        col = block[:, f].astype(np.float64)
+        stds = sliding_window_view(col, input_len).std(axis=1)
+        keep[min_t:] &= stds[idx_val: idx_val + n_win] >= NEAR_CONSTANT_STD
+    return keep
+
+
+def _forecast_channel(series, cfg):
+    """Fit ARIMA on one target channel and multi-step forecast its test segment."""
     H = cfg["horizon"]
     n = int(series.shape[0])
     idx_tr = int(n * cfg["train_frac"])
@@ -95,38 +124,71 @@ def _forecast_target(series, cfg):
         fit_window = cfg["fit_window"]
         t0 = 0
         while t0 < N:
-            block = min(refit_every, N - t0)
+            block_len = min(refit_every, N - t0)
             window = series[max(0, idx_val + t0 - fit_window): idx_val + t0]
             try:
-                fore = ArimaForecaster(order=order, trend=trend).fit(window).forecast(block + H - 1)
+                fore = ArimaForecaster(order=order, trend=trend).fit(window).forecast(block_len + H - 1)
             except Exception:
                 return None
-            for t in range(block):
+            for t in range(block_len):
                 for h in range(1, H + 1):
                     preds[t0 + t, h - 1] = fore[t + h - 1]
                     truths[t0 + t, h - 1] = test[t0 + t + h - 1]
                 y_last[t0 + t] = series[idx_val + t0 + t - 1]
-            t0 += block
+            t0 += block_len
 
     return preds, truths, y_last
+
+
+def _forecast_target(block, cfg):
+    """Forecast every target channel of one service, dropping near-constant
+    positions (same filter as training/evaluate.py for none/smoothing/swt/cskv).
+
+    Returns (results, n_removed) where results maps target name -> masked
+    (preds, truths, y_last), or (None, n_removed) if nothing was kept.
+    """
+    H = cfg["horizon"]
+    n = int(block.shape[0])
+    idx_tr = int(n * cfg["train_frac"])
+    idx_val = int(n * (cfg["train_frac"] + cfg["val_frac"]))
+
+    if idx_tr < cfg["min_train_len"] or idx_val < 1 or idx_val + H >= n:
+        return None, 0
+
+    L = n - idx_val
+    N = L - H + 1
+    if N < 1:
+        return None, 0
+
+    keep = _near_constant_mask(block, cfg, idx_val, N)
+    n_removed = int((~keep).sum())
+    if not np.any(keep):
+        return None, n_removed
+
+    results = {}
+    for ti, tname in zip(cfg["target_idxs"], cfg["target_names"]):
+        r = _forecast_channel(block[:, ti], cfg)
+        if r is None:
+            continue
+        preds, truths, y_last = r
+        results[tname] = (preds[keep], truths[keep], y_last[keep])
+    return results, n_removed
 
 
 def _worker(job):
     cfg, ms_id, off, length = job
     big = _CTX["big"]
     block = np.asarray(big[off:off + length])
-    results = {}
-    for ti, tname in zip(cfg["target_idxs"], cfg["target_names"]):
-        r = _forecast_target(block[:, ti], cfg)
-        if r is not None:
-            results[tname] = r
-    return ms_id, results
+    results, n_removed = _forecast_target(block, cfg)
+    return ms_id, results, n_removed
 
 
 def main():
     ap = argparse.ArgumentParser(
         description="Classical ARIMA(p,d,q) statistical baseline: fit per service "
                     "on its train segment, multi-step forecast the test segment. "
+                    "Near-constant windows (std < 1e-12 over the input window) are "
+                    "dropped per-position, matching training/evaluate.py. "
                     "Metrics mirror training/evaluate.py."
     )
     ap.add_argument("--windows_dir", default=PATHS.WINDOWS_DIR,
@@ -146,6 +208,9 @@ def main():
     ap.add_argument("--train_frac", type=float, default=PREPROCESSING.TRAIN_FRAC)
     ap.add_argument("--val_frac", type=float, default=PREPROCESSING.VAL_FRAC)
     ap.add_argument("--horizon", type=int, default=PREPROCESSING.PRED_HORIZON)
+    ap.add_argument("--input_len", type=int, default=PREPROCESSING.INPUT_LEN,
+                    help="Input window length used for the near-constant filter "
+                         "(default: %(default)s)")
     ap.add_argument("--max_services", type=int, default=0,
                     help="Limit number of services (0 = all)")
     ap.add_argument("--num_workers", type=int, default=max(1, (os.cpu_count() or 2) // 2),
@@ -156,6 +221,13 @@ def main():
 
     if args.protocol == "rolling" and args.horizon > args.refit_every:
         raise SystemExit("--refit_every must be >= --horizon for the rolling protocol.")
+
+    log_path = setup_logging("evaluate_arima")
+
+    log("\n--- Configuration Inputs ---")
+    for key, value in vars(args).items():
+        log(f"{key:<20}: {value}")
+    log("-" * 30)
 
     feature_names = feature_names_for_feature_set(args.feature_set)
     target_names = target_features_for_feature_set(args.feature_set)
@@ -174,6 +246,7 @@ def main():
 
     cfg = {
         "horizon": args.horizon,
+        "input_len": args.input_len,
         "train_frac": args.train_frac,
         "val_frac": args.val_frac,
         "min_train_len": max(12, args.horizon * 3),
@@ -198,20 +271,22 @@ def main():
         results = pool.imap_unordered(_worker, jobs, chunksize=1)
 
     n_ok = 0
+    total_removed = 0
     pbar = tqdm(
         total=len(jobs), desc="ARIMA services", unit="svc",
         bar_format="{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} "
                    "[{elapsed}<{remaining}, {rate_fmt}]",
     )
-    for _ms_id, res in results:
+    for _ms_id, res, n_removed in results:
+        total_removed += n_removed
         if res:
             n_ok += 1
-        for tname, r in res.items():
-            preds, truths, y_last = r
-            per_target[tname]["preds"].append(preds)
-            per_target[tname]["truths"].append(truths)
-            per_target[tname]["y_last"].append(y_last)
-            per_target[tname]["n_services"] += 1
+            for tname, r in res.items():
+                preds, truths, y_last = r
+                per_target[tname]["preds"].append(preds)
+                per_target[tname]["truths"].append(truths)
+                per_target[tname]["y_last"].append(y_last)
+                per_target[tname]["n_services"] += 1
         pbar.update(1)
     pbar.close()
     if pool is not None:
@@ -220,6 +295,7 @@ def main():
 
     log(f"Services evaluated: {n_ok}/{len(jobs)} "
         f"({(datetime.now() - t0_all).total_seconds() / 60.0:.1f} min)")
+    log(f"Near-constant positions filtered (std < {NEAR_CONSTANT_STD:g}): {total_removed}")
 
     all_results = {}
     for tname in target_names:
@@ -254,6 +330,8 @@ def main():
         if rows:
             pd.DataFrame(rows).to_csv(args.out_csv, index=False)
             log(f"Wrote CSV: {args.out_csv}")
+
+    log(f"Log Saved to: {log_path}")
 
 
 def _worker_init(big):
