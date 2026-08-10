@@ -17,7 +17,7 @@ WINDOW_SIZE = int(os.getenv("WINDOW_SIZE", "128"))
 STABILIZATION_WINDOW_SECONDS = 300
 BASE_THRESHOLD = 0.75
 MIN_REPLICAS = 1
-MAX_REPLICAS = 20
+MAX_REPLICAS = 30
 MODEL_PATH = "/app/model.pt"
 if FEATURE_SET in ["cpu_mem", "cpu_diff", "cpu_mem_both"]:
     RAW_INPUT_SIZE = 2
