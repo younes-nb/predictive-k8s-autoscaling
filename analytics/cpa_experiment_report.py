@@ -6,7 +6,11 @@ import numpy as np
 import glob
 import os
 import argparse
+import sys
 from datetime import datetime, timezone, timedelta
+from tqdm import tqdm
+
+DEFAULT_PLOTS_DIR = "/proj/k8sautoscaledl-PG0/analytics_out"
 
 DEPLOYMENT_LIMITS = {
     "adservice": 0.3,
@@ -34,6 +38,10 @@ def parse_args():
     parser.add_argument(
         "--data_dir", type=str, default="./data", help="Directory containing CSV files"
     )
+    parser.add_argument(
+        "--plots_dir", type=str, default=DEFAULT_PLOTS_DIR,
+        help="Directory to save plot PNGs",
+    )
     return parser.parse_args()
 
 
@@ -42,22 +50,22 @@ def get_limit(deployment_name):
 
 
 def load_and_filter_data(data_dir, start_str, end_str):
-    all_files = glob.glob(os.path.join(data_dir, "*.csv"))
+    all_files = sorted(glob.glob(os.path.join(data_dir, "*.csv")))
     deployment_data = {}
     global_df = pd.DataFrame()
 
     start_ts = pd.to_datetime(start_str)
     end_ts = pd.to_datetime(end_str)
 
-    print(f"🔎 Filtering data from {start_ts} to {end_ts}...\n")
+    print(f"Filtering data from {start_ts} to {end_ts}...\n")
 
-    for filename in all_files:
+    for filename in tqdm(all_files, desc="Loading CSVs", unit="file"):
         deployment_name = os.path.basename(filename).replace(".csv", "")
         try:
             df = pd.read_csv(filename)
             if "timestamp" not in df.columns:
                 print(
-                    f"⚠️  Skipping {deployment_name}: 'timestamp' column missing."
+                    f"Skipping {deployment_name}: 'timestamp' column missing."
                 )
                 continue
 
@@ -89,60 +97,67 @@ def load_and_filter_data(data_dir, start_str, end_str):
                 global_df = pd.concat([global_df, filtered_df], ignore_index=True)
             else:
                 print(
-                    f"⚠️  {deployment_name}: No data found in the specified time range."
+                    f"{deployment_name}: No data found in the specified time range."
                 )
 
         except Exception as e:
-            print(f"❌ Error reading {filename}: {e}")
+            print(f"Error reading {filename}: {e}")
 
     return deployment_data, global_df
 
 
+def _mse_mae(y_true, y_pred):
+    mse = np.mean((y_true - y_pred) ** 2)
+    mae = np.mean(np.abs(y_true - y_pred))
+    return mse, mae
+
+
 def calculate_metrics(global_df):
     if global_df.empty:
-        print("❌ No data available to calculate metrics.")
+        print("No data available to calculate metrics.")
         return
 
-    valid_preds = global_df[global_df["pred_cpu"] > 0]
+    cpu_valid = global_df[global_df["pred_cpu"] > 0]
+    mem_valid = global_df[global_df["pred_mem"] > 0]
 
-    if valid_preds.empty:
-        print("⚠️ No valid predictions (>0) found.")
-        mse, mae = 0, 0
+    if cpu_valid.empty:
+        print("No valid CPU predictions (>0) found.")
+        cpu_mse, cpu_mae = 0, 0
     else:
-        y_true = valid_preds["cpu_actual_norm"]
-        y_pred = valid_preds["cpu_pred_norm"]
+        cpu_mse, cpu_mae = _mse_mae(
+            cpu_valid["cpu_actual_norm"], cpu_valid["cpu_pred_norm"]
+        )
 
-        mse = np.mean((y_true - y_pred) ** 2)
-        mae = np.mean(np.abs(y_true - y_pred))
+    if mem_valid.empty:
+        print("No valid Memory predictions (>0) found.")
+        mem_mse, mem_mae = 0, 0
+    else:
+        mem_mse, mem_mae = _mse_mae(
+            mem_valid["mem_actual_norm"], mem_valid["mem_pred_norm"]
+        )
 
     inf_times = global_df["inference_time_s"]
     avg_inf = inf_times.mean()
     p95_inf = inf_times.quantile(0.95)
 
-    if "sigma" in global_df.columns:
-        avg_sigma = global_df["sigma"].mean()
-        p95_sigma = global_df["sigma"].quantile(0.95)
-    else:
-        avg_sigma = 0.0
-        p95_sigma = 0.0
     if "replicas" in global_df.columns:
         avg_replicas = global_df["replicas"].mean()
     else:
         avg_replicas = 0.0
 
     print("=" * 40)
-    print("📊  GLOBAL EXPERIMENT METRICS")
+    print("GLOBAL EXPERIMENT METRICS")
     print("=" * 40)
     print(f"Total Data Points:    {len(global_df)}")
     print("-" * 20)
-    print(f"Prediction MSE:       {mse:.5f}")
-    print(f"Prediction MAE:       {mae:.5f} ({(mae*100):.2f}%)")
+    print(f"CPU  MSE:       {cpu_mse:.5f}")
+    print(f"CPU  MAE:       {cpu_mae:.5f} ({(cpu_mae*100):.2f}%)")
+    print("-" * 20)
+    print(f"Mem  MSE:       {mem_mse:.5f}")
+    print(f"Mem  MAE:       {mem_mae:.5f} ({(mem_mae*100):.2f}%)")
     print("-" * 20)
     print(f"Avg Inference Time:   {avg_inf:.4f} s")
     print(f"P95 Inference Time:   {p95_inf:.4f} s")
-    print("-" * 20)
-    print(f"Avg Uncertainty: {avg_sigma:.5f}")
-    print(f"P95 Uncertainty: {p95_sigma:.5f}")
     print("=" * 40)
     print(f"Avg Replicas: {avg_replicas:.2f}")
     print("=" * 40)
@@ -172,22 +187,24 @@ def _add_legend(ax):
     ax.legend(lines, labels, loc="upper left")
 
 
-def _save_figure(fig, suffix):
-    save_dir = "/proj/k8sautoscaledl-PG0/plots"
-    os.makedirs(save_dir, exist_ok=True)
+def _save_figure(fig, suffix, plots_dir):
+    os.makedirs(plots_dir, exist_ok=True)
 
     tehran_tz = timezone(timedelta(hours=3, minutes=30))
     timestamp_str = datetime.now(tehran_tz).strftime("%Y%m%d_%H%M%S")
-    output_file = os.path.join(save_dir, f"load_test_results_{timestamp_str}_{suffix}.png")
+    output_file = os.path.join(plots_dir, f"load_test_results_{timestamp_str}_{suffix}.png")
 
     plt.savefig(output_file, dpi=300)
-    print(f"✅ Plot saved to {output_file}")
+    print(f"Plot saved to {output_file}")
 
 
-def plot_cpu(deployment_data):
+def plot_cpu(deployment_data, plots_dir):
     fig, axes = _build_plot_grid(len(deployment_data))
 
-    for i, (name, df) in enumerate(deployment_data.items()):
+    for i, (name, df) in tqdm(
+        enumerate(deployment_data.items()), desc="Plotting CPU", unit="svc",
+        total=len(deployment_data),
+    ):
         ax = axes[i]
 
         ax.plot(
@@ -219,13 +236,16 @@ def plot_cpu(deployment_data):
 
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     plt.subplots_adjust(hspace=0.6)
-    _save_figure(fig, "cpu")
+    _save_figure(fig, "cpu", plots_dir)
 
 
-def plot_replicas(deployment_data):
+def plot_replicas(deployment_data, plots_dir):
     fig, axes = _build_plot_grid(len(deployment_data))
 
-    for i, (name, df) in enumerate(deployment_data.items()):
+    for i, (name, df) in tqdm(
+        enumerate(deployment_data.items()), desc="Plotting replicas", unit="svc",
+        total=len(deployment_data),
+    ):
         ax = axes[i]
 
         ax.step(
@@ -252,13 +272,16 @@ def plot_replicas(deployment_data):
 
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     plt.subplots_adjust(hspace=0.6)
-    _save_figure(fig, "replicas")
+    _save_figure(fig, "replicas", plots_dir)
 
 
-def plot_memory(deployment_data):
+def plot_memory(deployment_data, plots_dir):
     fig, axes = _build_plot_grid(len(deployment_data))
 
-    for i, (name, df) in enumerate(deployment_data.items()):
+    for i, (name, df) in tqdm(
+        enumerate(deployment_data.items()), desc="Plotting memory", unit="svc",
+        total=len(deployment_data),
+    ):
         ax = axes[i]
 
         ax.plot(
@@ -290,14 +313,19 @@ def plot_memory(deployment_data):
 
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     plt.subplots_adjust(hspace=0.6)
-    _save_figure(fig, "mem")
+    _save_figure(fig, "mem", plots_dir)
 
 
 if __name__ == "__main__":
     args = parse_args()
     dep_data, glob_df = load_and_filter_data(args.data_dir, args.start, args.end)
+
+    if glob_df.empty:
+        print("No data available to calculate metrics.")
+        sys.exit(1)
+
     calculate_metrics(glob_df)
-    plot_cpu(dep_data)
-    plot_replicas(dep_data)
-    plot_memory(dep_data)
+    plot_cpu(dep_data, args.plots_dir)
+    plot_replicas(dep_data, args.plots_dir)
+    plot_memory(dep_data, args.plots_dir)
     plt.show()
