@@ -3,11 +3,11 @@ import json
 import multiprocessing as mp
 import os
 import sys
-import warnings
 from datetime import datetime
 
 import numpy as np
 import pandas as pd
+from tqdm import tqdm
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, os.pardir))
@@ -21,7 +21,7 @@ from shared.features import (
     feature_names_for_feature_set,
     target_features_for_feature_set,
 )
-from core.architectures.arima import ArimaForecaster, select_order
+from core.architectures.arima import ArimaForecaster
 from training.metrics import compute_metrics, METRIC_NAMES
 
 _CTX = {}
@@ -75,17 +75,6 @@ def _forecast_target(series, cfg):
 
     trend = "auto"
     order = cfg["order"]
-    if order is None:
-        with warnings.catch_warnings():
-            warnings.filterwarnings("ignore")
-            try:
-                order = select_order(
-                    train,
-                    cfg["p_values"], cfg["d_values"], cfg["q_values"],
-                    trend=trend,
-                )
-            except Exception:
-                order = (1, 1, 0)
 
     preds = np.empty((N, H), dtype=np.float64)
     truths = np.empty((N, H), dtype=np.float64)
@@ -145,14 +134,8 @@ def main():
     ap.add_argument("--feature_set", default=PREPROCESSING.FEATURE_SET,
                     choices=list(FEATURE_SETS.keys()),
                     help="Feature set; target channels are forecast per-service (default: %(default)s)")
-    ap.add_argument("--order", default=None,
-                    help="Fixed 'p,d,q' order (skips AIC selection; default: select by AIC)")
-    ap.add_argument("--p_values", default="0,1,2",
-                    help="Comma-separated p candidates for AIC selection (default: %(default)s)")
-    ap.add_argument("--d_values", default="0,1",
-                    help="Comma-separated d candidates for AIC selection (default: %(default)s)")
-    ap.add_argument("--q_values", default="0,1",
-                    help="Comma-separated q candidates for AIC selection (default: %(default)s)")
+    ap.add_argument("--order", default="1,1,0",
+                    help="Fixed 'p,d,q' order applied to every service (default: %(default)s)")
     ap.add_argument("--protocol", choices=["one_shot", "rolling"], default="one_shot",
                     help="one_shot: fit on train, recursive forecast of test. "
                          "rolling: refit every --refit_every steps on a trailing --fit_window.")
@@ -197,10 +180,7 @@ def main():
         "protocol": args.protocol,
         "refit_every": args.refit_every,
         "fit_window": args.fit_window,
-        "order": _parse_order(args.order) if args.order else None,
-        "p_values": _parse_ints(args.p_values),
-        "d_values": _parse_ints(args.d_values),
-        "q_values": _parse_ints(args.q_values),
+        "order": _parse_order(args.order),
         "target_names": target_names,
         "target_idxs": target_idxs,
     }
@@ -218,6 +198,11 @@ def main():
         results = pool.imap_unordered(_worker, jobs, chunksize=1)
 
     n_ok = 0
+    pbar = tqdm(
+        total=len(jobs), desc="ARIMA services", unit="svc",
+        bar_format="{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} "
+                   "[{elapsed}<{remaining}, {rate_fmt}]",
+    )
     for _ms_id, res in results:
         if res:
             n_ok += 1
@@ -227,6 +212,8 @@ def main():
             per_target[tname]["truths"].append(truths)
             per_target[tname]["y_last"].append(y_last)
             per_target[tname]["n_services"] += 1
+        pbar.update(1)
+    pbar.close()
     if pool is not None:
         pool.close()
         pool.join()
