@@ -20,7 +20,7 @@ TEHRAN = timezone(timedelta(hours=3, minutes=30))
 DEFAULT_DEPLOYMENTS = [
     "frontend", "recommendationservice", "productcatalogservice", "cartservice",
     "currencyservice", "shippingservice", "emailservice", "paymentservice",
-    "checkoutservice", "adservice", "redis-cart",
+    "checkoutservice", "adservice",
 ]
 
 METRIC_COLUMNS = [

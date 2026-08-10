@@ -171,11 +171,41 @@ def _request_cart(user):
     user.client.get("/cart")
 
 
+def _request_add_to_cart(user):
+    data = {
+        "product_id": random.choice(products),
+        "quantity": str(random.randint(1, 3)),
+    }
+    resp = user.client.post("/cart", data=data, allow_redirects=False)
+    if resp.status_code < 400:
+        user._cart_items += 1
+
+
+def _request_checkout(user):
+    data = {
+        "email": "user@example.com",
+        "street_address": "123 Main St",
+        "zip_code": "12345",
+        "city": "Anytown",
+        "state": "CA",
+        "country": "US",
+        "credit_card_number": "4432-8015-6152-0454",
+        "credit_card_expiration_month": "12",
+        "credit_card_expiration_year": "2030",
+        "credit_card_cvv": "672",
+    }
+    resp = user.client.post("/cart/checkout", data=data, allow_redirects=False)
+    if resp.status_code < 400:
+        user._cart_items = 0
+
+
 ENDPOINTS = [
     (_request_home, 1),
     (_request_currency, 2),
     (_request_product, 10),
     (_request_cart, 3),
+    (_request_add_to_cart, 4),
+    (_request_checkout, 1),
 ]
 ENDPOINT_FUNCS = [e[0] for e in ENDPOINTS]
 ENDPOINT_WEIGHTS = [e[1] for e in ENDPOINTS]
@@ -190,6 +220,7 @@ class DriverUser(FastHttpUser):
         self._cur_m = -1
         self._slot = self._user_id - GLOBAL["user_pool"]
         self._pending = None
+        self._cart_items = 0
 
     @task
     def drive(self):
@@ -238,6 +269,8 @@ class DriverUser(FastHttpUser):
 
     def _hit(self):
         func = random.choices(ENDPOINT_FUNCS, weights=ENDPOINT_WEIGHTS, k=1)[0]
+        if func is _request_checkout and self._cart_items <= 0:
+            func = _request_add_to_cart
         func(self)
 
 

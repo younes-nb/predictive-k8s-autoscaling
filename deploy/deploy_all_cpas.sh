@@ -18,7 +18,7 @@ RESIDUAL_WINDOW="${WINDOW_SIZE}"
 
 for DEPLOYMENT in $(kubectl get deployments -n $NAMESPACE -o jsonpath='{.items[*].metadata.name}'); do
     
-    if [ "$DEPLOYMENT" == "loadgenerator" ]; then
+    if [ "$DEPLOYMENT" == "loadgenerator" ] || [ "$DEPLOYMENT" == "redis-cart" ]; then
         continue
     fi
 

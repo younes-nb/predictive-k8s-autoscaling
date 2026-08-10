@@ -23,7 +23,6 @@ DEPLOYMENT_LIMITS = {
     "productcatalogservice": 0.2,
     "recommendationservice": 0.2,
     "shippingservice": 0.2,
-    "redis-cart": 0.125,
 }
 
 

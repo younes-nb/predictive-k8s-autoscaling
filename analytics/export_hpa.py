@@ -179,6 +179,8 @@ def fetch_and_process_data(start_ts, end_ts, prom_url):
 
         final_df = final_df.fillna({"Replicas": 0, "RPS": 0, "CPU": 0.0, "Memory": 0.0})
 
+        final_df = final_df[final_df["Deployment"] != "redis-cart"]
+
         final_df = final_df.sort_values(by=["Deployment", "Timestamp"])
         final_df = final_df[
             ["Timestamp", "Namespace", "Deployment", "Replicas", "RPS", "CPU", "Memory"]
