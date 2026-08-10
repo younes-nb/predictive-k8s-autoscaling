@@ -27,11 +27,11 @@ QUERIES = {
         "labels": ["destination_workload"],
     },
     "CPU": {
-        "query": f'sum by (pod) (rate(container_cpu_usage_seconds_total{{namespace="{NAMESPACE}", container="server"}}[1m])) / sum by (pod) (kube_pod_container_resource_limits{{resource="cpu", namespace="{NAMESPACE}", container="server"}})',
+        "query": f'sum by (pod) (rate(container_cpu_usage_seconds_total{{namespace="{NAMESPACE}", container="server"}}[1m])) / sum by (pod) (kube_pod_container_resource_requests{{resource="cpu", namespace="{NAMESPACE}", container="server"}})',
         "labels": ["pod"],
     },
     "Memory": {
-        "query": f'sum by (pod) (container_memory_working_set_bytes{{namespace="{NAMESPACE}", container="server"}}) / sum by (pod) (kube_pod_container_resource_limits{{resource="memory", namespace="{NAMESPACE}", container="server"}})',
+        "query": f'sum by (pod) (container_memory_working_set_bytes{{namespace="{NAMESPACE}", container="server"}}) / sum by (pod) (kube_pod_container_resource_requests{{resource="memory", namespace="{NAMESPACE}", container="server"}})',
         "labels": ["pod"],
     },
 }
@@ -178,9 +178,6 @@ def fetch_and_process_data(start_ts, end_ts, prom_url):
                 final_df[col] = 0
 
         final_df = final_df.fillna({"Replicas": 0, "RPS": 0, "CPU": 0.0, "Memory": 0.0})
-
-        final_df["CPU"] = final_df["CPU"].clip(0.0, 1.0)
-        final_df["Memory"] = final_df["Memory"].clip(0.0, 1.0)
 
         final_df = final_df.sort_values(by=["Deployment", "Timestamp"])
         final_df = final_df[

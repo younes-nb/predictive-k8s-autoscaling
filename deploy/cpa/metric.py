@@ -58,7 +58,7 @@ def get_aggregated_window():
 
     cpu_query = (
         f"sum(rate(container_cpu_usage_seconds_total{{namespace='{config.NAMESPACE}', {pod_selector}, container='server'}}[1m])) by (pod) / "
-        f"sum(kube_pod_container_resource_limits{{namespace='{config.NAMESPACE}', {pod_selector}, container='server', resource='cpu'}}) by (pod)"
+        f"sum(kube_pod_container_resource_requests{{namespace='{config.NAMESPACE}', {pod_selector}, container='server', resource='cpu'}}) by (pod)"
     )
     cpu_buckets = fetch_metric_buckets(cpu_query, start_time, end_time, grid_timestamps)
 
@@ -66,7 +66,7 @@ def get_aggregated_window():
     if "mem" in config.FEATURE_SET:
         mem_query = (
             f"sum(container_memory_working_set_bytes{{namespace='{config.NAMESPACE}', {pod_selector}, container='server'}}) by (pod) / "
-            f"sum(kube_pod_container_resource_limits{{namespace='{config.NAMESPACE}', {pod_selector}, container='server', resource='memory'}}) by (pod)"
+            f"sum(kube_pod_container_resource_requests{{namespace='{config.NAMESPACE}', {pod_selector}, container='server', resource='memory'}}) by (pod)"
         )
         mem_buckets = fetch_metric_buckets(
             mem_query, start_time, end_time, grid_timestamps
@@ -90,17 +90,15 @@ def get_aggregated_window():
             prev_cpu = 0.0
         else:
             avg_cpu = sum(c_vals) / len(c_vals)
-            avg_cpu = max(0.0, min(1.0, avg_cpu))
             avg_cpu = _round2(avg_cpu)
             cpu_diff = avg_cpu - prev_cpu if prev_cpu is not None else 0.0
-            cpu_diff = _round2(np.clip(cpu_diff, -1.0, 1.0))
+            cpu_diff = _round2(cpu_diff)
             prev_cpu = avg_cpu
 
             row = [avg_cpu]
 
             if "mem" in config.FEATURE_SET:
                 avg_mem = sum(mem_buckets[i]) / len(mem_buckets[i])
-                avg_mem = max(0.0, min(1.0, avg_mem))
                 avg_mem = _round2(avg_mem)
                 row.append(avg_mem)
 
@@ -145,13 +143,12 @@ def main():
 
     q_load = (
         f"sum(rate(container_cpu_usage_seconds_total{{namespace='{config.NAMESPACE}', {pod_selector}, container='server'}}[1m])) / "
-        f"sum(kube_pod_container_resource_limits{{namespace='{config.NAMESPACE}', {pod_selector}, container='server', resource='cpu'}})"
+        f"sum(kube_pod_container_resource_requests{{namespace='{config.NAMESPACE}', {pod_selector}, container='server', resource='cpu'}})"
     )
     res_load = utils.query_prometheus(q_load)
 
     if res_load:
         current_load = float(res_load[0]["value"][1])
-        current_load = max(0.0, min(1.0, current_load))
         current_load = _round2(current_load)
     else:
         last_point = history[-1] if history else 0.0
@@ -159,11 +156,10 @@ def main():
 
     q_mem = (
         f"sum(container_memory_working_set_bytes{{namespace='{config.NAMESPACE}', {pod_selector}, container='server'}}) / "
-        f"sum(kube_pod_container_resource_limits{{namespace='{config.NAMESPACE}', {pod_selector}, container='server', resource='memory'}})"
+        f"sum(kube_pod_container_resource_requests{{namespace='{config.NAMESPACE}', {pod_selector}, container='server', resource='memory'}})"
     )
     res_mem = utils.query_prometheus(q_mem)
     current_mem = float(res_mem[0]["value"][1]) if res_mem else 0.0
-    current_mem = max(0.0, min(1.0, current_mem))
     current_mem = _round2(current_mem)
 
     t_end = time.time()

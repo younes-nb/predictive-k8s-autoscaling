@@ -60,7 +60,6 @@ def main():
                 preds_tensor = (
                     raw_preds[0] if isinstance(raw_preds, tuple) else raw_preds
                 )
-                preds_tensor = torch.clamp(preds_tensor, min=0.0, max=1.0)
                 preds_tensor = torch.round(preds_tensor * 100) / 100
                 if config.NUM_TARGETS > 1:
                     predicted_load_final = preds_tensor[0, -1, 0].item()
@@ -73,11 +72,9 @@ def main():
                     state, now, predicted_load_final, predicted_memory_final
                 )
                 delta_load, delta_mem = online_correction.compute_delta(state)
-                predicted_load_final = min(1.0, predicted_load_final + delta_load)
+                predicted_load_final = predicted_load_final + delta_load
                 if config.NUM_TARGETS > 1:
-                    predicted_memory_final = min(
-                        1.0, predicted_memory_final + delta_mem
-                    )
+                    predicted_memory_final = predicted_memory_final + delta_mem
 
             predicted_load_final = round(predicted_load_final, 2)
             if config.NUM_TARGETS > 1:

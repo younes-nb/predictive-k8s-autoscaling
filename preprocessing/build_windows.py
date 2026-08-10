@@ -544,11 +544,6 @@ def _phase_aggregate(args, args_dict, target_indices, feature_names,
         join_on = ["_t"] + join_keys.get(t, [])
         joined = joined.join(t_frame.lazy(), on=join_on, how="left")
 
-    for feat in feature_names:
-        is_resource = "cpu" in feat.lower() or "mem" in feat.lower()
-        if is_resource:
-            joined = joined.with_columns(pl.col(feat).clip(0.0, 1.0))
-
     # No re-sort here: _merge_part_frames already orders by (_t, id_cols), so rows
     # within each service are in _t order; group_by below preserves it.
     joined_df = joined.drop_nulls(feature_names).collect(engine="streaming")
