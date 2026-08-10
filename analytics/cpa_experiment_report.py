@@ -42,6 +42,10 @@ def parse_args():
         "--plots_dir", type=str, default=DEFAULT_PLOTS_DIR,
         help="Directory to save plot PNGs",
     )
+    parser.add_argument(
+        "--horizon", type=int, default=5,
+        help="Forecast horizon in minutes (pred[t] targets actual[t+horizon])",
+    )
     return parser.parse_args()
 
 
@@ -112,7 +116,35 @@ def _mse_mae(y_true, y_pred):
     return mse, mae
 
 
-def calculate_metrics(global_df):
+def _forecast_metrics(actual, pred, delta, horizon):
+    """Evaluate horizon-ahead forecasts where pred[t] targets actual[t+horizon].
+
+    Returns (final, raw, naive, n) where final/raw/naive are (mse, mae) tuples
+    or None, and n is the number of aligned rows used:
+      - final: the logged prediction (raw model output + residual correction)
+      - raw:   the model output before residual correction (pred - delta)
+      - naive: persistence baseline (actual[t] used to forecast actual[t+horizon])
+    """
+    frame = pd.DataFrame(
+        {
+            "y": actual.shift(-horizon),
+            "a": actual,
+            "final": pred,
+            "raw": (pred - delta).clip(lower=0.0) if delta is not None else None,
+        }
+    ).dropna(subset=["y", "a", "final"])
+
+    n = len(frame)
+    if n < horizon:
+        return None, None, None, n
+
+    final = _mse_mae(frame["y"], frame["final"])
+    naive = _mse_mae(frame["y"], frame["a"])
+    raw = _mse_mae(frame["y"], frame["raw"]) if delta is not None else None
+    return final, raw, naive, n
+
+
+def calculate_metrics(global_df, horizon=5):
     if global_df.empty:
         print("No data available to calculate metrics.")
         return
@@ -120,20 +152,27 @@ def calculate_metrics(global_df):
     cpu_valid = global_df[global_df["pred_cpu"] > 0]
     mem_valid = global_df[global_df["pred_mem"] > 0]
 
+    has_delta_cpu = "delta_cpu" in global_df.columns
+    has_delta_mem = "delta_mem" in global_df.columns
+
     if cpu_valid.empty:
-        print("No valid CPU predictions (>0) found.")
-        cpu_mse, cpu_mae = 0, 0
+        cpu_res = (None, None, None, 0)
     else:
-        cpu_mse, cpu_mae = _mse_mae(
-            cpu_valid["cpu_actual_norm"], cpu_valid["cpu_pred_norm"]
+        cpu_res = _forecast_metrics(
+            cpu_valid["cpu_actual_norm"],
+            cpu_valid["cpu_pred_norm"],
+            cpu_valid["delta_cpu"] if has_delta_cpu else None,
+            horizon,
         )
 
     if mem_valid.empty:
-        print("No valid Memory predictions (>0) found.")
-        mem_mse, mem_mae = 0, 0
+        mem_res = (None, None, None, 0)
     else:
-        mem_mse, mem_mae = _mse_mae(
-            mem_valid["mem_actual_norm"], mem_valid["mem_pred_norm"]
+        mem_res = _forecast_metrics(
+            mem_valid["mem_actual_norm"],
+            mem_valid["mem_pred_norm"],
+            mem_valid["delta_mem"] if has_delta_mem else None,
+            horizon,
         )
 
     inf_times = global_df["inference_time_s"]
@@ -149,12 +188,33 @@ def calculate_metrics(global_df):
     print("GLOBAL EXPERIMENT METRICS")
     print("=" * 40)
     print(f"Total Data Points:    {len(global_df)}")
+    print(f"Forecast Horizon:     {horizon} min (pred[t] vs actual[t+{horizon}])")
     print("-" * 20)
-    print(f"CPU  MSE:       {cpu_mse:.5f}")
-    print(f"CPU  MAE:       {cpu_mae:.5f} ({(cpu_mae*100):.2f}%)")
-    print("-" * 20)
-    print(f"Mem  MSE:       {mem_mse:.5f}")
-    print(f"Mem  MAE:       {mem_mae:.5f} ({(mem_mae*100):.2f}%)")
+
+    def _row(target, res):
+        final, raw, naive, n = res
+        if final is None:
+            print(f"{target:5s}  no valid aligned data ({n} rows)")
+            return
+        f_mse, f_mae = final
+        n_mse, n_mae = naive
+        d_final = (f_mae - n_mae) / n_mae * 100 if n_mae > 0 else float("nan")
+        line = (
+            f"{target:5s}  final MSE {f_mse:.5f} MAE {f_mae:.5f} ({f_mae*100:.2f}%)"
+            f"  | naive MSE {n_mse:.5f} MAE {n_mae:.5f} ({n_mae*100:.2f}%)"
+            f"  | Delta {d_final:+.1f}%"
+        )
+        if raw is not None:
+            r_mse, r_mae = raw
+            d_raw = (r_mae - n_mae) / n_mae * 100 if n_mae > 0 else float("nan")
+            line += (
+                f"  (raw MSE {r_mse:.5f} MAE {r_mae:.5f} ({r_mae*100:.2f}%)"
+                f"  Delta {d_raw:+.1f}%)"
+            )
+        print(line)
+
+    _row("CPU", cpu_res)
+    _row("Mem", mem_res)
     print("-" * 20)
     print(f"Avg Inference Time:   {avg_inf:.4f} s")
     print(f"P95 Inference Time:   {p95_inf:.4f} s")
@@ -198,7 +258,7 @@ def _save_figure(fig, suffix, plots_dir):
     print(f"Plot saved to {output_file}")
 
 
-def plot_cpu(deployment_data, plots_dir):
+def plot_cpu(deployment_data, plots_dir, horizon=5):
     fig, axes = _build_plot_grid(len(deployment_data))
 
     for i, (name, df) in tqdm(
@@ -216,7 +276,7 @@ def plot_cpu(deployment_data, plots_dir):
         )
         ax.plot(
             df["timestamp"],
-            df["cpu_pred_norm"].shift(5),
+            df["cpu_pred_norm"].shift(horizon),
             label="Predicted Load (%)",
             color="orange",
             linestyle="--",
@@ -275,7 +335,7 @@ def plot_replicas(deployment_data, plots_dir):
     _save_figure(fig, "replicas", plots_dir)
 
 
-def plot_memory(deployment_data, plots_dir):
+def plot_memory(deployment_data, plots_dir, horizon=5):
     fig, axes = _build_plot_grid(len(deployment_data))
 
     for i, (name, df) in tqdm(
@@ -293,7 +353,7 @@ def plot_memory(deployment_data, plots_dir):
         )
         ax.plot(
             df["timestamp"],
-            df["mem_pred_norm"].shift(5),
+            df["mem_pred_norm"].shift(horizon),
             label="Predicted Memory (%)",
             color="orange",
             linestyle="--",
@@ -324,8 +384,8 @@ if __name__ == "__main__":
         print("No data available to calculate metrics.")
         sys.exit(1)
 
-    calculate_metrics(glob_df)
-    plot_cpu(dep_data, args.plots_dir)
+    calculate_metrics(glob_df, args.horizon)
+    plot_cpu(dep_data, args.plots_dir, args.horizon)
     plot_replicas(dep_data, args.plots_dir)
-    plot_memory(dep_data, args.plots_dir)
+    plot_memory(dep_data, args.plots_dir, args.horizon)
     plt.show()
