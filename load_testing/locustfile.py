@@ -40,6 +40,14 @@ GLOBAL = {
     "test_hours": None,
 }
 MINUTE_STATS = {}    # minute index -> fired requests (for the end-of-test check)
+_NEXT_USER_ID = 0    # per-user id generator (single-process runs only)
+
+
+def _next_user_id() -> int:
+    global _NEXT_USER_ID
+    user_id = _NEXT_USER_ID
+    _NEXT_USER_ID += 1
+    return user_id
 
 
 def log(msg: str) -> None:
@@ -178,8 +186,9 @@ class DriverUser(FastHttpUser):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self._user_id = _next_user_id()
         self._cur_m = -1
-        self._slot = -1
+        self._slot = self._user_id - GLOBAL["user_pool"]
         self._pending = None
 
     @task
@@ -190,10 +199,11 @@ class DriverUser(FastHttpUser):
             gevent.sleep(1.0)
             return
 
+        pool = GLOBAL["user_pool"]
         m = int((now - epoch) // 60)
         if m != self._cur_m:
             self._cur_m = m
-            self._slot = -1
+            self._slot = self._user_id - pool
             self._pending = None
 
         if self._pending is not None:
@@ -213,7 +223,6 @@ class DriverUser(FastHttpUser):
         # Each user owns slots u, u+pool, u+2*pool, ... so the minute's
         # requests are paced one every 60/count seconds (fire_at is an absolute
         # time), instead of all firing in a burst at the top of the minute.
-        pool = GLOBAL["user_pool"]
         slot = self._slot + pool
         if slot >= count:
             gevent.sleep(1.0)
