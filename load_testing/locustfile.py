@@ -54,17 +54,32 @@ def log(msg: str) -> None:
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
-def load_mcr_counts(csv_path: str, max_requests: int) -> list[int]:
+def load_mcr_counts(csv_path: str, max_requests: int,
+                    n_minutes: int | None = None) -> list[int]:
     """Read http_mcr_<service>_<ts>.csv (columns msname,timestamp,http_mcr) and
-    return the per-1-minute target request count: round(http_mcr * max_requests)."""
-    counts = []
+    return the per-1-minute target request count.
+
+    With no window (n_minutes=None) the CSV is taken as-is: http_mcr is already
+    normalized to the whole-dataset peak, so round(http_mcr * max_requests)
+    peaks at max_requests. When a window is selected via TEST_HOURS
+    (n_minutes = TEST_HOURS*60), the window is re-normalized so its own maximum
+    maps to max_requests — the peak of the selected window drives the load
+    instead of the whole-dataset peak.
+    """
+    mcr = []
     with open(csv_path, newline="") as f:
         for row in csv.DictReader(f):
-            value = float(row["http_mcr"])
-            counts.append(max(0, int(round(value * max_requests))))
-    if not counts:
+            mcr.append(float(row["http_mcr"]))
+    if not mcr:
         sys.exit(f"No data rows in {csv_path}")
-    return counts
+    if n_minutes is not None:
+        mcr = mcr[:n_minutes]
+        if not mcr:
+            sys.exit(f"No data rows in the first {n_minutes} minutes of {csv_path}")
+    peak = max(mcr)
+    if peak <= 0:
+        sys.exit(f"Workload window has peak http_mcr <= 0 in {csv_path}")
+    return [max(0, int(round(value / peak * max_requests))) for value in mcr]
 
 
 def _hit(user):
@@ -110,7 +125,8 @@ def _add_cli_args(parser):
 @events.test_start.add_listener
 def _on_test_start(environment, **_kw):
     opts = environment.parsed_options
-    counts = load_mcr_counts(opts.mcr_csv, opts.max_requests)
+    n_minutes = int(round(opts.test_hours * 60)) if opts.test_hours else None
+    counts = load_mcr_counts(opts.mcr_csv, opts.max_requests, n_minutes)
     MINUTE_STATS.clear()
     GLOBAL.update(
         counts=counts,
@@ -119,8 +135,10 @@ def _on_test_start(environment, **_kw):
         test_hours=opts.test_hours if opts.test_hours else len(counts) / 60.0,
         epoch=time.time() + START_BUFFER_SECONDS,
     )
+    window = f", {len(counts)}-min window peak {max(counts)} req/min" \
+        if n_minutes is not None else ""
     log(f"Loaded {len(counts)} minutes from {opts.mcr_csv} "
-        f"(max {opts.max_requests} req/min, pool {opts.user_pool}, "
+        f"(max {opts.max_requests} req/min{window}, pool {opts.user_pool}, "
         f"duration {GLOBAL['test_hours']:.2f}h)")
 
 
