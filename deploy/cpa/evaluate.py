@@ -9,13 +9,48 @@ import utils
 import online_correction
 
 
+def _fail_conditions():
+    return {"AbleToScale": False, "ScalingActive": False, "ScalingLimited": False}
+
+
+def _last_target():
+    try:
+        return int(utils.load_state().get("last_target", 1))
+    except Exception:
+        return 1
+
+
+def _scale_up_ceiling(current_replicas):
+    """Max replicas reachable in one eval interval under the HPA default
+    scaleUp policy: at most max(100% of current, SCALE_UP_MAX_PODS) pods per
+    15s period."""
+    rep = int(current_replicas)
+    periods = max(
+        1, int(config.EVAL_INTERVAL_SECONDS // config.SCALE_UP_PERIOD_SECONDS)
+    )
+    for _ in range(periods):
+        rep += max(
+            int(np.ceil(rep * config.SCALE_UP_MAX_PERCENT / 100.0)),
+            config.SCALE_UP_MAX_PODS,
+        )
+    return rep
+
+
 def main():
     t_start_eval = time.time()
     try:
         raw_input = sys.stdin.read()
         if not raw_input:
             utils.log_to_file("ERROR: Empty input received from stdin")
-            print(json.dumps({"targetReplicas": 1, "logs": "Empty input"}))
+            print(
+                json.dumps(
+                    {
+                        "targetReplicas": _last_target(),
+                        "logs": "Empty input",
+                        "conditions": _fail_conditions(),
+                    }
+                )
+            )
             return
 
         envelope = json.loads(raw_input)
@@ -94,14 +129,26 @@ def main():
             cpu_to_scale = current_load
             mem_to_scale = current_memory
 
-        desired_cpu = current_replicas * (cpu_to_scale / safe_threshold)
-        raw_desired = int(np.ceil(desired_cpu))
+        # HPA-style tolerance deadband: ignore metric ratios within TOLERANCE
+        # of 1.0 (default --horizontal-pod-autoscaler-tolerance).
+        cpu_ratio = cpu_to_scale / safe_threshold
+        if abs(cpu_ratio - 1.0) <= config.TOLERANCE:
+            cpu_ratio = 1.0
+        raw_desired = int(np.ceil(current_replicas * cpu_ratio))
 
         if config.NUM_TARGETS > 1:
-            desired_mem = current_replicas * (mem_to_scale / safe_threshold)
-            raw_desired = max(raw_desired, int(np.ceil(desired_mem)))
+            mem_ratio = mem_to_scale / safe_threshold
+            if abs(mem_ratio - 1.0) <= config.TOLERANCE:
+                mem_ratio = 1.0
+            raw_desired = max(raw_desired, int(np.ceil(current_replicas * mem_ratio)))
+
+        scaling_limited = raw_desired >= config.MAX_REPLICAS
 
         raw_desired = max(config.MIN_REPLICAS, min(config.MAX_REPLICAS, raw_desired))
+
+        # HPA-style scale-up rate limit (default scaleUp policy).
+        if raw_desired > current_replicas:
+            raw_desired = min(raw_desired, _scale_up_ceiling(current_replicas))
 
         rec_history.append({"time": now, "replicas": raw_desired})
         window = [
@@ -114,6 +161,11 @@ def main():
             if raw_desired > current_replicas
             else (max(window) if window else raw_desired)
         )
+
+        state["last_target"] = int(final_rec)
+        state["last_load"] = current_load
+        state["last_mem"] = current_memory
+        state["last_replicas"] = current_replicas
 
         utils.save_state(state)
 
@@ -140,12 +192,25 @@ def main():
         output = {
             "targetReplicas": int(final_rec),
             "logs": logs,
+            "conditions": {
+                "AbleToScale": True,
+                "ScalingActive": True,
+                "ScalingLimited": bool(scaling_limited),
+            },
         }
         sys.stdout.write(json.dumps(output))
 
     except Exception as e:
         utils.log_to_file(f"CRITICAL EXCEPTION: {str(e)}\n{traceback.format_exc()}")
-        print(json.dumps({"targetReplicas": 1, "logs": f"Error: {str(e)}"}))
+        print(
+            json.dumps(
+                {
+                    "targetReplicas": _last_target(),
+                    "logs": f"Error: {str(e)}",
+                    "conditions": _fail_conditions(),
+                }
+            )
+        )
 
 
 if __name__ == "__main__":

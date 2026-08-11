@@ -55,18 +55,22 @@ def get_aggregated_window():
     grid_timestamps = [start_time + (i * 60) for i in range(config.WINDOW_SIZE)]
 
     pod_selector = f"pod=~'{config.DEPLOYMENT}-[a-z0-9]+-[a-z0-9]+'"
+    ready_filter = (
+        f"kube_pod_container_status_ready{{namespace='{config.NAMESPACE}', "
+        f"container='server'}} == 1"
+    )
 
     cpu_query = (
-        f"sum(rate(container_cpu_usage_seconds_total{{namespace='{config.NAMESPACE}', {pod_selector}, container='server'}}[1m])) by (pod) / "
-        f"sum(kube_pod_container_resource_requests{{namespace='{config.NAMESPACE}', {pod_selector}, container='server', resource='cpu'}}) by (pod)"
+        f"sum(rate(container_cpu_usage_seconds_total{{namespace='{config.NAMESPACE}', {pod_selector}, container='server'}}[1m]) and on (pod) ({ready_filter})) by (pod) / "
+        f"sum(kube_pod_container_resource_requests{{namespace='{config.NAMESPACE}', {pod_selector}, container='server', resource='cpu'}} and on (pod) ({ready_filter})) by (pod)"
     )
     cpu_buckets = fetch_metric_buckets(cpu_query, start_time, end_time, grid_timestamps)
 
     mem_buckets = None
     if "mem" in config.FEATURE_SET:
         mem_query = (
-            f"sum(container_memory_working_set_bytes{{namespace='{config.NAMESPACE}', {pod_selector}, container='server'}}) by (pod) / "
-            f"sum(kube_pod_container_resource_requests{{namespace='{config.NAMESPACE}', {pod_selector}, container='server', resource='memory'}}) by (pod)"
+            f"sum(container_memory_working_set_bytes{{namespace='{config.NAMESPACE}', {pod_selector}, container='server'}} and on (pod) ({ready_filter})) by (pod) / "
+            f"sum(kube_pod_container_resource_requests{{namespace='{config.NAMESPACE}', {pod_selector}, container='server', resource='memory'}} and on (pod) ({ready_filter})) by (pod)"
         )
         mem_buckets = fetch_metric_buckets(
             mem_query, start_time, end_time, grid_timestamps
@@ -137,13 +141,17 @@ def main():
     history, use_prediction = get_aggregated_window()
     pod_selector = f"pod=~'{config.DEPLOYMENT}-[a-z0-9]+-[a-z0-9]+'"
 
-    q_replicas = f"count(kube_pod_status_phase{{namespace='{config.NAMESPACE}', {pod_selector}, phase='Running'}})"
+    q_replicas = f"count(kube_pod_container_status_ready{{namespace='{config.NAMESPACE}', {pod_selector}, container='server'}} == 1)"
     res_rep = utils.query_prometheus(q_replicas)
-    current_replicas = int(res_rep[0]["value"][1]) if res_rep else 1
+    if res_rep:
+        current_replicas = int(res_rep[0]["value"][1])
+    else:
+        state = utils.load_state()
+        current_replicas = int(state.get("last_replicas", 1))
 
     q_load = (
-        f"sum(rate(container_cpu_usage_seconds_total{{namespace='{config.NAMESPACE}', {pod_selector}, container='server'}}[1m])) / "
-        f"sum(kube_pod_container_resource_requests{{namespace='{config.NAMESPACE}', {pod_selector}, container='server', resource='cpu'}})"
+        f"sum(rate(container_cpu_usage_seconds_total{{namespace='{config.NAMESPACE}', {pod_selector}, container='server'}}[1m]) and on (pod) ({ready_filter})) / "
+        f"sum(kube_pod_container_resource_requests{{namespace='{config.NAMESPACE}', {pod_selector}, container='server', resource='cpu'}} and on (pod) ({ready_filter}))"
     )
     res_load = utils.query_prometheus(q_load)
 
@@ -151,15 +159,25 @@ def main():
         current_load = float(res_load[0]["value"][1])
         current_load = _round2(current_load)
     else:
-        last_point = history[-1] if history else 0.0
-        current_load = last_point[0] if isinstance(last_point, list) else last_point
+        state = utils.load_state()
+        last_load = state.get("last_load")
+        if last_load is not None:
+            current_load = _round2(float(last_load))
+        else:
+            last_point = history[-1] if history else 0.0
+            current_load = last_point[0] if isinstance(last_point, list) else last_point
 
     q_mem = (
-        f"sum(container_memory_working_set_bytes{{namespace='{config.NAMESPACE}', {pod_selector}, container='server'}}) / "
-        f"sum(kube_pod_container_resource_requests{{namespace='{config.NAMESPACE}', {pod_selector}, container='server', resource='memory'}})"
+        f"sum(container_memory_working_set_bytes{{namespace='{config.NAMESPACE}', {pod_selector}, container='server'}} and on (pod) ({ready_filter})) / "
+        f"sum(kube_pod_container_resource_requests{{namespace='{config.NAMESPACE}', {pod_selector}, container='server', resource='memory'}} and on (pod) ({ready_filter}))"
     )
     res_mem = utils.query_prometheus(q_mem)
-    current_mem = float(res_mem[0]["value"][1]) if res_mem else 0.0
+    if res_mem:
+        current_mem = float(res_mem[0]["value"][1])
+    else:
+        state = utils.load_state()
+        last_mem = state.get("last_mem")
+        current_mem = _round2(float(last_mem)) if last_mem is not None else 0.0
     current_mem = _round2(current_mem)
 
     t_end = time.time()
