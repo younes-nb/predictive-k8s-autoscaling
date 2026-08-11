@@ -86,7 +86,7 @@ def _add_cli_args(parser):
     parser.add_argument(
         "--max-requests",
         type=int,
-        default=10000,
+        default=1000,
         help="Request count per 1-minute interval when http_mcr == 1.0",
         env_var="MAX_REQUESTS",
     )
