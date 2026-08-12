@@ -105,6 +105,9 @@ def fetch_metric_data(metric_name, query_info, start_ts, end_ts, tehran_tz, prom
                 if len(parts) >= 3:
                     entity = "-".join(parts[:-2])
 
+            if entity.endswith("-hpa"):
+                entity = entity[: -len("-hpa")]
+
             for value in result["values"]:
                 dt_utc = datetime.fromtimestamp(value[0], pytz.utc)
                 dt_tehran = dt_utc.astimezone(tehran_tz)
