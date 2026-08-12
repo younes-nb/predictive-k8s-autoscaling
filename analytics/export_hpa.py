@@ -14,6 +14,7 @@ PROM_SERVICE = "svc/prometheus-stack-kube-prom-prometheus"
 PROM_NAMESPACE = "monitoring"
 LOCAL_PORT = 9090
 STEP_SECONDS = 60
+OUTPUT_DIR = "/proj/k8sautoscaledl-PG0"
 
 NAMESPACE = "online-boutique"
 
@@ -194,7 +195,8 @@ def fetch_and_process_data(start_ts, end_ts, prom_url):
         final_df["RPS"] = final_df["RPS"].round(2)
         final_df["Replicas"] = final_df["Replicas"].astype(int)
 
-        output_filename = "hpa_historical_logs.csv"
+        output_filename = os.path.join(OUTPUT_DIR, "hpa_historical_logs.csv")
+        os.makedirs(OUTPUT_DIR, exist_ok=True)
         final_df.to_csv(output_filename, index=False)
 
         print(f"Successfully saved {len(final_df)} records to {output_filename}\n")
