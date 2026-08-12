@@ -10,6 +10,8 @@ import json
 import hashlib
 import math
 import multiprocessing as mp
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from concurrent.futures import ProcessPoolExecutor, as_completed, BrokenExecutor
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -47,6 +49,11 @@ from tqdm import tqdm
 
 _WINDOW_DECIMALS = 2
 _WINDOW_DTYPE = np.float16
+
+_CSV_COLUMN_MAP = {
+    "cpu_utilization": "CPU",
+    "memory_utilization": "Memory",
+}
 
 from core.utils import windowize_multivariate
 
@@ -248,8 +255,31 @@ def _service_arrays_paths(out_dir):
     )
 
 
+def _csv_fingerprint(csv_path):
+    st = os.stat(csv_path)
+    return (st.st_mtime_ns, st.st_size)
+
+
+def _freq_seconds(freq):
+    """Parse a polars duration string like '1m'/'60s'/'2h' into seconds, or
+    None if it can't be parsed (gap check is then disabled)."""
+    if not freq:
+        return None
+    unit = freq[-1].lower()
+    mult = {"s": 1, "m": 60, "h": 3600, "d": 86400}.get(unit)
+    if mult is None:
+        return None
+    try:
+        return int(freq[:-1]) * mult
+    except ValueError:
+        return None
+
+
 def _arrays_signature(args, base_table):
-    fp = _parquet_fingerprint(DATASET_TABLES[base_table]["parquet_dir"])
+    if args.csv_path:
+        fp = _csv_fingerprint(args.csv_path)
+    else:
+        fp = _parquet_fingerprint(DATASET_TABLES[base_table]["parquet_dir"])
     blob = {
         "feature_set": args.feature_set,
         "freq": args.freq,
@@ -294,6 +324,190 @@ def _save_service_arrays(service_arrays, arrays_path, index_path, signature):
     print(f"Service arrays cached: {os.path.basename(arrays_path)} "
           f"({total} rows x {channels} ch, {len(service_arrays)} services)",
           flush=True)
+
+
+def _load_csv_service_arrays(csv_path, feature_names, time_col, id_col,
+                             tz_name, input_len, pred_horizon, freq):
+    """Load per-service feature arrays from an HPA-logs CSV.
+
+    Each feature is resolved to a CSV column via _CSV_COLUMN_MAP. Rows are
+    ordered by timestamp (parsed as tz-aware then epoch), and a service is
+    skipped if its timestamps have gaps or duplicates (windowize is positional
+    and would silently misalign rows otherwise).
+    """
+    df = pl.read_csv(csv_path)
+    df_cols = set(df.columns)
+    if time_col not in df_cols or id_col not in df_cols:
+        raise SystemExit(
+            f"CSV '{csv_path}' missing required column '{time_col}' or "
+            f"'{id_col}' (got {sorted(df_cols)})"
+        )
+
+    col_map = {}
+    for f in feature_names:
+        if f not in _CSV_COLUMN_MAP:
+            raise SystemExit(
+                f"Feature '{f}' has no CSV column mapping; add it to "
+                f"_CSV_COLUMN_MAP (csv_path={csv_path})"
+            )
+        col = _CSV_COLUMN_MAP[f]
+        if col not in df_cols:
+            raise SystemExit(
+                f"CSV '{csv_path}' missing column '{col}' needed for feature "
+                f"'{f}' (got {sorted(df_cols)})"
+            )
+        col_map[f] = col
+
+    tz = ZoneInfo(tz_name)
+    ts_list = []
+    n_unparsed = 0
+    for s in df[time_col].to_list():
+        try:
+            ts_list.append(
+                datetime.strptime(str(s), "%Y-%m-%d %H:%M:%S")
+                .replace(tzinfo=tz)
+                .timestamp()
+            )
+        except ValueError:
+            ts_list.append(None)
+            n_unparsed += 1
+    if n_unparsed:
+        print(f"  CSV: dropped {n_unparsed} rows with unparseable timestamps",
+              flush=True)
+    df = df.with_columns(pl.Series("_ts", [int(v) if v is not None else None for v in ts_list], dtype=pl.Int64))
+    df = df.drop_nulls("_ts")
+
+    step_sec = _freq_seconds(freq)
+    df = df.select([id_col, "_ts"] + [col_map[f] for f in feature_names])
+    df = df.sort([id_col, "_ts"])
+
+    service_arrays = {}
+    skipped = []
+    for key, g in df.group_by([id_col], maintain_order=True):
+        svc = key[0] if isinstance(key, (list, tuple)) else key
+        ts = g["_ts"].to_numpy()
+        diffs = np.diff(ts)
+        if step_sec is not None:
+            bad = diffs[diffs != step_sec]
+        else:
+            bad = diffs[diffs <= 0]
+        if bad.size:
+            skipped.append(svc)
+            continue
+        arr = np.stack(
+            [g[col_map[f]].to_numpy().astype("float32") for f in feature_names],
+            axis=1,
+        )
+        if arr.shape[0] < input_len + pred_horizon:
+            skipped.append(svc)
+            continue
+        service_arrays[svc] = arr
+
+    if skipped:
+        print(f"  CSV: skipped {len(skipped)} services (timestamp gaps/dups "
+              f"or too short): {', '.join(sorted(skipped)[:20])}",
+              flush=True)
+    print(f"  CSV: {len(service_arrays)} services loaded from "
+          f"{os.path.basename(csv_path)}", flush=True)
+    return service_arrays
+
+
+def _run_csv_source(args, spec, feature_names, target_indices,
+                    resource_indices, num_workers):
+    """CSV-source build: build service arrays from the CSV, then reuse the
+    exact same windows phase as the parquet path."""
+    csv_path = args.csv_path
+    if not os.path.exists(csv_path):
+        raise SystemExit(f"CSV path not found: {csv_path}")
+
+    os.makedirs(args.out_dir, exist_ok=True)
+    for stale in glob.glob(os.path.join(args.out_dir, "tmp*")):
+        if os.path.isdir(stale):
+            shutil.rmtree(stale, ignore_errors=True)
+
+    if args.recompute:
+        cached = glob.glob(os.path.join(args.out_dir, "part-*.done")) + \
+                 glob.glob(os.path.join(args.out_dir, "part-*_chunk-*.npy"))
+        for f in cached:
+            os.remove(f)
+        if cached:
+            print(f"Removed {len(cached)} cached artifacts for recompute",
+                  flush=True)
+
+    arrays_path, index_path = _service_arrays_paths(args.out_dir)
+    signature = _arrays_signature(args, spec.get("base_table"))
+    cache_valid = _arrays_cache_valid(arrays_path, index_path, signature)
+
+    if args.phase == "windows":
+        if not cache_valid:
+            raise SystemExit(
+                "--phase windows but CSV service-array cache is missing or "
+                "stale; run without --phase first"
+            )
+        with open(index_path, "r") as f:
+            all_services_list = sorted(json.load(f)["index"].keys())
+        print(f"CSV service-array cache is valid: {len(all_services_list)} "
+              f"services", flush=True)
+    elif cache_valid:
+        with open(index_path, "r") as f:
+            all_services_list = sorted(json.load(f)["index"].keys())
+        print(f"CSV service-array cache is valid: {len(all_services_list)} "
+              f"services", flush=True)
+    else:
+        service_arrays = _load_csv_service_arrays(
+            csv_path, feature_names, args.csv_time_col, args.csv_id_col,
+            args.csv_tz, args.input_len, args.pred_horizon, args.freq,
+        )
+        if args.max_services and len(service_arrays) > args.max_services:
+            rng = np.random.default_rng(args.subset_seed)
+            idxs = rng.choice(
+                len(service_arrays), size=args.max_services, replace=False
+            )
+            keep = set(np.array(sorted(service_arrays.keys()))[idxs].tolist())
+            service_arrays = {k: v for k, v in service_arrays.items() if k in keep}
+            print(f"Selected subset: {len(service_arrays)} services")
+        else:
+            print(f"Processing all {len(service_arrays)} services")
+        if not service_arrays:
+            print("No services with enough data in CSV; nothing to do.")
+            return
+        all_services_list = sorted(service_arrays.keys())
+        _save_service_arrays(service_arrays, arrays_path, index_path, signature)
+
+    if args.batch_size and args.batch_size > 0:
+        group_size = args.batch_size
+    else:
+        group_size = max(1, math.ceil(len(all_services_list) / num_workers))
+    total_groups = (len(all_services_list) + group_size - 1) // group_size
+
+    groups_to_run = []
+    for gi in range(total_groups):
+        done_marker = os.path.join(args.out_dir, f"part-{gi:04d}.done")
+        if os.path.exists(done_marker):
+            continue
+        groups_to_run.append(gi)
+
+    if not groups_to_run:
+        print("\nAll service groups processed (all cached).")
+        return
+
+    args_dict = {
+        "out_dir": args.out_dir,
+        "time_col": args.csv_time_col,
+        "freq": args.freq,
+        "input_len": args.input_len,
+        "pred_horizon": args.pred_horizon,
+        "stride": args.stride,
+        "train_frac": args.train_frac,
+        "val_frac": args.val_frac,
+        "service_col": args.csv_id_col,
+        "feature_set": args.feature_set,
+        "resource_indices": resource_indices,
+    }
+
+    _phase_windows(args, args_dict, target_indices, all_services_list,
+                   groups_to_run, group_size, num_workers,
+                   arrays_path, index_path)
 
 
 def _reexec():
@@ -356,6 +570,17 @@ def main():
                     help="Force rebuild of the unique-service discovery cache")
     p.add_argument("--sync", action="store_true",
                     help="Run os.sync() after saving each chunk (durability; slower)")
+    p.add_argument("--csv_path", default=None,
+                    help="Path to an HPA-logs CSV (e.g. hpa_historical_logs.csv). "
+                         "When set, windows are built from the CSV instead of the "
+                         "parquet tables; each feature maps to a CSV column via "
+                         "_CSV_COLUMN_MAP (so cpu/cpu_mem/cpu_mem_both work unchanged).")
+    p.add_argument("--csv_time_col", default="Timestamp",
+                    help="CSV timestamp column (default: %(default)s)")
+    p.add_argument("--csv_id_col", default="Deployment",
+                    help="CSV service-id column (default: %(default)s)")
+    p.add_argument("--csv_tz", default="Asia/Tehran",
+                    help="Timezone of CSV timestamps (default: %(default)s)")
     p.add_argument("--phase", choices=["auto", "windows"], default="auto",
                     help=argparse.SUPPRESS)
 
@@ -383,6 +608,11 @@ def main():
         i for i, f in enumerate(feature_names)
         if "cpu" in f.lower() or "mem" in f.lower()
     ]
+
+    if args.csv_path:
+        _run_csv_source(args, spec, feature_names, target_indices,
+                        resource_indices, num_workers)
+        return
 
     needed_tables = sorted(list(tables_for_feature_set(args.feature_set)))
     table_exprs = table_to_feature_exprs(args.feature_set)

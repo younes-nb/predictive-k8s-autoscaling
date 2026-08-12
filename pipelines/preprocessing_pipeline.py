@@ -50,6 +50,16 @@ def main():
         choices=["none", "smoothing", "swt", "cskv"],
         help="Post-processing approach applied after windows are built.",
     )
+    ap.add_argument("--csv_path", default=None,
+                    help="If set, build_windows reads from this HPA-logs CSV "
+                         "(features map to CSV columns CPU/Memory; same feature "
+                         "sets as the parquet path work unchanged).")
+    ap.add_argument("--csv_time_col", default="Timestamp",
+                    help="CSV timestamp column (default: %(default)s)")
+    ap.add_argument("--csv_id_col", default="Deployment",
+                    help="CSV service-id column (default: %(default)s)")
+    ap.add_argument("--csv_tz", default="Asia/Tehran",
+                    help="Timezone of CSV timestamps (default: %(default)s)")
     ap.add_argument("--smooth_window", type=int, default=5, help="Smoothing window size (for 'smoothing' approach)")
     ap.add_argument("--dataset_workers", type=int, default=0, help="Workers for swt/cskv decomposition")
     ap.add_argument("--swt_level", type=int, default=None, help="SWT level for CPU (swt only, default: config)")
@@ -121,7 +131,15 @@ def main():
         cmd.extend(["--input_len", str(args.input_len)])
         if args.recompute_windows:
             cmd.append("--recompute")
-        run(cmd, "Step 3: Build windows (join tables)")
+        if args.csv_path:
+            cmd.extend(["--csv_path", args.csv_path,
+                        "--csv_time_col", args.csv_time_col,
+                        "--csv_id_col", args.csv_id_col,
+                        "--csv_tz", args.csv_tz])
+            label = f"Step 3: Build windows (CSV source {args.csv_path})"
+        else:
+            label = "Step 3: Build windows (join tables)"
+        run(cmd, label)
     else:
         print("\n=== Skipping raw windows ===")
 
