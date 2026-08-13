@@ -65,6 +65,15 @@ def main():
     ap.add_argument("--swt_level", type=int, default=None, help="SWT level for CPU (swt only, default: config)")
     ap.add_argument("--mem_swt_level", type=int, default=None, help="SWT level for memory (swt only, default: config)")
     ap.add_argument("--subset_seed", type=int, default=42, help="Seed for service subsampling in build_windows")
+    ap.add_argument("--train_hours", type=float, default=None,
+                    help="Split by hours instead of --train_frac/--val_frac: train on the first "
+                         "N hours of each service's series. Enables hour-based splitting and is "
+                         "required when --val_hours/--test_hours are set.")
+    ap.add_argument("--val_hours", type=float, default=None,
+                    help="Val split size in hours when splitting by hours (default: 0, i.e. no val).")
+    ap.add_argument("--test_hours", type=float, default=None,
+                    help="Test split size in hours when splitting by hours; rows beyond "
+                         "train+val+test also fall to test when unset (default).")
     ap.add_argument("--recompute_preprocessing", action="store_true",
                      help="Recompute the preprocessing approach output, ignoring cached shards")
 
@@ -129,6 +138,10 @@ def main():
             cmd.extend(["--max_services", str(args.max_services)])
         cmd.extend(["--subset_seed", str(args.subset_seed)])
         cmd.extend(["--input_len", str(args.input_len)])
+        for h in ("train_hours", "val_hours", "test_hours"):
+            v = getattr(args, h)
+            if v is not None:
+                cmd.extend([f"--{h}", str(v)])
         if args.recompute_windows:
             cmd.append("--recompute")
         if args.csv_path:

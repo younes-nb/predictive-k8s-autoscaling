@@ -209,14 +209,26 @@ def _process_service_group(group_idx, service_ids):
                 continue
 
         n = len(feat_raw)
-        idx_tr = int(n * args_dict["train_frac"])
-        idx_val = int(n * (args_dict["train_frac"] + args_dict["val_frac"]))
-
-        split_configs = [
-            ("train", 0, idx_tr),
-            ("val", idx_tr, idx_val),
-            ("test", idx_val, n),
-        ]
+        if args_dict.get("split_mode") == "hours":
+            rph = args_dict["rows_per_hour"]
+            idx_tr = min(n, int(round(args_dict["train_hours"] * rph)))
+            idx_val = min(n, idx_tr + int(round(args_dict["val_hours"] * rph)))
+            idx_end = n
+            if args_dict.get("test_hours"):
+                idx_end = min(n, idx_val + int(round(args_dict["test_hours"] * rph)))
+            split_configs = [
+                ("train", 0, idx_tr),
+                ("val", idx_tr, idx_val),
+                ("test", idx_val, idx_end),
+            ]
+        else:
+            idx_tr = int(n * args_dict["train_frac"])
+            idx_val = int(n * (args_dict["train_frac"] + args_dict["val_frac"]))
+            split_configs = [
+                ("train", 0, idx_tr),
+                ("val", idx_tr, idx_val),
+                ("test", idx_val, n),
+            ]
 
         for split_name, start, end in split_configs:
             sub_feat = feat_raw[start:end]
@@ -273,6 +285,39 @@ def _freq_seconds(freq):
         return int(freq[:-1]) * mult
     except ValueError:
         return None
+
+
+def _split_params(args):
+    """Return split-mode keys for args_dict. With any --*_hours flag set the
+    split is done by hours (each service's rows [0, train_hours), then
+    val_hours, then test_hours; the remainder falls to test); otherwise the
+    classic per-service train/val fractions apply."""
+    hours = [args.train_hours, args.val_hours, args.test_hours]
+    if any(h is not None for h in hours):
+        if args.train_hours is None or args.train_hours <= 0:
+            raise SystemExit(
+                "--train_hours must be set (>0) when splitting by hours "
+                "(--val_hours/--test_hours also enable hour-based splitting)."
+            )
+        if (args.val_hours or 0) < 0 or (args.test_hours or 0) < 0:
+            raise SystemExit("Hours splits must be >= 0.")
+        step_sec = _freq_seconds(args.freq)
+        if not step_sec:
+            raise SystemExit(
+                f"Cannot split by hours: could not parse --freq '{args.freq}' into seconds."
+            )
+        return {
+            "split_mode": "hours",
+            "rows_per_hour": 3600.0 / step_sec,
+            "train_hours": float(args.train_hours),
+            "val_hours": float(args.val_hours or 0.0),
+            "test_hours": float(args.test_hours) if args.test_hours is not None else None,
+        }
+    return {
+        "split_mode": "frac",
+        "train_frac": args.train_frac,
+        "val_frac": args.val_frac,
+    }
 
 
 def _arrays_signature(args, base_table):
@@ -504,6 +549,7 @@ def _run_csv_source(args, spec, feature_names, target_indices,
         "feature_set": args.feature_set,
         "resource_indices": resource_indices,
     }
+    args_dict.update(_split_params(args))
 
     _phase_windows(args, args_dict, target_indices, all_services_list,
                    groups_to_run, group_size, num_workers,
@@ -552,6 +598,16 @@ def main():
     p.add_argument("--stride", type=int, default=PREPROCESSING.STRIDE)
     p.add_argument("--train_frac", type=float, default=PREPROCESSING.TRAIN_FRAC)
     p.add_argument("--val_frac", type=float, default=PREPROCESSING.VAL_FRAC)
+    p.add_argument("--train_hours", type=float, default=None,
+                    help="Split by hours instead of --train_frac/--val_frac: train on the first "
+                         "N hours of each service's series. Enables hour-based splitting and is "
+                         "required when --val_hours/--test_hours are set. Changing any split "
+                         "param on an existing out_dir requires --recompute.")
+    p.add_argument("--val_hours", type=float, default=None,
+                    help="Val split size in hours when splitting by hours (default: 0, i.e. no val).")
+    p.add_argument("--test_hours", type=float, default=None,
+                    help="Test split size in hours when splitting by hours; rows beyond "
+                         "train+val+test also fall to test when unset (default).")
     p.add_argument("--service_col", type=str, default=PREPROCESSING.SERVICE_COL)
     p.add_argument("--max_services", type=int, default=PREPROCESSING.MAX_SERVICES)
     p.add_argument("--subset_seed", type=int, default=PREPROCESSING.SUBSET_SEED)
@@ -586,7 +642,7 @@ def main():
 
     args = p.parse_args()
 
-    if (
+    if args.train_hours is None and (
         args.train_frac <= 0
         or args.val_frac < 0
         or (args.train_frac + args.val_frac >= 1.0)
@@ -694,6 +750,7 @@ def main():
         "feature_set": args.feature_set,
         "resource_indices": resource_indices,
     }
+    args_dict.update(_split_params(args))
 
     arrays_path, index_path = _service_arrays_paths(args.out_dir)
     signature = _arrays_signature(args, base_table)

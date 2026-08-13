@@ -63,6 +63,25 @@ def main():
         default=PREPROCESSING.MAX_SERVICES,
         help="Limit number of services for faster testing (0 = all)",
     )
+    ap.add_argument("--csv_path", default=None,
+                    help="Build windows from an HPA-logs CSV instead of the parquet tables "
+                         "(features map to CSV columns CPU/Memory). Setting this skips the "
+                         "fetch and ingest steps, which are parquet-only.")
+    ap.add_argument("--csv_time_col", default="Timestamp",
+                    help="CSV timestamp column (default: %(default)s)")
+    ap.add_argument("--csv_id_col", default="Deployment",
+                    help="CSV service-id column (default: %(default)s)")
+    ap.add_argument("--csv_tz", default="Asia/Tehran",
+                    help="Timezone of CSV timestamps (default: %(default)s)")
+    ap.add_argument("--train_hours", type=float, default=None,
+                    help="Split by hours instead of --train_frac/--val_frac: train on the first "
+                         "N hours of each service's series. Enables hour-based splitting and is "
+                         "required when --val_hours/--test_hours are set.")
+    ap.add_argument("--val_hours", type=float, default=None,
+                    help="Val split size in hours when splitting by hours (default: 0, i.e. no val).")
+    ap.add_argument("--test_hours", type=float, default=None,
+                    help="Test split size in hours when splitting by hours; rows beyond "
+                         "train+val+test also fall to test when unset (default).")
     ap.add_argument("--dpam_cnn_kernels", type=int, nargs="+", default=None,
                     help="MultiKernelConv1D kernel sizes for dpam (ablation; default (3,5))")
     ap.add_argument("--dpam_group_blocks", type=int, default=None,
@@ -147,6 +166,10 @@ def main():
     if not args.model_name.endswith(".pt"):
         args.model_name += ".pt"
 
+    if args.csv_path:
+        args.skip_fetch = True
+        args.skip_ingest = True
+
     preprocess_script = os.path.join(
         REPO_ROOT, "pipelines", "preprocessing_pipeline.py"
     )
@@ -170,6 +193,15 @@ def main():
         ]
         if args.max_services is not None:
             cmd_pre.extend(["--max_services", str(args.max_services)])
+        if args.csv_path:
+            cmd_pre.extend(["--csv_path", args.csv_path,
+                            "--csv_time_col", args.csv_time_col,
+                            "--csv_id_col", args.csv_id_col,
+                            "--csv_tz", args.csv_tz])
+        for h in ("train_hours", "val_hours", "test_hours"):
+            v = getattr(args, h)
+            if v is not None:
+                cmd_pre.extend([f"--{h}", str(v)])
         if args.skip_fetch:
             cmd_pre.append("--skip_fetch")
         if args.skip_ingest:
