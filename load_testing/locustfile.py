@@ -37,6 +37,7 @@ GLOBAL = {
     "counts": None,
     "n_minutes": 1,
     "user_pool": _env_int("USER_POOL", 50),
+    "start_hours": 0.0,
     "test_hours": None,
 }
 MINUTE_STATS = {}    # minute index -> fired requests (for the end-of-test check)
@@ -55,11 +56,14 @@ def log(msg: str) -> None:
 
 
 def load_mcr_counts(csv_path: str, max_requests: int,
-                    n_minutes: int | None = None) -> list[int]:
+                    n_minutes: int | None = None,
+                    start_minutes: int = 0) -> list[int]:
     """Read http_mcr_<service>_<ts>.csv (columns msname,timestamp,http_mcr) and
     return the per-1-minute target request count.
 
-    With no window (n_minutes=None) the CSV is taken as-is: http_mcr is already
+    start_minutes drops that many leading minutes of the CSV first, so the
+    curve can start mid-dataset (e.g. day 3 of the NASA trace). With no window
+    (n_minutes=None) the (remaining) CSV is taken as-is: http_mcr is already
     normalized to the whole-dataset peak, so round(http_mcr * max_requests)
     peaks at max_requests. When a window is selected via TEST_HOURS
     (n_minutes = TEST_HOURS*60), the window is re-normalized so its own maximum
@@ -72,6 +76,10 @@ def load_mcr_counts(csv_path: str, max_requests: int,
             mcr.append(float(row["http_mcr"]))
     if not mcr:
         sys.exit(f"No data rows in {csv_path}")
+    if start_minutes:
+        mcr = mcr[start_minutes:]
+        if not mcr:
+            sys.exit(f"No data rows after minute {start_minutes} of {csv_path}")
     if n_minutes is not None:
         mcr = mcr[:n_minutes]
         if not mcr:
@@ -120,26 +128,37 @@ def _add_cli_args(parser):
              "(default: full CSV length)",
         env_var="TEST_HOURS",
     )
+    parser.add_argument(
+        "--start-hours",
+        type=float,
+        default=0.0,
+        help="Offset into the CSV to start the load from, in hours "
+             "(e.g. 72 = start at day 3 of the curve)",
+        env_var="START_HOURS",
+    )
 
 
 @events.test_start.add_listener
 def _on_test_start(environment, **_kw):
     opts = environment.parsed_options
+    start_minutes = int(round(opts.start_hours * 60))
     n_minutes = int(round(opts.test_hours * 60)) if opts.test_hours else None
-    counts = load_mcr_counts(opts.mcr_csv, opts.max_requests, n_minutes)
+    counts = load_mcr_counts(opts.mcr_csv, opts.max_requests, n_minutes, start_minutes)
     MINUTE_STATS.clear()
     GLOBAL.update(
         counts=counts,
         n_minutes=len(counts),
         user_pool=opts.user_pool,
+        start_hours=opts.start_hours,
         test_hours=opts.test_hours if opts.test_hours else len(counts) / 60.0,
         epoch=time.time() + START_BUFFER_SECONDS,
     )
+    start_info = f", start offset {opts.start_hours:g} h" if opts.start_hours else ""
     window = f", {len(counts)}-min window peak {max(counts)} req/min" \
         if n_minutes is not None else ""
     log(f"Loaded {len(counts)} minutes from {opts.mcr_csv} "
         f"(max {opts.max_requests} req/min{window}, pool {opts.user_pool}, "
-        f"duration {GLOBAL['test_hours']:.2f}h)")
+        f"duration {GLOBAL['test_hours']:.2f}h{start_info})")
 
 
 @events.test_stop.add_listener
