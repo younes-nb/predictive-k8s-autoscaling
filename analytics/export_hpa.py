@@ -19,7 +19,7 @@ OUTPUT_DIR = "/proj/k8sautoscaledl-PG0"
 NAMESPACE = "online-boutique"
 
 QUERIES = {
-    "Replicas": {
+    "replicas": {
         "query": f'kube_horizontalpodautoscaler_status_current_replicas{{namespace="{NAMESPACE}"}}',
         "labels": ["horizontalpodautoscaler", "hpa"],
     },
@@ -183,14 +183,14 @@ def fetch_and_process_data(start_ts, end_ts, prom_url):
 
         expected_cols = [
             "Timestamp", "Namespace", "Deployment",
-            "Replicas", "RPS", "RPS_HTTP", "RPS_GRPC", "CPU", "Memory",
+            "replicas", "RPS", "RPS_HTTP", "RPS_GRPC", "CPU", "Memory",
         ]
         for col in expected_cols:
             if col not in final_df.columns:
                 final_df[col] = 0
 
         final_df = final_df.fillna({
-            "Replicas": 0, "RPS": 0, "RPS_HTTP": 0, "RPS_GRPC": 0,
+            "replicas": 0, "RPS": 0, "RPS_HTTP": 0, "RPS_GRPC": 0,
             "CPU": 0.0, "Memory": 0.0,
         })
 
@@ -206,7 +206,7 @@ def fetch_and_process_data(start_ts, end_ts, prom_url):
         })
         final_df = final_df.sort_values(by=["msname", "timestamp"])
         final_df = final_df[
-            ["timestamp", "msname", "Replicas",
+            ["timestamp", "msname", "replicas",
              "http_mcr", "providerrpc_mcr", "cpu_utilization", "memory_utilization"]
         ]
 
@@ -214,7 +214,7 @@ def fetch_and_process_data(start_ts, end_ts, prom_url):
         final_df["memory_utilization"] = final_df["memory_utilization"].round(4)
         final_df["http_mcr"] = final_df["http_mcr"].round(2)
         final_df["providerrpc_mcr"] = final_df["providerrpc_mcr"].round(2)
-        final_df["Replicas"] = final_df["Replicas"].astype(int)
+        final_df["replicas"] = final_df["replicas"].astype(int)
 
         output_filename = os.path.join(OUTPUT_DIR, "hpa_historical_logs.csv")
         os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -227,7 +227,7 @@ def fetch_and_process_data(start_ts, end_ts, prom_url):
             print("GLOBAL DATASET METRICS")
             print("=" * 40)
             print(f"Total Data Points:    {len(final_df)}")
-            print(f"Avg Replicas:         {final_df['Replicas'].mean():.2f}")
+            print(f"Avg Replicas:         {final_df['replicas'].mean():.2f}")
             print(f"Avg CPU:              {final_df['cpu_utilization'].mean():.2%}")
             print(f"Avg Memory:           {final_df['memory_utilization'].mean():.2%}")
             print("=" * 40)
