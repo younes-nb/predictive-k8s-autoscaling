@@ -51,8 +51,8 @@ _WINDOW_DECIMALS = 2
 _WINDOW_DTYPE = np.float16
 
 _CSV_COLUMN_MAP = {
-    "cpu_utilization": "CPU",
-    "memory_utilization": "Memory",
+    "cpu_utilization": "cpu_utilization",
+    "memory_utilization": "memory_utilization",
 }
 
 from core.utils import windowize_multivariate
@@ -631,9 +631,9 @@ def main():
                          "When set, windows are built from the CSV instead of the "
                          "parquet tables; each feature maps to a CSV column via "
                          "_CSV_COLUMN_MAP (so cpu/cpu_mem/cpu_mem_both work unchanged).")
-    p.add_argument("--csv_time_col", default="Timestamp",
+    p.add_argument("--csv_time_col", default="timestamp",
                     help="CSV timestamp column (default: %(default)s)")
-    p.add_argument("--csv_id_col", default="Deployment",
+    p.add_argument("--csv_id_col", default="msname",
                     help="CSV service-id column (default: %(default)s)")
     p.add_argument("--csv_tz", default="Asia/Tehran",
                     help="Timezone of CSV timestamps (default: %(default)s)")

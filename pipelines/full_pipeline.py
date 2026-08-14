@@ -65,11 +65,11 @@ def main():
     )
     ap.add_argument("--csv_path", default=None,
                     help="Build windows from an HPA-logs CSV instead of the parquet tables "
-                         "(features map to CSV columns CPU/Memory). Setting this skips the "
-                         "fetch and ingest steps, which are parquet-only.")
-    ap.add_argument("--csv_time_col", default="Timestamp",
+                         "(features map to CSV columns cpu_utilization/memory_utilization). "
+                         "Setting this skips the fetch and ingest steps, which are parquet-only.")
+    ap.add_argument("--csv_time_col", default="timestamp",
                     help="CSV timestamp column (default: %(default)s)")
-    ap.add_argument("--csv_id_col", default="Deployment",
+    ap.add_argument("--csv_id_col", default="msname",
                     help="CSV service-id column (default: %(default)s)")
     ap.add_argument("--csv_tz", default="Asia/Tehran",
                     help="Timezone of CSV timestamps (default: %(default)s)")

@@ -52,11 +52,12 @@ def main():
     )
     ap.add_argument("--csv_path", default=None,
                     help="If set, build_windows reads from this HPA-logs CSV "
-                         "(features map to CSV columns CPU/Memory; same feature "
-                         "sets as the parquet path work unchanged).")
-    ap.add_argument("--csv_time_col", default="Timestamp",
+                         "(features map to CSV columns cpu_utilization/"
+                         "memory_utilization; same feature sets as the parquet "
+                         "path work unchanged).")
+    ap.add_argument("--csv_time_col", default="timestamp",
                     help="CSV timestamp column (default: %(default)s)")
-    ap.add_argument("--csv_id_col", default="Deployment",
+    ap.add_argument("--csv_id_col", default="msname",
                     help="CSV service-id column (default: %(default)s)")
     ap.add_argument("--csv_tz", default="Asia/Tehran",
                     help="Timezone of CSV timestamps (default: %(default)s)")

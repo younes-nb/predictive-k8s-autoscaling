@@ -27,6 +27,14 @@ QUERIES = {
         "query": f'sum(rate(istio_requests_total{{reporter="destination", destination_workload_namespace="{NAMESPACE}"}}[1m])) by (destination_workload)',
         "labels": ["destination_workload"],
     },
+    "RPS_HTTP": {
+        "query": f'sum(rate(istio_requests_total{{reporter="destination", request_protocol="http", destination_workload_namespace="{NAMESPACE}"}}[1m])) by (destination_workload)',
+        "labels": ["destination_workload"],
+    },
+    "RPS_GRPC": {
+        "query": f'sum(rate(istio_requests_total{{reporter="destination", request_protocol="grpc", destination_workload_namespace="{NAMESPACE}"}}[1m])) by (destination_workload)',
+        "labels": ["destination_workload"],
+    },
     "CPU": {
         "query": f'sum by (pod) (rate(container_cpu_usage_seconds_total{{namespace="{NAMESPACE}", container="server"}}[1m])) / sum by (pod) (kube_pod_container_resource_requests{{resource="cpu", namespace="{NAMESPACE}", container="server"}})',
         "labels": ["pod"],
@@ -175,24 +183,37 @@ def fetch_and_process_data(start_ts, end_ts, prom_url):
 
         expected_cols = [
             "Timestamp", "Namespace", "Deployment",
-            "Replicas", "RPS", "CPU", "Memory",
+            "Replicas", "RPS", "RPS_HTTP", "RPS_GRPC", "CPU", "Memory",
         ]
         for col in expected_cols:
             if col not in final_df.columns:
                 final_df[col] = 0
 
-        final_df = final_df.fillna({"Replicas": 0, "RPS": 0, "CPU": 0.0, "Memory": 0.0})
+        final_df = final_df.fillna({
+            "Replicas": 0, "RPS": 0, "RPS_HTTP": 0, "RPS_GRPC": 0,
+            "CPU": 0.0, "Memory": 0.0,
+        })
 
         final_df = final_df[final_df["Deployment"] != "redis-cart"]
 
-        final_df = final_df.sort_values(by=["Deployment", "Timestamp"])
+        final_df = final_df.rename(columns={
+            "Timestamp": "timestamp",
+            "Deployment": "msname",
+            "RPS_HTTP": "http_mcr",
+            "RPS_GRPC": "providerrpc_mcr",
+            "CPU": "cpu_utilization",
+            "Memory": "memory_utilization",
+        })
+        final_df = final_df.sort_values(by=["msname", "timestamp"])
         final_df = final_df[
-            ["Timestamp", "Namespace", "Deployment", "Replicas", "RPS", "CPU", "Memory"]
+            ["timestamp", "msname", "Replicas",
+             "http_mcr", "providerrpc_mcr", "cpu_utilization", "memory_utilization"]
         ]
 
-        final_df["CPU"] = final_df["CPU"].round(4)
-        final_df["Memory"] = final_df["Memory"].round(4)
-        final_df["RPS"] = final_df["RPS"].round(2)
+        final_df["cpu_utilization"] = final_df["cpu_utilization"].round(4)
+        final_df["memory_utilization"] = final_df["memory_utilization"].round(4)
+        final_df["http_mcr"] = final_df["http_mcr"].round(2)
+        final_df["providerrpc_mcr"] = final_df["providerrpc_mcr"].round(2)
         final_df["Replicas"] = final_df["Replicas"].astype(int)
 
         output_filename = os.path.join(OUTPUT_DIR, "hpa_historical_logs.csv")
@@ -207,8 +228,8 @@ def fetch_and_process_data(start_ts, end_ts, prom_url):
             print("=" * 40)
             print(f"Total Data Points:    {len(final_df)}")
             print(f"Avg Replicas:         {final_df['Replicas'].mean():.2f}")
-            print(f"Avg CPU:              {final_df['CPU'].mean():.2%}")
-            print(f"Avg Memory:           {final_df['Memory'].mean():.2%}")
+            print(f"Avg CPU:              {final_df['cpu_utilization'].mean():.2%}")
+            print(f"Avg Memory:           {final_df['memory_utilization'].mean():.2%}")
             print("=" * 40)
     finally:
         if proc is not None:
