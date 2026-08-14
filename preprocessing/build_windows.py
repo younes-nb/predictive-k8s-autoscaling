@@ -53,6 +53,8 @@ _WINDOW_DTYPE = np.float16
 _CSV_COLUMN_MAP = {
     "cpu_utilization": "cpu_utilization",
     "memory_utilization": "memory_utilization",
+    "http_mcr": "http_mcr",
+    "providerrpc_mcr": "providerrpc_mcr",
 }
 
 from core.utils import windowize_multivariate
