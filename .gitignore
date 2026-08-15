@@ -1,6 +1,7 @@
 AGENTS.md
 /load_testing/venv
 .venv
+venv
 /local_data
 /data/
 *.pyc
