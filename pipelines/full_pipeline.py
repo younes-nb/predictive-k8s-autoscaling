@@ -98,6 +98,8 @@ def main():
                     help="Pooled-MLP head dim for dpam (ablation; default 128)")
     ap.add_argument("--dpam_cpu_recon", action=argparse.BooleanOptionalAction, default=True,
                     help="Level-correction MLP on CPU branch (ablation; default on)")
+    ap.add_argument("--dpam_mem_disable_drift", action=argparse.BooleanOptionalAction, default=True,
+                    help="Disable drift prediction for memory branch (ablation; default on for constant memory)")
     ap.add_argument(
         "--preprocess_approach",
         default="swt",
@@ -123,9 +125,10 @@ def main():
     ap.add_argument(
         "--loss_mode",
         default="per_target_mse",
-        choices=["joint_mse", "per_target_mse", "per_target_mae", "per_target_huber"],
+        choices=["joint_mse", "per_target_mse", "per_target_mae", "per_target_huber", "asymmetric_huber"],
         help="joint_mse: MSE over all targets. per_target_mae: equal-weight per target with L1 memory loss. "
-             "per_target_huber: per-target weighted Huber loss with independent betas (winning loss).",
+             "per_target_huber: per-target weighted Huber loss with independent betas (winning loss). "
+             "asymmetric_huber: penalizes underprediction more (for HPA safety).",
     )
     ap.add_argument("--last_step_only", action=argparse.BooleanOptionalAction, default=True,
                     help="Compute loss only on the final horizon step (H-1); use --no-last_step_only "
@@ -143,6 +146,10 @@ def main():
     ap.add_argument("--loss_rel_w_mem", type=float, default=None,
                     help="Weight of the relative (MAPE) term on the memory branch "
                          "in per_target_huber (default 0.0 = off)")
+    ap.add_argument("--under_weight_cpu", type=float, default=3.0,
+                    help="Multiplier for CPU underprediction penalty in asymmetric_huber (default 3.0)")
+    ap.add_argument("--under_weight_mem", type=float, default=1.0,
+                    help="Multiplier for memory underprediction penalty in asymmetric_huber (default 1.0)")
     ap.add_argument(
         "--train_pct",
         type=float,
@@ -308,6 +315,10 @@ def main():
             cmd_train.extend(["--loss_w_mem", str(args.loss_w_mem)])
         if getattr(args, "loss_rel_w_mem", None) is not None:
             cmd_train.extend(["--loss_rel_w_mem", str(args.loss_rel_w_mem)])
+        if getattr(args, "under_weight_cpu", None) is not None:
+            cmd_train.extend(["--under_weight_cpu", str(args.under_weight_cpu)])
+        if getattr(args, "under_weight_mem", None) is not None:
+            cmd_train.extend(["--under_weight_mem", str(args.under_weight_mem)])
         if getattr(args, "change_head", False):
             cmd_train.extend(["--change_head"])
         if getattr(args, "change_head_mem", False):
@@ -331,6 +342,10 @@ def main():
             cmd_train.append("--dpam_cpu_recon")
         else:
             cmd_train.append("--no-dpam_cpu_recon")
+        if args.dpam_mem_disable_drift:
+            cmd_train.append("--dpam_mem_disable_drift")
+        else:
+            cmd_train.append("--no-dpam_mem_disable_drift")
 
         total_times["training"] = run(cmd_train, "Step 2: Training")
 

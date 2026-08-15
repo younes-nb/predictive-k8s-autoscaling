@@ -39,6 +39,7 @@ def build_model(hyperparams, input_size, args, num_targets, device):
     else:
         cpu_channels = swt_level + 1
         mem_channels = mem_swt_level + 1
+    mem_disable_drift = getattr(args, "dpam_mem_disable_drift", True)
     return DualPathAnchorMixer(
         in_channels=input_size,
         input_len=args.input_len,
@@ -53,4 +54,5 @@ def build_model(hyperparams, input_size, args, num_targets, device):
         mem_d_group=mem_d_group,
         pool_head_dim=pool_head_dim,
         cpu_recon=cpu_recon,
+        mem_disable_drift=mem_disable_drift,
     ).to(device)

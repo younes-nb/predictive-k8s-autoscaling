@@ -58,10 +58,12 @@ class MixerBlock(nn.Module):
 class TrendExtrapolator(nn.Module):
 
     def __init__(self, input_len: int, pred_horizon: int, in_channels: int = 1,
-                 d_hidden: int = TREND_HIDDEN, dropout: float = 0.0, use_recon: bool = False):
+                 d_hidden: int = TREND_HIDDEN, dropout: float = 0.0, use_recon: bool = False,
+                 disable_drift: bool = False):
         super().__init__()
         self.pred_horizon = pred_horizon
         self.use_recon = use_recon
+        self.disable_drift = disable_drift
         self.base_proj = nn.Linear(1, 1)
         self.base_proj.weight.data.fill_(1.0)
         self.base_proj.bias.data.zero_()
@@ -94,9 +96,9 @@ class TrendExtrapolator(nn.Module):
         if self.use_recon:
             xf = x.reshape(x.shape[0], -1)
             level = level + self.recon(xf)
-            return level.expand(-1, self.pred_horizon) + self.drift(a_l)
-        base = level.expand(-1, self.pred_horizon)
-        return base + self.drift(a_l)
+        if self.disable_drift:
+            return level.expand(-1, self.pred_horizon)
+        return level.expand(-1, self.pred_horizon) + self.drift(a_l)
 
 
 class AnchorMixer(nn.Module):
@@ -113,6 +115,7 @@ class AnchorMixer(nn.Module):
         pool_head_dim: int = POOL_HEAD_DIM,
         n_attn_heads: int = N_ATTN_HEADS,
         use_recon: bool = False,
+        disable_drift: bool = False,
     ):
         super().__init__()
         self.pred_horizon = pred_horizon
@@ -125,7 +128,7 @@ class AnchorMixer(nn.Module):
         ])
         self.norm_out = nn.LayerNorm(d_group)
 
-        self.trend_extrapolator = TrendExtrapolator(input_len, pred_horizon, in_channels=in_channels, dropout=dropout, use_recon=use_recon)
+        self.trend_extrapolator = TrendExtrapolator(input_len, pred_horizon, in_channels=in_channels, dropout=dropout, use_recon=use_recon, disable_drift=disable_drift)
 
         self.query = nn.Parameter(torch.randn(1, 1, d_group) * 0.02)
         self.attn = nn.MultiheadAttention(
@@ -181,6 +184,7 @@ class DualPathAnchorMixer(nn.Module):
         mem_d_group: int = MEM_D_GROUP,
         pool_head_dim: int = POOL_HEAD_DIM,
         cpu_recon: bool = True,
+        mem_disable_drift: bool = True,
     ):
         super().__init__()
         assert in_channels == cpu_channels + mem_channels
@@ -199,6 +203,7 @@ class DualPathAnchorMixer(nn.Module):
             n_group_blocks=n_group_blocks,
             pool_head_dim=pool_head_dim,
             use_recon=cpu_recon,
+            disable_drift=False,
         )
 
         self.mem_mixer = AnchorMixer(
@@ -211,6 +216,7 @@ class DualPathAnchorMixer(nn.Module):
             n_group_blocks=n_group_blocks,
             pool_head_dim=pool_head_dim,
             use_recon=True,
+            disable_drift=mem_disable_drift,
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

@@ -27,7 +27,7 @@ from shared.logging_utils import setup_logging
 from shared.features import target_features_for_feature_set
 from core.dataset import ShardedWindowsDataset
 
-from training.loss import per_target_loss, per_target_huber_loss
+from training.loss import per_target_loss, per_target_huber_loss, asymmetric_huber_loss
 from training.train_helpers import (
     head_slice_dataset_by_pct,
     load_resume_state,
@@ -397,6 +397,14 @@ def train(args):
                 lambda_cpu=args.loss_w_cpu, lambda_mem=args.loss_w_mem,
                 rel_w=args.loss_rel_w_mem,
             )
+        elif args.loss_mode == "asymmetric_huber":
+            loss = asymmetric_huber_loss(
+                preds, y, cpu_beta=args.huber_beta_cpu, mem_beta=args.huber_beta_mem,
+                lambda_cpu=args.loss_w_cpu, lambda_mem=args.loss_w_mem,
+                under_weight_cpu=args.under_weight_cpu,
+                under_weight_mem=args.under_weight_mem,
+                rel_w=args.loss_rel_w_mem,
+            )
         else:
             mem_mode = "l1" if args.loss_mode == "per_target_mae" else "mse"
             loss = per_target_loss(preds, y, mem_mode=mem_mode)
@@ -554,12 +562,16 @@ def main():
     p.add_argument("--loss_rel_w_mem", type=float, default=0.0,
                    help="Weight of the relative (MAPE) term on the memory branch "
                         "in per_target_huber (default 0.0 = off)")
+    p.add_argument("--under_weight_cpu", type=float, default=3.0,
+                   help="Multiplier for CPU underprediction penalty in asymmetric_huber (default 3.0)")
+    p.add_argument("--under_weight_mem", type=float, default=1.0,
+                   help="Multiplier for memory underprediction penalty in asymmetric_huber (default 1.0)")
     p.add_argument(
         "--loss_mode",
         default="per_target_mse",
-        choices=["joint_mse", "per_target_mse", "per_target_mae", "per_target_huber"],
+        choices=["joint_mse", "per_target_mse", "per_target_mae", "per_target_huber", "asymmetric_huber"],
         help="joint_mse: MSE over all targets. per_target_*: equal-weight per target; "
-             "per_target_mae uses L1 for the memory target.",
+             "per_target_mae uses L1 for the memory target. asymmetric_huber penalizes underprediction more.",
     )
     p.add_argument("--last_step_only", action=argparse.BooleanOptionalAction, default=True,
                    help="Compute loss only on the final horizon step (H-1); use --no-last_step_only "
@@ -615,6 +627,8 @@ def main():
                    help="Pooled-MLP head dim for dpam (ablation; default 128)")
     p.add_argument("--dpam_cpu_recon", action=argparse.BooleanOptionalAction, default=True,
                    help="Level-correction MLP on CPU branch (ablation; default on)")
+    p.add_argument("--dpam_mem_disable_drift", action=argparse.BooleanOptionalAction, default=True,
+                   help="Disable drift prediction for memory branch (ablation; default on for constant memory)")
 
     try:
         train(p.parse_args())

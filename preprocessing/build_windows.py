@@ -55,6 +55,7 @@ _CSV_COLUMN_MAP = {
     "memory_utilization": "memory_utilization",
     "http_mcr": "http_mcr",
     "providerrpc_mcr": "providerrpc_mcr",
+    "replicas": "replicas",
 }
 
 _CSV_COLUMN_MINMAX = {"http_mcr", "providerrpc_mcr"}

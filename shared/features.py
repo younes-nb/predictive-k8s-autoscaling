@@ -3,6 +3,7 @@ from typing import Dict, Any, List, Set
 FEATURES: Dict[str, Dict[str, str]] = {
     "cpu_utilization": {"table": "msresource", "column": "cpu_utilization"},
     "memory_utilization": {"table": "msresource", "column": "memory_utilization"},
+    "replicas": {"table": "msresource", "column": "replicas"},
     "node_cpu_utilization": {"table": "node", "column": "cpu_utilization"},
     "node_memory_utilization": {"table": "node", "column": "memory_utilization"},
     "providerrpc_rt": {"table": "msrtmcre", "column": "providerrpc_rt"},
@@ -99,6 +100,17 @@ FEATURE_SETS: Dict[str, Dict[str, Any]] = {
         "features": ["http_mcr"],
         "target": "http_mcr",
         "base_table": "msrtmcre",
+    },
+    "cpu_mem_http_rpc_replicas": {
+        "features": [
+            "cpu_utilization",
+            "memory_utilization",
+            "http_mcr",
+            "providerrpc_mcr",
+            "replicas",
+        ],
+        "targets": ["cpu_utilization", "memory_utilization"],
+        "base_table": "msresource",
     },
 }
 
