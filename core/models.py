@@ -62,3 +62,35 @@ class RNNForecaster(nn.Module):
         if self.num_targets > 1:
             return out.view(out.size(0), self.horizon, self.num_targets)
         return out
+
+
+class ChangeHeadForecaster(nn.Module):
+    """Residual / change (difference) wrapper.
+
+    Injects the last observed target values directly into the forecast so the
+    base network only learns the CHANGE (delta) to the horizon, rather than
+    echoing the current load level. On flat targets (e.g. memory) this removes
+    the added noise that made the model strictly worse than persistence.
+
+    pred = base(x) + x[:, -1, :num_targets]  (broadcast over the horizon)
+    """
+
+    def __init__(self, base, inject_mask=None):
+        super().__init__()
+        self.base = base
+        self.register_buffer("inject_mask", torch.tensor(inject_mask, dtype=torch.bool)
+                             if inject_mask is not None else None)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        preds = self.base(x)
+        single = preds.dim() == 2
+        if single:
+            preds = preds.unsqueeze(-1)
+        num_targets = preds.shape[-1]
+        last = x[..., -1, :num_targets].unsqueeze(1)
+        if self.inject_mask is not None:
+            last = last * self.inject_mask.to(last)
+        out = preds + last
+        if single:
+            out = out.squeeze(-1)
+        return out

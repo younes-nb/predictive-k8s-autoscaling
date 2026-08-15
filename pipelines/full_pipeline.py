@@ -106,6 +106,12 @@ def main():
         choices=["lstm", "gru", "bilstm", "bigrue", "cnn_bilstm", "dlinear", "dpam"],
         help="Model architecture: lstm/gru (unidirectional), bilstm/bigrue (bidirectional), cnn_bilstm, dlinear (linear decomposition baseline), dpam (DualPathAnchorMixer)",
     )
+    ap.add_argument("--change_head", action="store_true",
+                    help="Residual/change model: inject last target values so the "
+                         "network learns only the delta to the horizon")
+    ap.add_argument("--change_head_mem", action="store_true",
+                    help="Residual/change injection for the LAST target only "
+                         "(memory): keeps a level formulation for the other targets")
     ap.add_argument("--smooth_window", type=int, default=5, help="Moving average window size for 'smoothing' approach (default: %(default)s)")
     ap.add_argument("--dataset_workers", type=int, default=0, help="Dataloader workers for swt/cskv datasets (default: %(default)s)")
     ap.add_argument("--swt_level", type=int, default=None, help="SWT level for CPU (swt only, default: config)")
@@ -130,6 +136,9 @@ def main():
                     help="Weight on CPU branch loss in per_target_huber (default 0.5)")
     ap.add_argument("--loss_w_mem", type=float, default=None,
                     help="Weight on memory branch loss in per_target_huber (default 0.5)")
+    ap.add_argument("--loss_rel_w_mem", type=float, default=None,
+                    help="Weight of the relative (MAPE) term on the memory branch "
+                         "in per_target_huber (default 0.0 = off)")
     ap.add_argument(
         "--train_pct",
         type=float,
@@ -291,6 +300,12 @@ def main():
             cmd_train.extend(["--loss_w_cpu", str(args.loss_w_cpu)])
         if getattr(args, "loss_w_mem", None) is not None:
             cmd_train.extend(["--loss_w_mem", str(args.loss_w_mem)])
+        if getattr(args, "loss_rel_w_mem", None) is not None:
+            cmd_train.extend(["--loss_rel_w_mem", str(args.loss_rel_w_mem)])
+        if getattr(args, "change_head", False):
+            cmd_train.extend(["--change_head"])
+        if getattr(args, "change_head_mem", False):
+            cmd_train.extend(["--change_head_mem"])
         if args.resume_training:
             cmd_train.append("--resume_training")
         if args.cpu:

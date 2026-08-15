@@ -85,6 +85,16 @@ FEATURE_SETS: Dict[str, Dict[str, Any]] = {
         "targets": ["cpu_utilization", "memory_utilization"],
         "base_table": "msresource",
     },
+    "cpu_mem_http_rpc": {
+        "features": [
+            "cpu_utilization",
+            "memory_utilization",
+            "http_mcr",
+            "providerrpc_mcr",
+        ],
+        "targets": ["cpu_utilization", "memory_utilization"],
+        "base_table": "msresource",
+    },
     "mcr_http": {
         "features": ["http_mcr"],
         "target": "http_mcr",

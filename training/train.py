@@ -42,8 +42,19 @@ PREPROCESS_APPROACHES = ("none", "smoothing", "swt", "cskv")
 
 
 def _build_model(model_type, input_size, args, num_targets, hyperparams, device):
+    from core.models import ChangeHeadForecaster
     cfg = get_config(model_type)
-    return cfg.build_model(hyperparams, input_size, args, num_targets, device)
+    model = cfg.build_model(hyperparams, input_size, args, num_targets, device)
+    if getattr(args, "change_head", False) or getattr(args, "change_head_mem", False):
+        inject_mask = None
+        if getattr(args, "change_head_mem", False):
+            inject_mask = [False] * num_targets
+            if num_targets > 1:
+                inject_mask[-1] = True
+            else:
+                inject_mask[0] = True
+        model = ChangeHeadForecaster(model, inject_mask)
+    return model
 
 
 def _load_datasets(args, preprocess_approach):
@@ -380,6 +391,7 @@ def train(args):
             loss = per_target_huber_loss(
                 preds, y, cpu_beta=args.huber_beta_cpu, mem_beta=args.huber_beta_mem,
                 lambda_cpu=args.loss_w_cpu, lambda_mem=args.loss_w_mem,
+                rel_w=args.loss_rel_w_mem,
             )
         else:
             mem_mode = "l1" if args.loss_mode == "per_target_mae" else "mse"
@@ -533,6 +545,9 @@ def main():
                    help="Weight on CPU branch loss in per_target_huber (default 0.5)")
     p.add_argument("--loss_w_mem", type=float, default=0.5,
                    help="Weight on memory branch loss in per_target_huber (default 0.5)")
+    p.add_argument("--loss_rel_w_mem", type=float, default=0.0,
+                   help="Weight of the relative (MAPE) term on the memory branch "
+                        "in per_target_huber (default 0.0 = off)")
     p.add_argument(
         "--loss_mode",
         default="per_target_mse",
@@ -548,6 +563,12 @@ def main():
     p.add_argument("--num_workers", type=int, default=TRAINING.NUM_WORKERS)
     p.add_argument("--rnn_type", default="lstm")
     p.add_argument("--feature_set", default=PREPROCESSING.FEATURE_SET)
+    p.add_argument("--change_head", action="store_true",
+                   help="Residual/change model: inject last target values so the "
+                        "network learns only the delta to the horizon")
+    p.add_argument("--change_head_mem", action="store_true",
+                   help="Residual/change injection for the LAST target only "
+                        "(memory): keeps a level formulation for the other targets")
     p.add_argument("--resume_training", action="store_true")
     p.add_argument(
         "--hyperparam_optimizer",

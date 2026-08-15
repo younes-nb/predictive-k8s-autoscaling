@@ -134,4 +134,17 @@ def build_model(checkpoint, model_type):
         raise ValueError(
             f"Unknown model_type='{model_type}'. Available: {sorted(BUILDERS.keys())}"
         )
-    return builder(checkpoint, model_type)
+    model = builder(checkpoint, model_type)
+    ckpt_args = checkpoint.get("args", {}) or {}
+    if ckpt_args.get("change_head", False) or ckpt_args.get("change_head_mem", False):
+        from core.models import ChangeHeadForecaster
+        num_targets = ckpt_args.get("num_targets", config.NUM_TARGETS)
+        inject_mask = None
+        if ckpt_args.get("change_head_mem", False):
+            inject_mask = [False] * num_targets
+            if num_targets > 1:
+                inject_mask[-1] = True
+            else:
+                inject_mask[0] = True
+        model = ChangeHeadForecaster(model, inject_mask)
+    return model

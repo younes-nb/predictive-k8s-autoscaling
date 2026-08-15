@@ -34,7 +34,11 @@ from shared.logging_utils import setup_logging
 from shared.features import target_features_for_feature_set, feature_names_for_feature_set
 from core.dataset import ShardedWindowsDataset
 
-from training.metrics import compute_metrics, find_max_inference_batch_size
+from training.metrics import (
+    compute_metrics,
+    compute_persistence_diagnostics,
+    find_max_inference_batch_size,
+)
 from training.train_helpers import head_slice_dataset_by_pct
 from types import SimpleNamespace
 from training.sfoa_configs import get_config
@@ -79,6 +83,9 @@ def _preprocess_raw_window(x_np, preprocess_approach, args=None):
         for f in range(x_np.shape[1]):
             cfg = mem_cfg if f == 1 else cpu_cfg
             ch = decompose_window(x_np[:, f].astype(np.float64), cfg)
+            if ch is None:
+                ch = np.zeros((cfg.SWT_LEVEL + 1, x_np.shape[0]), dtype=np.float32)
+                ch[0] = x_np[:, f]
             channels.append(ch)
         stacked = np.concatenate(channels, axis=0)
         return stacked.T
@@ -135,13 +142,24 @@ def _benchmark_worker(idx, raw_ds, model, preprocess_approach, device, args=None
 
 
 def _build_model_from_checkpoint(checkpoint, input_size, device):
+    from core.models import ChangeHeadForecaster
     ckpt_args = checkpoint.get("args", {})
     model_type = checkpoint.get("model_type", "lstm")
     num_targets = len(target_features_for_feature_set(ckpt_args.get("feature_set", PREPROCESSING.FEATURE_SET)))
 
     cfg = get_config(model_type)
     hyperparams = checkpoint.get("hyperparams", cfg.DEFAULTS)
-    return cfg.build_model(hyperparams, input_size, SimpleNamespace(**ckpt_args), num_targets, device)
+    model = cfg.build_model(hyperparams, input_size, SimpleNamespace(**ckpt_args), num_targets, device)
+    if ckpt_args.get("change_head", False) or ckpt_args.get("change_head_mem", False):
+        inject_mask = None
+        if ckpt_args.get("change_head_mem", False):
+            inject_mask = [False] * num_targets
+            if num_targets > 1:
+                inject_mask[-1] = True
+            else:
+                inject_mask[0] = True
+        model = ChangeHeadForecaster(model, inject_mask)
+    return model
 
 
 def _near_constant_valid_indices(ds, target_idxs):
@@ -281,7 +299,7 @@ def _prepare_benchmark_indices(args, ckpt_args, log_info):
         for idx in indices:
             x_raw, *_ = raw_ds[idx]
             x_np = x_raw.numpy()
-            if any(np.std(x_np[:, f]) < STDSTD for f in range(x_np.shape[1])):
+            if any(np.std(x_np[:, f].astype(np.float64)) < STDSTD for f in range(x_np.shape[1])):
                 continue
             _valid.append(idx)
         n_skipped = len(indices) - len(_valid)
@@ -569,6 +587,10 @@ def evaluate(args):
         compute_metrics(
             y_pred_t, y_true_t, y_last_t, horizon, total_samples, log_info,
             target_name=t_name, y_second_last=y_second_last_t,
+        )
+        compute_persistence_diagnostics(
+            y_pred_t[:, -1], y_true_t[:, -1], y_last_t, log_info,
+            target_name=t_name,
         )
 
     avg_inference_time_ms = (inference_time / max(1, total_samples)) * 1000.0

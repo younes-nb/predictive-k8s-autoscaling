@@ -163,3 +163,59 @@ def compute_metrics(
     log_info("-" * 82)
 
     return results
+
+
+def _pearson(a, b):
+    a = np.asarray(a, dtype=float).ravel() - np.asarray(a, dtype=float).ravel().mean()
+    b = np.asarray(b, dtype=float).ravel() - np.asarray(b, dtype=float).ravel().mean()
+    denom = np.sqrt(np.sum(a ** 2) * np.sum(b ** 2))
+    return float(np.sum(a * b) / denom) if denom > 1e-12 else float("nan")
+
+
+def compute_persistence_diagnostics(y_pred_last, y_true_last, y_last, log_info, target_name=None):
+    """Compare the horizon-ahead forecast against the persistence baseline
+    (predicting the current load for the future)."""
+    y_pred_last = np.asarray(y_pred_last, dtype=float).ravel()
+    y_true_last = np.asarray(y_true_last, dtype=float).ravel()
+    y_last = np.asarray(y_last, dtype=float).ravel()
+
+    n = len(y_pred_last)
+    if n < 2:
+        log_info("Too few samples for persistence diagnostics.")
+        return {}
+
+    corr_pred_true = _pearson(y_pred_last, y_true_last)
+    corr_pred_last = _pearson(y_pred_last, y_last)
+    corr_last_true = _pearson(y_last, y_true_last)
+
+    mse_pred = float(np.mean((y_pred_last - y_true_last) ** 2))
+    mse_naive = float(np.mean((y_last - y_true_last) ** 2))
+    r2_vs_persistence = 1.0 - mse_pred / mse_naive if mse_naive > 1e-12 else float("nan")
+
+    mae_pred = float(np.mean(np.abs(y_pred_last - y_true_last)))
+    mae_naive = float(np.mean(np.abs(y_last - y_true_last)))
+    mae_vs_persistence = mae_pred / mae_naive if mae_naive > 1e-12 else float("nan")
+
+    abs_pred = np.abs(y_pred_last - y_true_last)
+    abs_naive = np.abs(y_last - y_true_last)
+    beat_persistence = float(np.mean(abs_pred < abs_naive) * 100.0)
+
+    header = f"=== Persistence Diagnostics{f' ({target_name})' if target_name else ''} ==="
+    log_info(f"\n{header}")
+    log_info("-" * 62)
+    log_info(f"{'ρ(pred, truth)':<28s} {corr_pred_true:>10.4f}   corr of prediction with the true target")
+    log_info(f"{'ρ(pred, current)':<28s} {corr_pred_last:>10.4f}   corr of prediction with the current input load")
+    log_info(f"{'ρ(current, truth)':<28s} {corr_last_true:>10.4f}   corr of persistence baseline with the true target")
+    log_info(f"{'R² vs persistence':<28s} {r2_vs_persistence:>10.4f}   1 - MSE(pred)/MSE(current); <=0 means no skill over persistence")
+    log_info(f"{'Beat-persistence (%)':<28s} {beat_persistence:>10.2f}   % of samples where pred is closer to truth than current load is")
+    log_info(f"{'MAE vs persistence':<28s} {mae_vs_persistence:>10.4f}   MAE(pred)/MAE(current); <1 = better than persistence")
+    log_info("-" * 62)
+
+    return {
+        "corr_pred_true": corr_pred_true,
+        "corr_pred_last": corr_pred_last,
+        "corr_last_true": corr_last_true,
+        "r2_vs_persistence": r2_vs_persistence,
+        "beat_persistence": beat_persistence,
+        "mae_vs_persistence": mae_vs_persistence,
+    }

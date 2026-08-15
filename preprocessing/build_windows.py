@@ -57,6 +57,8 @@ _CSV_COLUMN_MAP = {
     "providerrpc_mcr": "providerrpc_mcr",
 }
 
+_CSV_COLUMN_MINMAX = {"http_mcr", "providerrpc_mcr"}
+
 from core.utils import windowize_multivariate
 
 from shared.config_paths import PATHS, DATASET_TABLES
@@ -74,6 +76,15 @@ _WORKER_CTX = {}
 
 def _quantize_windows(arr):
     return np.round(arr, _WINDOW_DECIMALS).astype(_WINDOW_DTYPE)
+
+
+def _scale_csv_column(values, col, col_stats):
+    if col not in col_stats:
+        return values
+    lo, hi = col_stats[col]
+    if hi - lo < 1e-12:
+        return np.zeros_like(values)
+    return (values - lo) / (hi - lo)
 
 
 def save_chunk(out_dir, shard_idx, chunk_idx, shard_data, sync=False,
@@ -428,6 +439,11 @@ def _load_csv_service_arrays(csv_path, feature_names, time_col, id_col,
     df = df.select([id_col, "_ts"] + [col_map[f] for f in feature_names])
     df = df.sort([id_col, "_ts"])
 
+    col_stats = {}
+    for col in sorted(_CSV_COLUMN_MINMAX):
+        if col in df.columns:
+            col_stats[col] = (float(df[col].min()), float(df[col].max()))
+
     service_arrays = {}
     skipped = []
     for key, g in df.group_by([id_col], maintain_order=True):
@@ -442,7 +458,10 @@ def _load_csv_service_arrays(csv_path, feature_names, time_col, id_col,
             skipped.append(svc)
             continue
         arr = np.stack(
-            [g[col_map[f]].to_numpy().astype("float32") for f in feature_names],
+            [
+                _scale_csv_column(g[col_map[f]].to_numpy().astype("float32"), col_map[f], col_stats)
+                for f in feature_names
+            ],
             axis=1,
         )
         if arr.shape[0] < input_len + pred_horizon:

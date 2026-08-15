@@ -34,12 +34,17 @@ def build_model(hyperparams, input_size, args, num_targets, device):
     cpu_recon = getattr(args, "dpam_cpu_recon", None)
     if cpu_recon is None:
         cpu_recon = True
+    if input_size <= 2:
+        cpu_channels, mem_channels = 1, input_size - 1
+    else:
+        cpu_channels = swt_level + 1
+        mem_channels = mem_swt_level + 1
     return DualPathAnchorMixer(
         in_channels=input_size,
         input_len=args.input_len,
         pred_horizon=args.pred_horizon,
-        cpu_channels=swt_level + 1,
-        mem_channels=mem_swt_level + 1,
+        cpu_channels=cpu_channels,
+        mem_channels=mem_channels,
         dropout=hyperparams.get("dropout", 0.1),
         num_targets=num_targets,
         group_cnn_kernels=tuple(kernels),
