@@ -16,6 +16,7 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from preprocessing.swt.config import CFG as SWT_CFG, channel_dirs_for
+from shared.features import get_feature_set
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +36,7 @@ class SwtDataset(Dataset):
         self.split = split
         self.input_len = input_len
         self.pred_horizon = pred_horizon
-        self.has_mem = feature_set == "cpu_mem_both"
+        self.has_mem = "memory_utilization" in get_feature_set(feature_set).get("targets", [])
 
         cpu_channel_dirs = channel_dirs_for(swt_level)
         mem_channel_dirs = channel_dirs_for(mem_swt_level, prefix="mem_")

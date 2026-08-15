@@ -191,21 +191,15 @@ def _finalize_merged(merged, final_exprs, id_cols):
     return merged.select([*[pl.col(c) for c in key_cols], *final_exprs])
 
 
-def _process_service_group(group_idx, service_ids):
-    import numpy as np
-
-    ctx = _WORKER_CTX
-    args_dict = ctx["args_dict"]
+def _process_service_group(group_idx, service_ids, args_dict, big, index, target_indices, resource_indices, sync, out_dir):
     out_dir = args_dict["out_dir"]
     done_marker = os.path.join(out_dir, f"part-{group_idx:04d}.done")
     if os.path.exists(done_marker):
         return (group_idx, 0, 0.0, True)
 
     t0 = time.time()
-    arrays = ctx.get("service_arrays")
-    big = ctx.get("big_array")
-    index = ctx.get("service_index")
-    target_indices = ctx["target_indices"]
+    # arrays = ctx.get("service_arrays")  # not used anymore
+    # big and index are passed as parameters
 
     shard_data = {"train": ([], [], []), "val": ([], [], []), "test": ([], [], [])}
     n_processed = 0
@@ -217,9 +211,8 @@ def _process_service_group(group_idx, service_ids):
                 continue
             feat_raw = big[pos[0]:pos[0] + pos[1]]
         else:
-            feat_raw = arrays.get(ms_id)
-            if feat_raw is None:
-                continue
+            # This branch shouldn't be reached with the new approach
+            continue
 
         n = len(feat_raw)
         if args_dict.get("split_mode") == "hours":
@@ -263,8 +256,8 @@ def _process_service_group(group_idx, service_ids):
                 shard_data[split_name][2].append(Ss)
                 n_processed += 1
 
-    save_chunk(out_dir, group_idx, 0, shard_data, sync=ctx["sync"],
-               quantize_cols=ctx.get("resource_indices"))
+    save_chunk(out_dir, group_idx, 0, shard_data, sync=sync,
+               quantize_cols=resource_indices)
     open(done_marker, "a").close()
 
     del shard_data
@@ -938,7 +931,8 @@ def _phase_windows(args, args_dict, target_indices, all_services_list,
 
     if num_workers <= 1:
         for gi, ids in tasks:
-            _process_service_group(gi, ids)
+            _process_service_group(gi, ids, args_dict, big, index, target_indices,
+                                   args_dict["resource_indices"], args.sync, args.out_dir)
             pbar.update(1)
     else:
         # Retry loop: groups are idempotent (done-marker guarded), so if the pool
@@ -952,7 +946,8 @@ def _phase_windows(args, args_dict, target_indices, all_services_list,
                 executor = ProcessPoolExecutor(max_workers=num_workers, **pool_kwargs)
                 try:
                     futures = {
-                        executor.submit(_process_service_group, gi, ids): gi
+                        executor.submit(_process_service_group, gi, ids, args_dict, big, index, target_indices,
+                                       args_dict["resource_indices"], args.sync, args.out_dir): gi
                         for gi, ids in remaining.items()
                     }
                     for future in as_completed(futures):

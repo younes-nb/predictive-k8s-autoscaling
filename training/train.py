@@ -186,7 +186,7 @@ def train(args):
 
     log_path = None
     if accelerator.is_local_main_process:
-        log_path = setup_logging("train")
+        log_path = setup_logging("train", log_dir=args.logs_dir)
 
     start_epoch = resume_state.get("epoch", 0) + 1 if resume_state else 1
     best_val_loss = (
@@ -318,6 +318,10 @@ def train(args):
         f"(Global: {batch_size * accelerator.num_processes})"
     )
     optimal_workers = getattr(args, "num_workers", TRAINING.NUM_WORKERS)
+    # On Windows, local functions can't be pickled for DataLoader workers
+    # Use num_workers=0 to avoid multiprocessing issues, or define worker_init_fn at module level
+    if os.name == "nt":
+        optimal_workers = 0
     log_info(f"num_workers: {optimal_workers}")
 
     def _worker_init_fn(worker_id):
@@ -531,6 +535,8 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--windows_dir", required=True)
     p.add_argument("--checkpoint_path", default=DEFAULT_CHECKPOINT_PATH)
+    p.add_argument("--logs_dir", default=PATHS.LOGS_DIR,
+                   help="Directory for log files (default: %(default)s)")
     p.add_argument("--input_len", type=int, default=PREPROCESSING.INPUT_LEN)
     p.add_argument("--pred_horizon", type=int, default=PREPROCESSING.PRED_HORIZON)
     p.add_argument("--batch_size", type=int, default=TRAINING.BATCH_SIZE)

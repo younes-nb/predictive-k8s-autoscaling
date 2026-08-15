@@ -380,7 +380,7 @@ def evaluate(args):
 
     log_path = None
     if accelerator.is_local_main_process:
-        log_path = setup_logging(args.split)
+        log_path = setup_logging(args.split, log_dir=args.logs_dir)
 
     from preprocessing.swt.config import CFG as SWT_CFG
     swt_defaults = {
@@ -449,6 +449,10 @@ def evaluate(args):
         random.seed(wseed)
         np.random.seed(wseed)
         torch.manual_seed(wseed)
+
+    # On Windows, local functions can't be pickled for DataLoader workers
+    if os.name == "nt":
+        optimal_workers = 0
 
     test_loader = DataLoader(
         test_ds,
@@ -604,6 +608,8 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--windows_dir", required=True)
     p.add_argument("--checkpoint_path", required=True)
+    p.add_argument("--logs_dir", default=PATHS.LOGS_DIR,
+                   help="Directory for log files (default: %(default)s)")
     p.add_argument("--batch_size", type=int, default=TRAINING.BATCH_SIZE)
     p.add_argument("--input_len", type=int, default=PREPROCESSING.INPUT_LEN)
     p.add_argument("--cpu", action="store_true", default=False)

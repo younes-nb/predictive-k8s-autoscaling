@@ -82,21 +82,15 @@ def _memory_aware_workers(requested, per_worker, max_fraction=0.8):
     return max(1, min(requested, int(avail * max_fraction / per_worker)))
 
 
-def _decompose_shard(task):
+def _decompose_shard(task, windows_done, shards_done, cur_shard_idx):
     (shard_x_path, shard_y_path, shard_sid_path,
      shard_out_x_path, shard_out_y_path, shard_out_sid_path, shard_out_last_path,
      cpu_cfg, mem_cfg, feature_idx_cpu, feature_idx_mem, has_mem, shard_idx) = task
 
     t0 = time.time()
 
-    # Shared progress objects are set as module globals before the pool forks,
-    # so workers inherit them (Synchronized objects can't be pickled through
-    # the task queue).
-    windows_done = _PROGRESS["windows_done"]
-    shards_done = _PROGRESS["shards_done"]
-    cur_shard_idx = _PROGRESS["cur_shard_idx"]
-    with cur_shard_idx.get_lock():
-        cur_shard_idx.value = shard_idx
+    # Progress objects are passed as arguments (works with spawn on Windows)
+    cur_shard_idx.value = shard_idx
 
     X = np.load(shard_x_path, mmap_mode="r")
     Y = np.load(shard_y_path)
@@ -151,8 +145,7 @@ def _decompose_shard(task):
         if n_kept:
             out_mmap[offset:offset + n_kept] = X_dec_chunk[keep_chunk]
             offset += n_kept
-        with windows_done.get_lock():
-            windows_done.value += m
+        windows_done.value += m
         del X_dec_chunk, X_chunk, keep_chunk
         gc.collect()
 
@@ -180,8 +173,7 @@ def _decompose_shard(task):
     np.save(shard_out_y_path, Y[keep].astype(np.float16))
     np.save(shard_out_sid_path, S[keep])
 
-    with shards_done.get_lock():
-        shards_done.value += 1
+    shards_done.value += 1
 
     elapsed = time.time() - t0
     return (os.path.basename(shard_x_path), n_kept_total, N - n_kept_total, elapsed)
@@ -207,7 +199,9 @@ def main() -> None:
                     help="Recompute the preprocessing approach output, ignoring cached shards")
     args = ap.parse_args()
 
-    has_mem = args.feature_set == "cpu_mem_both"
+    spec = get_feature_set(args.feature_set)
+    target_features = spec.get("targets", [spec.get("target")])
+    has_mem = "memory_utilization" in target_features
     cpu_cfg = replace(CFG, SWT_LEVEL=args.swt_level)
     mem_cfg = replace(CFG, SWT_LEVEL=args.mem_swt_level)
 
@@ -227,7 +221,6 @@ def main() -> None:
         )
     num_workers = capped
 
-    spec = get_feature_set(args.feature_set)
     feature_names = list(spec["features"])
     feature_idx_cpu = feature_names.index("cpu_utilization")
     feature_idx_mem = feature_names.index("memory_utilization") if has_mem else -1
@@ -273,9 +266,10 @@ def main() -> None:
 
     # Shared progress state: workers update these (inherited at fork), a monitor
     # thread in the parent renders them.
-    windows_done = mp.Value(ctypes.c_longlong, 0)
-    shards_done = mp.Value(ctypes.c_longlong, 0)
-    cur_shard_idx = mp.Value(ctypes.c_longlong, -1)
+    manager = mp.Manager()
+    windows_done = manager.Value(ctypes.c_longlong, 0)
+    shards_done = manager.Value(ctypes.c_longlong, 0)
+    cur_shard_idx = manager.Value(ctypes.c_longlong, -1)
     global _PROGRESS
     _PROGRESS = {
         "windows_done": windows_done,
@@ -291,9 +285,13 @@ def main() -> None:
     kept_windows = 0
     total_skipped = 0
 
+    mp_context = mp.get_context("spawn" if os.name == "nt" else "fork")
     with ProcessPoolExecutor(max_workers=num_workers,
-                             mp_context=mp.get_context("fork")) as executor:
-        futures = {executor.submit(_decompose_shard, t): t for t in shard_tasks}
+                             mp_context=mp_context) as executor:
+        futures = {
+            executor.submit(_decompose_shard, t, windows_done, shards_done, cur_shard_idx): t
+            for t in shard_tasks
+        }
         pbar = tqdm(
             total=total_windows, desc="SWT Decomposition",
             unit="", unit_scale=True,

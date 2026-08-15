@@ -31,8 +31,10 @@ def log_configs(shared_config, approach_config=None, approach_label=None):
             logging.info(str(approach_config))
 
 
-def setup_logging(mode="train", log_path=None):
-    os.makedirs(PATHS.LOGS_DIR, exist_ok=True)
+def setup_logging(mode="train", log_path=None, log_dir=None):
+    if log_dir is None:
+        log_dir = PATHS.LOGS_DIR
+    os.makedirs(log_dir, exist_ok=True)
 
     try:
         tehran_tz = ZoneInfo("Asia/Tehran")
@@ -44,7 +46,7 @@ def setup_logging(mode="train", log_path=None):
     if log_path is None:
         timestamp = now.strftime("%Y%m%d_%H%M%S")
         log_filename = f"{mode}_{timestamp}.log"
-        log_path = os.path.join(PATHS.LOGS_DIR, log_filename)
+        log_path = os.path.join(log_dir, log_filename)
     else:
         os.makedirs(os.path.dirname(log_path), exist_ok=True)
 

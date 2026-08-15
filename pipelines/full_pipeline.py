@@ -32,6 +32,10 @@ def main():
     ap.add_argument("--windows_dir", default=PATHS.WINDOWS_DIR, help="Output directory for window datasets")
     ap.add_argument("--model_name", default="model.pt",
         help="Filename for the final model checkpoint (saved in the models dir; default: %(default)s)")
+    ap.add_argument("--models_dir", default=PATHS.MODELS_DIR,
+        help="Directory to save model checkpoints (default: %(default)s)")
+    ap.add_argument("--logs_dir", default=PATHS.LOGS_DIR,
+        help="Directory for log files (default: %(default)s)")
     ap.add_argument("--input_len", type=int, default=PREPROCESSING.INPUT_LEN,
         help="Sliding window input length; changing it auto-rebuilds the windows (default: %(default)s)")
     ap.add_argument("--skip_preprocessing", action="store_true", help="Skip the entire preprocessing pipeline (fetch+ingest+windows)")
@@ -240,7 +244,7 @@ def main():
 
         total_times["preprocessing"] = run(cmd_pre, "Step 1: Preprocessing")
 
-    current_checkpoint = os.path.join(os.path.dirname(PATHS.CHECKPOINT_PATH), args.model_name)
+    current_checkpoint = os.path.join(args.models_dir, args.model_name)
 
     gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 0
 
@@ -265,6 +269,8 @@ def main():
             args.windows_dir,
             "--checkpoint_path",
             current_checkpoint,
+            "--logs_dir",
+            args.logs_dir,
             "--feature_set",
             args.feature_set,
             "--batch_size",
@@ -335,6 +341,8 @@ def main():
             args.windows_dir,
             "--checkpoint_path",
             current_checkpoint,
+            "--logs_dir",
+            args.logs_dir,
             "--batch_size",
             str(TRAINING.BATCH_SIZE),
             "--input_len",
