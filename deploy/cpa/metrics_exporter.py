@@ -21,16 +21,19 @@ TS_FORMAT = "%Y-%m-%d %H:%M:%S"
 TEHRAN = timezone(timedelta(hours=3, minutes=30))
 CSV_COLUMNS = [
     "timestamp", "cpu", "memory", "pred_cpu", "pred_mem",
-    "delta_cpu", "delta_mem", "inference_time_s", "replicas",
+    "lower_cpu", "upper_cpu", "lower_mem", "upper_mem",
+    "inference_time_s", "replicas",
 ]
 
 GAUGES = {
     "cpu": ("cpa_actual_cpu", "Current CPU usage normalized to pod limit"),
     "memory": ("cpa_actual_memory", "Current memory usage normalized to pod limit"),
-    "pred_cpu": ("cpa_pred_cpu", "Predicted CPU usage"),
-    "pred_mem": ("cpa_pred_mem", "Predicted memory usage"),
-    "delta_cpu": ("cpa_delta_cpu", "CPU prediction delta"),
-    "delta_mem": ("cpa_delta_mem", "Memory prediction delta"),
+    "pred_cpu": ("cpa_pred_cpu", "Predicted CPU usage (median q50)"),
+    "pred_mem": ("cpa_pred_mem", "Predicted memory usage (median q50)"),
+    "lower_cpu": ("cpa_lower_cpu", "Conformal lower bound (CPU)"),
+    "upper_cpu": ("cpa_upper_cpu", "Conformal upper bound (CPU)"),
+    "lower_mem": ("cpa_lower_mem", "Conformal lower bound (Memory)"),
+    "upper_mem": ("cpa_upper_mem", "Conformal upper bound (Memory)"),
     "inference_time_s": ("cpa_inference_time_s", "Model inference time in seconds"),
     "replicas": ("cpa_replicas", "Current replica count"),
 }

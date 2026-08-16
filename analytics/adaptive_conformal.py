@@ -138,6 +138,12 @@ class AdaptiveUpperConformalPerTarget:
         self.calibrators = [
             AdaptiveUpperConformal(**kwargs) for _ in range(num_targets)
         ]
+        self.target_names = ["cpu", "memory"][:num_targets]
+    
+    @property
+    def states(self):
+        """Dict-like access to per-target states (for compatibility with deploy code)."""
+        return {name: self.calibrators[i] for i, name in enumerate(self.target_names)}
     
     def get_interval(self, q10: np.ndarray, q95: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """Get calibrated intervals for all targets.

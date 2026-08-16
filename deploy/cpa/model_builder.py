@@ -118,6 +118,78 @@ def build_dpam(checkpoint, model_type):
     )
 
 
+def build_tcn(checkpoint, model_type):
+    from core.architectures.tcn import TCNForecaster
+
+    ckpt_args = checkpoint.get("args", {}) or {}
+    hyperparams = checkpoint.get("hyperparams", {}) or {}
+    num_targets = ckpt_args.get("num_targets", config.NUM_TARGETS)
+
+    num_channels = _get(ckpt_args, hyperparams, "num_channels", [64, 64, 64, 64])
+    kernel_size = _get(ckpt_args, hyperparams, "kernel_size", 3)
+    dropout = _get(ckpt_args, hyperparams, "dropout", config.DROPOUT)
+
+    return TCNForecaster(
+        input_size=_input_size(checkpoint, ckpt_args, hyperparams),
+        num_channels=num_channels,
+        kernel_size=kernel_size,
+        dropout=dropout,
+        horizon=_get(ckpt_args, hyperparams, "pred_horizon", config.HORIZON),
+        num_targets=num_targets,
+    )
+
+
+def build_tcn_dual(checkpoint, model_type):
+    from core.architectures.tcn import DualPathTCN
+
+    ckpt_args = checkpoint.get("args", {}) or {}
+    hyperparams = checkpoint.get("hyperparams", {}) or {}
+    num_targets = ckpt_args.get("num_targets", config.NUM_TARGETS)
+
+    num_channels = _get(ckpt_args, hyperparams, "num_channels", [128, 128, 128, 128])
+    kernel_size = _get(ckpt_args, hyperparams, "kernel_size", 3)
+    dropout = _get(ckpt_args, hyperparams, "dropout", config.DROPOUT)
+
+    return DualPathTCN(
+        input_size=_input_size(checkpoint, ckpt_args, hyperparams),
+        cpu_channels=6,  # SWT level 5 => 6 channels
+        mem_channels=6,  # SWT level 5 => 6 channels
+        num_channels=num_channels,
+        kernel_size=kernel_size,
+        dropout=dropout,
+        horizon=_get(ckpt_args, hyperparams, "pred_horizon", config.HORIZON),
+        num_targets=num_targets,
+    )
+
+
+def build_quantile_ensemble(checkpoint, model_type):
+    from core.architectures.ensemble import QuantileEnsembleForecaster
+
+    ckpt_args = checkpoint.get("args", {}) or {}
+    hyperparams = checkpoint.get("hyperparams", {}) or {}
+    num_targets = ckpt_args.get("num_targets", config.NUM_TARGETS)
+
+    return QuantileEnsembleForecaster(
+        input_size=_input_size(checkpoint, ckpt_args, hyperparams),
+        hidden_size=_get(ckpt_args, hyperparams, "hidden_size", config.HIDDEN_SIZE),
+        num_layers=_get(ckpt_args, hyperparams, "num_layers", config.NUM_LAYERS),
+        dropout=_get(ckpt_args, hyperparams, "dropout", config.DROPOUT),
+        horizon=_get(ckpt_args, hyperparams, "pred_horizon", config.HORIZON),
+        num_targets=num_targets,
+        quantiles=_get(ckpt_args, hyperparams, "quantiles", [0.10, 0.50, 0.95]),
+        ensemble_size=_get(ckpt_args, hyperparams, "ensemble_size", 5),
+    )
+
+
+def load_cqr_calibrators(checkpoint) -> dict:
+    """Load CQR calibrators from checkpoint if available."""
+    cqr_calibrators = checkpoint.get("cqr_calibrators")
+    if cqr_calibrators:
+        # Convert to simple dict with q_conf per target
+        return {t_idx: cal.get("q_conf", 0.0) for t_idx, cal in cqr_calibrators.items()}
+    return {}
+
+
 BUILDERS = {
     "lstm": build_rnn,
     "gru": build_rnn,
@@ -125,6 +197,9 @@ BUILDERS = {
     "bigrue": build_rnn,
     "cnn_bilstm": build_cnn_bilstm,
     "dpam": build_dpam,
+    "tcn": build_tcn,
+    "tcn_dual": build_tcn_dual,
+    "quantile_ensemble": build_quantile_ensemble,
 }
 
 

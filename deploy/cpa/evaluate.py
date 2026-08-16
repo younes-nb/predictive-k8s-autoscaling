@@ -6,7 +6,8 @@ import numpy as np
 import traceback
 import config
 import utils
-import online_correction
+import model_builder
+from conformal_state import ConformalManager
 
 
 def _fail_conditions():
@@ -34,6 +35,36 @@ def _scale_up_ceiling(current_replicas):
             config.SCALE_UP_MAX_PODS,
         )
     return rep
+
+
+def _load_conformal_state():
+    """Load conformal state from STATE_FILE."""
+    try:
+        state = utils.load_state()
+        conformal_data = state.get("conformal")
+        if conformal_data:
+            return ConformalManager.from_dict(conformal_data)
+    except Exception:
+        pass
+    # Return fresh state if loading fails
+    return ConformalManager(
+        num_targets=config.NUM_TARGETS,
+        window_size=config.CONFORMAL_WINDOW,
+        target_alpha=config.CONFORMAL_TARGET_ALPHA,
+        eta=config.CONFORMAL_ETA,
+        alpha_min=config.CONFORMAL_ALPHA_MIN,
+        alpha_max=config.CONFORMAL_ALPHA_MAX,
+    )
+
+
+def _save_conformal_state(conformal_mgr: ConformalManager) -> None:
+    """Save conformal state to STATE_FILE."""
+    try:
+        state = utils.load_state()
+        state["conformal"] = conformal_mgr.to_dict()
+        utils.save_state(state)
+    except Exception as e:
+        utils.log_to_file(f"Warning: Failed to save conformal state: {e}")
 
 
 def main():
@@ -75,11 +106,32 @@ def main():
         mode = "Reactive"
         predicted_load_final = 0.0
         predicted_memory_final = 0.0
-        delta_load = 0.0
-        delta_mem = 0.0
 
-        if config.RESIDUAL_CORRECTION:
-            online_correction.finalize(state, now, current_load, current_memory)
+        # Load conformal state
+        conformal_mgr = _load_conformal_state()
+
+        # Pending queue for horizon-offset feedback
+        pending_key = "conformal_pending"
+        if pending_key not in state:
+            state[pending_key] = []
+        pending = state[pending_key]
+
+        # Mature pending predictions: those where horizon time has passed
+        matured = [p for p in pending if p["ts"] + config.HORIZON * 60 <= now]
+        if matured:
+            for p in matured:
+                y_cpu = p.get("y_cpu")
+                y_mem = p.get("y_mem")
+                if y_cpu is not None:
+                    conformal_mgr.states["cpu"].update(
+                        float(y_cpu), p["q10"][0], p["q95"][0]
+                    )
+                if config.NUM_TARGETS > 1 and y_mem is not None:
+                    conformal_mgr.states["memory"].update(
+                        float(y_mem), p["q10"][1], p["q95"][1]
+                    )
+            pending = [p for p in pending if p["ts"] + config.HORIZON * 60 > now]
+            state[pending_key] = pending
 
         if use_prediction and len(history_metrics) >= config.WINDOW_SIZE:
             x_tensor = (
@@ -95,25 +147,50 @@ def main():
                 preds_tensor = (
                     raw_preds[0] if isinstance(raw_preds, tuple) else raw_preds
                 )
+                # Quantile ensemble output: (1, H, T, 3) -> q10, q50, q95
                 preds_tensor = torch.round(preds_tensor * 100) / 100
-                if config.NUM_TARGETS > 1:
-                    predicted_load_final = preds_tensor[0, -1, 0].item()
-                    predicted_memory_final = preds_tensor[0, -1, 1].item()
+                if preds_tensor.dim() == 4:
+                    q10 = preds_tensor[0, -1, :, 0]  # (T,)
+                    q50 = preds_tensor[0, -1, :, 1]
+                    q95 = preds_tensor[0, -1, :, 2]
                 else:
-                    predicted_load_final = preds_tensor[0, -1].item()
+                    # Fallback for non-quantile models
+                    q50 = preds_tensor[0, -1]
+                    q10 = q50
+                    q95 = q50
 
-            if config.RESIDUAL_CORRECTION:
-                online_correction.record_prediction(
-                    state, now, predicted_load_final, predicted_memory_final
-                )
-                delta_load, delta_mem = online_correction.compute_delta(state)
-                predicted_load_final = predicted_load_final + delta_load
                 if config.NUM_TARGETS > 1:
-                    predicted_memory_final = predicted_memory_final + delta_mem
+                    predicted_load_final = float(q50[0].item())
+                    predicted_memory_final = float(q50[1].item())
+                else:
+                    predicted_load_final = float(q50.item())
+                    predicted_memory_final = 0.0
 
-            predicted_load_final = round(predicted_load_final, 2)
+            # Get conformal intervals
+            L, U = conformal_mgr.get_interval(q10, q95)
             if config.NUM_TARGETS > 1:
-                predicted_memory_final = round(predicted_memory_final, 2)
+                lower_cpu, lower_mem = float(L[0]), float(L[1])
+                upper_cpu, upper_mem = float(U[0]), float(U[1])
+            else:
+                lower_cpu, upper_cpu = float(L), float(U)
+                lower_mem, upper_mem = 0.0, 0.0
+
+            # Scale on UPPER BOUND (conservative for spike protection)
+            cpu_to_scale = upper_cpu
+            mem_to_scale = upper_mem
+
+            # Store prediction in pending queue for horizon-offset feedback
+            pending.append({
+                "ts": time.time(),
+                "q10": q10.tolist(),
+                "q50": q50.tolist(),
+                "q95": q95.tolist(),
+            })
+            # Keep only recent pending (horizon + buffer)
+            max_pending = config.HORIZON + 2
+            if len(pending) > max_pending:
+                pending = pending[-max_pending:]
+            state[pending_key] = pending
 
             mode = "Predictive"
         elif use_prediction:
@@ -123,14 +200,13 @@ def main():
         safe_threshold = config.BASE_THRESHOLD
 
         if is_predicting:
-            cpu_to_scale = predicted_load_final
-            mem_to_scale = predicted_memory_final
+            cpu_to_scale = cpu_to_scale if 'cpu_to_scale' in locals() else predicted_load_final
+            mem_to_scale = mem_to_scale if 'mem_to_scale' in locals() else predicted_memory_final
         else:
             cpu_to_scale = current_load
             mem_to_scale = current_memory
 
-        # HPA-style tolerance deadband: ignore metric ratios within TOLERANCE
-        # of 1.0 (default --horizontal-pod-autoscaler-tolerance).
+        # HPA-style tolerance deadband
         cpu_ratio = cpu_to_scale / safe_threshold
         if abs(cpu_ratio - 1.0) <= config.TOLERANCE:
             cpu_ratio = 1.0
@@ -146,7 +222,7 @@ def main():
 
         raw_desired = max(config.MIN_REPLICAS, min(config.MAX_REPLICAS, raw_desired))
 
-        # HPA-style scale-up rate limit (default scaleUp policy).
+        # HPA-style scale-up rate limit
         if raw_desired > current_replicas:
             raw_desired = min(raw_desired, _scale_up_ceiling(current_replicas))
 
@@ -167,27 +243,37 @@ def main():
         state["last_mem"] = current_memory
         state["last_replicas"] = current_replicas
 
+        # Save conformal state
+        _save_conformal_state(conformal_mgr)
+
         utils.save_state(state)
 
         t_end_eval = time.time()
         total_inference_time = metric_duration + (t_end_eval - t_start_eval)
 
+        # Log metrics including conformal bounds
         utils.log_metrics(
             utils.get_tehran_time(),
             current_load,
             current_memory,
             predicted_load_final,
             predicted_memory_final,
-            delta_load,
-            delta_mem,
+            0.0,  # delta_load (no AR)
+            0.0,  # delta_mem (no AR)
             total_inference_time,
             current_replicas,
         )
 
+        # Include conformal bounds in logs
+        alphas = conformal_mgr.get_alphas()
+        alpha_u_cpu, alpha_l_cpu = alphas.get("cpu", (0.05, 0.05))
+        alpha_u_mem, alpha_l_mem = alphas.get("memory", (0.05, 0.05))
+
         logs = (
             f"Mode: {mode}, Load: {cpu_to_scale:.2f}, Mem: {mem_to_scale:.2f}, "
             f"PredLoad: {predicted_load_final:.2f}, PredMem: {predicted_memory_final:.2f}, "
-            f"DeltaLoad: {delta_load:.4f}, DeltaMem: {delta_mem:.4f}"
+            f"Upper: {upper_cpu:.2f}, Lower: {lower_cpu:.2f}, "
+            f"AlphaU: {alpha_u_cpu:.3f}, AlphaL: {alpha_l_cpu:.3f}"
         )
         output = {
             "targetReplicas": int(final_rec),
