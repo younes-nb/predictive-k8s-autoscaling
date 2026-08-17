@@ -9,12 +9,15 @@ PREPROCESS_APPROACH="swt"
 WINDOW_SIZE="128"
 SWT_LEVEL="5"
 MEM_SWT_LEVEL="5"
-RESIDUAL="true"
-RESIDUAL_CORRECTION="true"
-AR_ORDER="2"
-FORGETTING_FACTOR="0.95"
-QUANTILE_ALPHA="0.9"
-RESIDUAL_WINDOW="${WINDOW_SIZE}"
+HORIZON="5"
+
+# Conformal Prediction Configuration
+CONFORMAL_WINDOW="500"
+CONFORMAL_TARGET_ALPHA="0.05"
+CONFORMAL_ETA="0.01"
+CONFORMAL_ALPHA_MIN="0.01"
+CONFORMAL_ALPHA_MAX="0.20"
+SPIKE_THRESHOLD="0.6099"
 
 for DEPLOYMENT in $(kubectl get deployments -n $NAMESPACE -o jsonpath='{.items[*].metadata.name}'); do
     
@@ -58,18 +61,20 @@ spec:
             value: "${SWT_LEVEL}"
           - name: MEM_SWT_LEVEL
             value: "${MEM_SWT_LEVEL}"
-          - name: RESIDUAL
-            value: "${RESIDUAL}"
-          - name: RESIDUAL_CORRECTION
-            value: "${RESIDUAL_CORRECTION}"
-          - name: AR_ORDER
-            value: "${AR_ORDER}"
-          - name: FORGETTING_FACTOR
-            value: "${FORGETTING_FACTOR}"
-          - name: QUANTILE_ALPHA
-            value: "${QUANTILE_ALPHA}"
-          - name: RESIDUAL_WINDOW
-            value: "${RESIDUAL_WINDOW}"
+          - name: HORIZON
+            value: "${HORIZON}"
+          - name: CONFORMAL_WINDOW
+            value: "${CONFORMAL_WINDOW}"
+          - name: CONFORMAL_TARGET_ALPHA
+            value: "${CONFORMAL_TARGET_ALPHA}"
+          - name: CONFORMAL_ETA
+            value: "${CONFORMAL_ETA}"
+          - name: CONFORMAL_ALPHA_MIN
+            value: "${CONFORMAL_ALPHA_MIN}"
+          - name: CONFORMAL_ALPHA_MAX
+            value: "${CONFORMAL_ALPHA_MAX}"
+          - name: SPIKE_THRESHOLD
+            value: "${SPIKE_THRESHOLD}"
           - name: TARGET_DEPLOYMENT
             value: "${DEPLOYMENT}"
           - name: TARGET_NAMESPACE

@@ -1,199 +1,298 @@
+import sys
 import json
 import time
+import torch
 import numpy as np
+import traceback
 import config
 import utils
-
-if config.PREPROCESS_APPROACH == "swt":
-    from preprocessing.swt.config import CFG as SWT_CFG
-    from preprocessing.swt.decomposition import decompose_window
+import model_builder
+from conformal_state import ConformalManager
 
 
-def _round2(value):
-    return round(float(value), 2)
+def _fail_conditions():
+    return {"AbleToScale": False, "ScalingActive": False, "ScalingLimited": False}
 
 
-def smooth_window(window_data, window_size=5):
-    if not window_data or len(window_data) < window_size:
-        return window_data
-
-    arr = np.array(window_data, dtype=float)
-    smoothed = np.zeros_like(arr)
-    kernel = np.ones(window_size) / window_size
-
-    for j in range(arr.shape[1]):
-        col = arr[:, j]
-        pad_size = window_size // 2
-        padded = np.pad(col, (pad_size, pad_size), mode="edge")
-        smoothed_col = np.convolve(padded, kernel, mode="valid")
-        smoothed[:, j] = smoothed_col[: len(col)]
-
-    return smoothed.tolist()
+def _last_target():
+    try:
+        return int(utils.load_state().get("last_target", 1))
+    except Exception:
+        return 1
 
 
-def fetch_metric_buckets(query, start_time, end_time, grid_timestamps):
-    params = {"query": query, "start": start_time, "end": end_time, "step": "60s"}
-    results = utils.query_prometheus(query, is_range=True, params=params)
-
-    buckets = {i: [] for i in range(config.WINDOW_SIZE)}
-
-    for res in results:
-        for val_pair in res.get("values", []):
-            ts, val = int(val_pair[0]), float(val_pair[1])
-            idx = next(
-                (i for i, g in enumerate(grid_timestamps) if abs(int(ts) - g) < 30),
-                None,
-            )
-            if idx is not None:
-                buckets[idx].append(float(val))
-    return buckets
+def _scale_up_ceiling(current_replicas):
+    """Max replicas reachable in one eval interval under the HPA default
+    scaleUp policy: at most max(100% of current, SCALE_UP_MAX_PODS) pods per
+    15s period."""
+    rep = int(current_replicas)
+    periods = max(
+        1, int(config.EVAL_INTERVAL_SECONDS // config.SCALE_UP_PERIOD_SECONDS)
+    )
+    for _ in range(periods):
+        rep = min(config.MAX_REPLICAS, rep + max(int(rep * config.SCALE_UP_MAX_PERCENT / 100), config.SCALE_UP_MAX_PODS))
+    return rep
 
 
-def get_aggregated_window():
-    end_time = int(time.time())
-    start_time = end_time - (config.WINDOW_SIZE * 60)
-    grid_timestamps = [start_time + (i * 60) for i in range(config.WINDOW_SIZE)]
-
-    pod_selector = f"pod=~'{config.DEPLOYMENT}-[a-z0-9]+-[a-z0-9]+'"
-    ready_filter = (
-        f"kube_pod_container_status_ready{{namespace='{config.NAMESPACE}', "
-        f"container='server'}} == 1"
+def _load_conformal_state():
+    """Load conformal state from STATE_FILE."""
+    state = utils.load_state()
+    conformal_data = state.get("conformal")
+    if conformal_data:
+        try:
+            return ConformalManager.from_dict(conformal_data)
+        except Exception:
+            pass
+    return ConformalManager(
+        target_alpha=config.CONFORMAL_TARGET_ALPHA,
+        eta=config.CONFORMAL_ETA,
+        alpha_min=config.CONFORMAL_ALPHA_MIN,
+        alpha_max=config.CONFORMAL_ALPHA_MAX,
     )
 
-    cpu_query = (
-        f"sum(rate(container_cpu_usage_seconds_total{{namespace='{config.NAMESPACE}', {pod_selector}, container='server'}}[1m]) and on (pod) ({ready_filter})) by (pod) / "
-        f"sum(kube_pod_container_resource_requests{{namespace='{config.NAMESPACE}', {pod_selector}, container='server', resource='cpu'}} and on (pod) ({ready_filter})) by (pod)"
-    )
-    cpu_buckets = fetch_metric_buckets(cpu_query, start_time, end_time, grid_timestamps)
 
-    mem_buckets = None
-    if "mem" in config.FEATURE_SET:
-        mem_query = (
-            f"sum(container_memory_working_set_bytes{{namespace='{config.NAMESPACE}', {pod_selector}, container='server'}} and on (pod) ({ready_filter})) by (pod) / "
-            f"sum(kube_pod_container_resource_requests{{namespace='{config.NAMESPACE}', {pod_selector}, container='server', resource='memory'}} and on (pod) ({ready_filter})) by (pod)"
-        )
-        mem_buckets = fetch_metric_buckets(
-            mem_query, start_time, end_time, grid_timestamps
-        )
-
-    final_window = []
-    use_prediction = True
-    prev_cpu = None
-
-    for i in range(config.WINDOW_SIZE):
-        c_vals = cpu_buckets[i]
-
-        has_cpu = bool(c_vals)
-        has_mem = ("mem" not in config.FEATURE_SET) or bool(
-            mem_buckets and mem_buckets[i]
-        )
-
-        if not (has_cpu and has_mem):
-            use_prediction = False
-            final_window.append([0.0] * config.RAW_INPUT_SIZE)
-            prev_cpu = 0.0
-        else:
-            avg_cpu = sum(c_vals) / len(c_vals)
-            avg_cpu = _round2(avg_cpu)
-            cpu_diff = avg_cpu - prev_cpu if prev_cpu is not None else 0.0
-            cpu_diff = _round2(cpu_diff)
-            prev_cpu = avg_cpu
-
-            row = [avg_cpu]
-
-            if "mem" in config.FEATURE_SET:
-                avg_mem = sum(mem_buckets[i]) / len(mem_buckets[i])
-                avg_mem = _round2(avg_mem)
-                row.append(avg_mem)
-
-            if config.FEATURE_SET.endswith("_diff"):
-                row.append(cpu_diff)
-
-            final_window.append(row)
-
-    if use_prediction:
-        if config.PREPROCESS_APPROACH == "swt":
-            final_window = apply_swt(final_window)
-        else:
-            final_window = smooth_window(final_window, window_size=5)
-            final_window = [
-                [_round2(v) for v in row] for row in final_window
-            ]
-
-    return final_window, use_prediction
-
-
-def apply_swt(window_data):
-    arr = np.asarray(window_data, dtype=np.float32)
-    channels = []
-    for col in range(arr.shape[1]):
-        signal = arr[:, col]
-        dec = decompose_window(signal, SWT_CFG)
-        if dec is None:
-            dec = np.zeros((SWT_CFG.SWT_LEVEL + 1, len(signal)), dtype=np.float32)
-            dec[0] = signal
-        channels.append(dec.T)
-    return np.concatenate(channels, axis=1).tolist()
+def _save_conformal_state(conformal_mgr):
+    """Save conformal state to STATE_FILE."""
+    state = utils.load_state()
+    state["conformal"] = conformal_mgr.to_dict()
+    utils.save_state(state)
 
 
 def main():
-    t_start = time.time()
-    history, use_prediction = get_aggregated_window()
-    pod_selector = f"pod=~'{config.DEPLOYMENT}-[a-z0-9]+-[a-z0-9]+'"
+    t_start_eval = time.time()
+    try:
+        raw_input = sys.stdin.read()
+        if not raw_input:
+            utils.log_to_file("ERROR: Empty input received from stdin")
+            print(
+                json.dumps(
+                    {
+                        "targetReplicas": _last_target(),
+                        "logs": "Empty input",
+                        "conditions": _fail_conditions(),
+                    }
+                )
+            )
+            return
 
-    q_replicas = f"count(kube_pod_container_status_ready{{namespace='{config.NAMESPACE}', {pod_selector}, container='server'}} == 1)"
-    res_rep = utils.query_prometheus(q_replicas)
-    if res_rep:
-        current_replicas = int(res_rep[0]["value"][1])
-    else:
+        envelope = json.loads(raw_input)
+        metrics_list = envelope.get("metrics", [])
+        if not metrics_list:
+            raise ValueError("No metrics found in CPA envelope")
+
+        inner_json_str = metrics_list[0].get("value", "{}")
+        data = json.loads(inner_json_str)
+
+        history_metrics = data.get("metrics", [])
+        use_prediction = data.get("use_prediction", False)
+        current_load = float(data.get("current_load", 0.0))
+        current_memory = float(data.get("current_memory", 0.0))
+        current_replicas = int(data.get("current_replicas", 1))
+        metric_duration = float(data.get("duration_seconds", 0.0))
+
         state = utils.load_state()
-        current_replicas = int(state.get("last_replicas", 1))
+        rec_history = state["history"]
 
-    q_load = (
-        f"sum(rate(container_cpu_usage_seconds_total{{namespace='{config.NAMESPACE}', {pod_selector}, container='server'}}[1m]) and on (pod) ({ready_filter})) / "
-        f"sum(kube_pod_container_resource_requests{{namespace='{config.NAMESPACE}', {pod_selector}, container='server', resource='cpu'}} and on (pod) ({ready_filter}))"
-    )
-    res_load = utils.query_prometheus(q_load)
+        now = time.time()
+        mode = "Reactive"
+        predicted_load_final = 0.0
+        predicted_memory_final = 0.0
+        # Initialize conformal bounds for logging
+        upper_cpu = 0.0
+        lower_cpu = 0.0
+        upper_mem = 0.0
+        lower_mem = 0.0
 
-    if res_load:
-        current_load = float(res_load[0]["value"][1])
-        current_load = _round2(current_load)
-    else:
-        state = utils.load_state()
-        last_load = state.get("last_load")
-        if last_load is not None:
-            current_load = _round2(float(last_load))
+        # Load conformal state
+        conformal_mgr = _load_conformal_state()
+
+        # Pending queue for horizon-offset feedback
+        pending_key = "conformal_pending"
+        if pending_key not in state:
+            state[pending_key] = []
+        pending = state[pending_key]
+
+        # Mature pending predictions: those where horizon time has passed
+        matured = [p for p in pending if p["ts"] + config.HORIZON * 60 <= now]
+        if matured:
+            for p in matured:
+                y_cpu = p.get("y_cpu")
+                y_mem = p.get("y_mem")
+                if y_cpu is not None:
+                    conformal_mgr.states["cpu"].update(
+                        float(y_cpu), p["q10"][0], p["q95"][0]
+                    )
+                if config.NUM_TARGETS > 1 and y_mem is not None:
+                    conformal_mgr.states["memory"].update(
+                        float(y_mem), p["q10"][1], p["q95"][1]
+                    )
+            pending = [p for p in pending if p["ts"] + config.HORIZON * 60 > now]
+            state[pending_key] = pending
+
+        if use_prediction and len(history_metrics) >= config.WINDOW_SIZE:
+            x_tensor = (
+                torch.tensor(history_metrics)
+                .float()
+                .view(1, config.WINDOW_SIZE, config.INPUT_SIZE)
+            )
+            model = utils.load_model()
+
+            with torch.no_grad():
+                model.eval()
+                raw_preds = model(x_tensor)
+                preds_tensor = (
+                    raw_preds[0] if isinstance(raw_preds, tuple) else raw_preds
+                )
+                # Quantile ensemble output: (1, H, T, 3) -> q10, q50, q95
+                preds_tensor = torch.round(preds_tensor * 100) / 100
+                if preds_tensor.dim() == 4:
+                    q10 = preds_tensor[0, -1, :, 0]  # (T,)
+                    q50 = preds_tensor[0, -1, :, 1]
+                    q95 = preds_tensor[0, -1, :, 2]
+                else:
+                    # Fallback for non-quantile models
+                    q50 = preds_tensor[0, -1]
+                    q10 = q50
+                    q95 = q50
+
+                if config.NUM_TARGETS > 1:
+                    predicted_load_final = float(q50[0].item())
+                    predicted_memory_final = float(q50[1].item())
+                else:
+                    predicted_load_final = float(q50.item())
+                    predicted_memory_final = 0.0
+
+            # Get conformal intervals
+            L, U = conformal_mgr.get_interval(q10, q95)
+            if config.NUM_TARGETS > 1:
+                lower_cpu, lower_mem = float(L[0]), float(L[1])
+                upper_cpu, upper_mem = float(U[0]), float(U[1])
+            else:
+                lower_cpu, upper_cpu = float(L), float(U)
+                lower_mem, upper_mem = 0.0, 0.0
+
+            # Scale on UPPER BOUND (conservative for spike protection)
+            cpu_to_scale = upper_cpu
+            mem_to_scale = upper_mem
+
+            # Store prediction in pending queue for horizon-offset feedback
+            pending.append({
+                "ts": time.time(),
+                "q10": q10.tolist(),
+                "q50": q50.tolist(),
+                "q95": q95.tolist(),
+            })
+            # Keep only recent pending (horizon + buffer)
+            max_pending = config.HORIZON + 2
+            if len(pending) > max_pending:
+                pending = pending[-max_pending:]
+            state[pending_key] = pending
+
+            mode = "Predictive"
+        elif use_prediction:
+            mode = "Predictive (Waiting for data)"
+
+        is_predicting = mode.startswith("Predictive") and predicted_load_final > 0
+        safe_threshold = config.BASE_THRESHOLD
+
+        if is_predicting:
+            cpu_to_scale = cpu_to_scale if 'cpu_to_scale' in locals() else predicted_load_final
+            mem_to_scale = mem_to_scale if 'mem_to_scale' in locals() else predicted_memory_final
         else:
-            last_point = history[-1] if history else 0.0
-            current_load = last_point[0] if isinstance(last_point, list) else last_point
+            cpu_to_scale = current_load
+            mem_to_scale = current_memory
 
-    q_mem = (
-        f"sum(container_memory_working_set_bytes{{namespace='{config.NAMESPACE}', {pod_selector}, container='server'}} and on (pod) ({ready_filter})) / "
-        f"sum(kube_pod_container_resource_requests{{namespace='{config.NAMESPACE}', {pod_selector}, container='server', resource='memory'}} and on (pod) ({ready_filter}))"
-    )
-    res_mem = utils.query_prometheus(q_mem)
-    if res_mem:
-        current_mem = float(res_mem[0]["value"][1])
-    else:
-        state = utils.load_state()
-        last_mem = state.get("last_mem")
-        current_mem = _round2(float(last_mem)) if last_mem is not None else 0.0
-    current_mem = _round2(current_mem)
+        # HPA-style tolerance deadband
+        cpu_ratio = cpu_to_scale / safe_threshold
+        if abs(cpu_ratio - 1.0) <= config.TOLERANCE:
+            cpu_ratio = 1.0
+        raw_desired = int(np.ceil(current_replicas * cpu_ratio))
 
-    t_end = time.time()
+        if config.NUM_TARGETS > 1:
+            mem_ratio = mem_to_scale / safe_threshold
+            if abs(mem_ratio - 1.0) <= config.TOLERANCE:
+                mem_ratio = 1.0
+            raw_desired = max(raw_desired, int(np.ceil(current_replicas * mem_ratio)))
 
-    print(
-        json.dumps(
-            {
-                "metrics": history,
-                "use_prediction": use_prediction,
-                "current_load": current_load,
-                "current_memory": current_mem,
-                "current_replicas": current_replicas,
-                "duration_seconds": t_end - t_start,
-            }
+        scaling_limited = raw_desired >= config.MAX_REPLICAS
+
+        raw_desired = max(config.MIN_REPLICAS, min(config.MAX_REPLICAS, raw_desired))
+
+        # HPA-style scale-up rate limit
+        if raw_desired > current_replicas:
+            raw_desired = min(raw_desired, _scale_up_ceiling(current_replicas))
+
+        rec_history.append({"time": now, "replicas": raw_desired})
+        window = [
+            x["replicas"]
+            for x in rec_history
+            if x["time"] > (now - config.STABILIZATION_WINDOW_SECONDS)
+        ]
+        final_rec = (
+            raw_desired
+            if raw_desired > current_replicas
+            else (max(window) if window else raw_desired)
         )
-    )
+
+        state["last_target"] = int(final_rec)
+        state["last_load"] = current_load
+        state["last_mem"] = current_memory
+        state["last_replicas"] = current_replicas
+
+        # Save conformal state
+        _save_conformal_state(conformal_mgr)
+
+        utils.save_state(state)
+
+        t_end_eval = time.time()
+        total_inference_time = metric_duration + (t_end_eval - t_start_eval)
+
+        # Log metrics including conformal bounds
+        utils.log_metrics(
+            utils.get_tehran_time(),
+            current_load,
+            current_memory,
+            predicted_load_final,
+            predicted_memory_final,
+            0.0,  # delta_load (no AR)
+            0.0,  # delta_mem (no AR)
+            total_inference_time,
+            current_replicas,
+        )
+
+        # Include conformal bounds in logs
+        alphas = conformal_mgr.get_alphas()
+        alpha_u_cpu, alpha_l_cpu = alphas.get("cpu", (0.05, 0.05))
+        alpha_u_mem, alpha_l_mem = alphas.get("memory", (0.05, 0.05))
+
+        logs = (
+            f"Mode: {mode}, Load: {cpu_to_scale:.2f}, Mem: {mem_to_scale:.2f}, "
+            f"PredLoad: {predicted_load_final:.2f}, PredMem: {predicted_memory_final:.2f}, "
+            f"Upper: {upper_cpu:.2f}, Lower: {lower_cpu:.2f}, "
+            f"AlphaU: {alpha_u_cpu:.3f}, AlphaL: {alpha_l_cpu:.3f}"
+        )
+        output = {
+            "targetReplicas": int(final_rec),
+            "logs": logs,
+            "conditions": {
+                "AbleToScale": True,
+                "ScalingActive": True,
+                "ScalingLimited": bool(scaling_limited),
+            },
+        }
+        sys.stdout.write(json.dumps(output))
+
+    except Exception as e:
+        utils.log_to_file(f"CRITICAL EXCEPTION: {str(e)}\n{traceback.format_exc()}")
+        print(
+            json.dumps(
+                {
+                    "targetReplicas": _last_target(),
+                    "logs": f"Error: {str(e)}",
+                    "conditions": _fail_conditions(),
+                }
+            )
+        )
 
 
 if __name__ == "__main__":

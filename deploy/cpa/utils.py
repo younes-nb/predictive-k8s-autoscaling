@@ -7,7 +7,6 @@ import torch
 import requests
 import config
 import model_builder
-import online_correction
 
 
 def query_prometheus(query, is_range=False, params=None):
@@ -27,7 +26,6 @@ def query_prometheus(query, is_range=False, params=None):
 def load_state():
     defaults = {
         "history": [],
-        **online_correction.empty_state(),
     }
     if os.path.exists(config.STATE_FILE):
         try:

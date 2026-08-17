@@ -30,26 +30,20 @@ def _scale_up_ceiling(current_replicas):
         1, int(config.EVAL_INTERVAL_SECONDS // config.SCALE_UP_PERIOD_SECONDS)
     )
     for _ in range(periods):
-        rep += max(
-            int(np.ceil(rep * config.SCALE_UP_MAX_PERCENT / 100.0)),
-            config.SCALE_UP_MAX_PODS,
-        )
+        rep = min(config.MAX_REPLICAS, rep + max(int(rep * config.SCALE_UP_MAX_PERCENT / 100), config.SCALE_UP_MAX_PODS))
     return rep
 
 
 def _load_conformal_state():
     """Load conformal state from STATE_FILE."""
-    try:
-        state = utils.load_state()
-        conformal_data = state.get("conformal")
-        if conformal_data:
+    state = utils.load_state()
+    conformal_data = state.get("conformal")
+    if conformal_data:
+        try:
             return ConformalManager.from_dict(conformal_data)
-    except Exception:
-        pass
-    # Return fresh state if loading fails
+        except Exception:
+            pass
     return ConformalManager(
-        num_targets=config.NUM_TARGETS,
-        window_size=config.CONFORMAL_WINDOW,
         target_alpha=config.CONFORMAL_TARGET_ALPHA,
         eta=config.CONFORMAL_ETA,
         alpha_min=config.CONFORMAL_ALPHA_MIN,
@@ -57,14 +51,11 @@ def _load_conformal_state():
     )
 
 
-def _save_conformal_state(conformal_mgr: ConformalManager) -> None:
+def _save_conformal_state(conformal_mgr):
     """Save conformal state to STATE_FILE."""
-    try:
-        state = utils.load_state()
-        state["conformal"] = conformal_mgr.to_dict()
-        utils.save_state(state)
-    except Exception as e:
-        utils.log_to_file(f"Warning: Failed to save conformal state: {e}")
+    state = utils.load_state()
+    state["conformal"] = conformal_mgr.to_dict()
+    utils.save_state(state)
 
 
 def main():
@@ -106,6 +97,11 @@ def main():
         mode = "Reactive"
         predicted_load_final = 0.0
         predicted_memory_final = 0.0
+        # Initialize conformal bounds for logging
+        upper_cpu = 0.0
+        lower_cpu = 0.0
+        upper_mem = 0.0
+        lower_mem = 0.0
 
         # Load conformal state
         conformal_mgr = _load_conformal_state()
