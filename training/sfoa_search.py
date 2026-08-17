@@ -739,6 +739,7 @@ def run_sfoa_search(
         torch.cuda.manual_seed_all(cand_seed)
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
+        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
         torch.use_deterministic_algorithms(True)
 
         def _worker_init_fn(worker_id):
