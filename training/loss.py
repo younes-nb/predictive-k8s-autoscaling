@@ -61,7 +61,7 @@ def asymmetric_huber_loss(
     mem_beta: float = 0.002,
     lambda_cpu: float = 0.5,
     lambda_mem: float = 0.5,
-    under_weight_cpu: float = 3.0,
+    under_weight_cpu: float = 1.0,
     under_weight_mem: float = 1.0,
     rel_w: float = 0.0,
     rel_eps: float = 1e-6,

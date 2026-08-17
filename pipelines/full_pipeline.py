@@ -146,7 +146,7 @@ def main():
     ap.add_argument("--loss_rel_w_mem", type=float, default=None,
                     help="Weight of the relative (MAPE) term on the memory branch "
                          "in per_target_huber (default 0.0 = off)")
-    ap.add_argument("--under_weight_cpu", type=float, default=3.0,
+    ap.add_argument("--under_weight_cpu", type=float, default=1.0,
                     help="Multiplier for CPU underprediction penalty in asymmetric_huber (default 3.0)")
     ap.add_argument("--under_weight_mem", type=float, default=1.0,
                     help="Multiplier for memory underprediction penalty in asymmetric_huber (default 1.0)")
