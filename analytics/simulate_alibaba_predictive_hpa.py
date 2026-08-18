@@ -89,6 +89,8 @@ def parse_args():
     ap.add_argument("--initial_replicas", type=int, default=1)
     ap.add_argument("--train_frac", type=float, default=TRAIN_FRAC)
     ap.add_argument("--val_frac", type=float, default=VAL_FRAC)
+    ap.add_argument("--max_services", type=int, default=0,
+                    help="Limit auto-select to first N services (0=all)")
     return ap.parse_args()
 
 
@@ -167,15 +169,23 @@ def load_alibaba_parquet(parquet_root, feature_set, service_arrays_path=None,
 # ================================================================
 
 def select_best_msname(service_data, hours, input_len, pred_horizon,
-                       train_frac, val_frac, feature_names=None):
+                       train_frac, val_frac, max_services=0):
     """Select msname with highest avg+std CPU and memory in test split.
 
     service_data: dict of msname -> numpy array (N, num_features) or DataFrame.
+    max_services: if >0, only evaluate this many services (sorted by name).
     """
     n_minutes = int(hours * 60)
     candidates = []
 
-    for svc_name, arr in service_data.items():
+    svc_names = sorted(service_data.keys())
+    if max_services > 0:
+        svc_names = svc_names[:max_services]
+        print(f"Limiting service selection to first {max_services} of "
+              f"{len(service_data)} services")
+
+    for svc_name in svc_names:
+        arr = service_data[svc_name]
         if isinstance(arr, pd.DataFrame):
             n = len(arr)
         else:
@@ -533,7 +543,10 @@ def simulate_trace(raw_feat, model_feat, model, meta, device,
 # Metrics
 # ================================================================
 
-def compute_metrics(results, pred_horizon, threshold):
+def compute_metrics(results, pred_horizon, threshold, use_conformal=False):
+    """Compute paper-aligned metrics: replica stats, SLA violations, prediction
+    accuracy (MSE/MAE/RMSE/R2/MAPE/MDA), persistence comparison, and
+    conformal interval quality (PICP/MPIW) when applicable."""
     df = pd.DataFrame(results)
     test_df = df[df["warmup"] == False]
     warmup_df = df[df["warmup"] == True]
@@ -543,6 +556,8 @@ def compute_metrics(results, pred_horizon, threshold):
         return {}
 
     m = {}
+
+    # --- Replica metrics (per controller) ---
     for p, c in [("traditional", "traditional_replicas"), ("predictive", "predictive_replicas")]:
         r = test_df[c].values
         m[f"{p}_avg_replicas"] = float(np.mean(r))
@@ -550,18 +565,76 @@ def compute_metrics(results, pred_horizon, threshold):
         m[f"{p}_min_replicas"] = int(np.min(r))
         m[f"{p}_scaling_actions"] = int(np.sum(np.abs(np.diff(r)) > 0))
 
+    # --- SLA violations ---
     m["sla_violations"] = int(test_df["sla_violation"].sum())
     m["sla_violation_rate"] = float(test_df["sla_violation"].mean())
 
-    if len(test_df) > pred_horizon:
-        ac = test_df["cpu"].values[pred_horizon:]
-        pc = test_df["pred_cpu"].values[:-pred_horizon]
-        m["pred_cpu_mse"] = float(np.mean((ac - pc) ** 2))
-        m["pred_cpu_mae"] = float(np.mean(np.abs(ac - pc)))
-
+    # --- Replica reduction ---
     ta = m.get("traditional_avg_replicas", 0)
     pa = m.get("predictive_avg_replicas", 0)
     m["replica_reduction_pct"] = ((ta - pa) / ta * 100) if ta > 0 else 0.0
+
+    # --- Prediction accuracy (horizon-aligned) ---
+    ac = test_df["cpu"].values.astype(float)
+    pc = test_df["pred_cpu"].values.astype(float)
+    am = test_df["memory"].values.astype(float)
+    pm = test_df["pred_mem"].values.astype(float)
+
+    for target_name, actual, pred in [("cpu", ac, pc), ("memory", am, pm)]:
+        err = pred - actual
+        abs_err = np.abs(err)
+        mse = float(np.mean(err ** 2))
+        mae = float(np.mean(abs_err))
+        rmse = float(np.sqrt(mse))
+
+        ss_res = float(np.sum(err ** 2))
+        ss_tot = float(np.sum((actual - np.mean(actual)) ** 2))
+        r2 = 1.0 - (ss_res / ss_tot) if ss_tot > 1e-12 else 0.0
+
+        nonzero = np.abs(actual) > 1e-12
+        mape = float(np.mean(np.abs(err[nonzero]) / np.abs(actual[nonzero]))) * 100.0 if np.sum(nonzero) > 0 else 0.0
+
+        if len(actual) > 1:
+            actual_dir = np.sign(actual[1:] - actual[:-1])
+            pred_dir = np.sign(pred[1:] - actual[:-1])
+            mda = float(np.mean(actual_dir == pred_dir)) * 100.0
+        else:
+            mda = 0.0
+
+        m[f"pred_{target_name}_mse"] = mse
+        m[f"pred_{target_name}_mae"] = mae
+        m[f"pred_{target_name}_rmse"] = rmse
+        m[f"pred_{target_name}_r2"] = r2
+        m[f"pred_{target_name}_mape"] = mape
+        m[f"pred_{target_name}_mda"] = mda
+
+        # --- Persistence comparison (current load as naive baseline) ---
+        y_last = np.roll(actual, 1)
+        y_last[0] = actual[0]
+        mse_naive = float(np.mean((y_last - actual) ** 2))
+        mae_naive = float(np.mean(np.abs(y_last - actual)))
+        r2_vs_persistence = 1.0 - mse / mse_naive if mse_naive > 1e-12 else float("nan")
+        mae_vs_persistence = mae / mae_naive if mae_naive > 1e-12 else float("nan")
+        beat_persistence = float(np.mean(np.abs(err) < np.abs(y_last - actual)) * 100.0)
+
+        m[f"{target_name}_r2_vs_persistence"] = r2_vs_persistence
+        m[f"{target_name}_beat_persistence"] = beat_persistence
+        m[f"{target_name}_mae_vs_persistence"] = mae_vs_persistence
+
+    # --- Conformal interval quality (PICP, MPIW) when upper/lower bounds differ ---
+    if use_conformal and "upper_cpu" in test_df.columns:
+        for target_name, col_act, col_lo, col_hi in [
+            ("cpu", "cpu", "lower_cpu", "upper_cpu"),
+            ("memory", "memory", "lower_mem", "upper_mem"),
+        ]:
+            actual = test_df[col_act].values.astype(float)
+            lo = test_df[col_lo].values.astype(float)
+            hi = test_df[col_hi].values.astype(float)
+            in_interval = (actual >= lo) & (actual <= hi)
+            picp = float(np.mean(in_interval))
+            mpiw = float(np.mean(hi - lo))
+            m[f"{target_name}_picp"] = picp
+            m[f"{target_name}_mpiw"] = mpiw
 
     m["n_test_minutes"] = len(test_df)
     m["n_warmup_minutes"] = len(warmup_df)
@@ -666,7 +739,7 @@ def main():
     else:
         msname, test_start = select_best_msname(
             service_data, args.hours, meta["input_len"], meta["pred_horizon"],
-            args.train_frac, args.val_frac,
+            args.train_frac, args.val_frac, max_services=args.max_services,
         )
 
     arr = service_data[msname]
@@ -703,18 +776,20 @@ def main():
     if not results:
         raise SystemExit("No simulation results. Check --hours and test split size.")
 
-    metrics = compute_metrics(results, meta["pred_horizon"], args.threshold)
+    metrics = compute_metrics(results, meta["pred_horizon"], args.threshold,
+                              use_conformal=args.adaptive_conformal)
 
-    print("\n" + "=" * 62)
+    print("\n" + "=" * 72)
     print("HPA SIMULATION RESULTS")
-    print("=" * 62)
+    print("=" * 72)
     print(f"Service: {msname}")
+    print(f"Checkpoint: {args.checkpoint}")
     print(f"Conformal: {'Yes' if args.adaptive_conformal else 'No'}")
     print(f"Segment: {args.hours}h ({metrics.get('n_test_minutes', 0)} test min, "
           f"{metrics.get('n_warmup_minutes', 0)} warmup)")
-    print("-" * 62)
+    print("-" * 72)
     print(f"{'Metric':<35} {'Traditional':>12} {'Predictive':>12}")
-    print("-" * 62)
+    print("-" * 72)
     print(f"{'Avg Replicas':<35} {metrics.get('traditional_avg_replicas', 0):>12.2f} "
           f"{metrics.get('predictive_avg_replicas', 0):>12.2f}")
     print(f"{'Max Replicas':<35} {metrics.get('traditional_max_replicas', 0):>12d} "
@@ -723,13 +798,47 @@ def main():
           f"{metrics.get('predictive_min_replicas', 0):>12d}")
     print(f"{'Scaling Actions':<35} {metrics.get('traditional_scaling_actions', 0):>12d} "
           f"{metrics.get('predictive_scaling_actions', 0):>12d}")
-    print("-" * 62)
-    print(f"SLA Violations:  {metrics.get('sla_violations', 0)} "
+    print(f"{'Replica Reduction':<35} {metrics.get('replica_reduction_pct', 0):>+11.1f}%")
+    print("-" * 72)
+    print(f"  SLA Violations: {metrics.get('sla_violations', 0)} "
           f"({metrics.get('sla_violation_rate', 0) * 100:.1f}%)")
-    print(f"Replica Reduction: {metrics.get('replica_reduction_pct', 0):+.1f}%")
-    print(f"Pred CPU MSE: {metrics.get('pred_cpu_mse', 0):.6f}  "
-          f"MAE: {metrics.get('pred_cpu_mae', 0):.6f}")
-    print("=" * 62)
+    print("-" * 72)
+    print(f"{'Prediction Accuracy (CPU)':<35} {'Value':>12}")
+    print("-" * 72)
+    for k, label in [
+        ("pred_cpu_mse", "MSE"), ("pred_cpu_mae", "MAE"), ("pred_cpu_rmse", "RMSE"),
+        ("pred_cpu_r2", "R²"), ("pred_cpu_mape", "MAPE (%)"), ("pred_cpu_mda", "MDA (%)"),
+    ]:
+        print(f"  {label:<33} {metrics.get(k, 0):>12.6f}")
+    print("-" * 72)
+    print(f"{'Prediction Accuracy (Memory)':<35} {'Value':>12}")
+    print("-" * 72)
+    for k, label in [
+        ("pred_memory_mse", "MSE"), ("pred_memory_mae", "MAE"), ("pred_memory_rmse", "RMSE"),
+        ("pred_memory_r2", "R²"), ("pred_memory_mape", "MAPE (%)"), ("pred_memory_mda", "MDA (%)"),
+    ]:
+        print(f"  {label:<33} {metrics.get(k, 0):>12.6f}")
+    print("-" * 72)
+    print(f"{'Persistence Comparison':<35} {'Value':>12}")
+    print("-" * 72)
+    for tgt in ["cpu", "memory"]:
+        for k, label in [
+            (f"{tgt}_r2_vs_persistence", f"{tgt.upper()} R² vs persistence"),
+            (f"{tgt}_beat_persistence", f"{tgt.upper()} beat-persistence (%)"),
+            (f"{tgt}_mae_vs_persistence", f"{tgt.upper()} MAE vs persistence"),
+        ]:
+            v = metrics.get(k, float("nan"))
+            print(f"  {label:<33} {v:>12.4f}")
+    if args.adaptive_conformal and metrics.get("cpu_picp") is not None:
+        print("-" * 72)
+        print(f"{'Conformal Interval Quality':<35} {'Value':>12}")
+        print("-" * 72)
+        for tgt in ["cpu", "memory"]:
+            picp = metrics.get(f"{tgt}_picp", 0)
+            mpiw = metrics.get(f"{tgt}_mpiw", 0)
+            print(f"  {tgt.upper()+' PICP':<33} {picp:>11.1%}")
+            print(f"  {tgt.upper()+' MPIW':<33} {mpiw:>12.6f}")
+    print("=" * 72)
 
     os.makedirs(args.plots_dir, exist_ok=True)
     stamp = time.strftime("%Y%m%d_%H%M%S")
