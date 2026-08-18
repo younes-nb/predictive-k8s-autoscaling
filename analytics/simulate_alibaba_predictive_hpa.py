@@ -101,14 +101,16 @@ def parse_args():
 
 DEFAULT_SERVICE_ARRAYS = "/dataset/windows/_service_arrays.npy"
 DEFAULT_SERVICE_INDEX = "/dataset/windows/_service_index.json"
+DEFAULT_REPLICA_COUNTS = "/dataset/windows/_service_replica_counts.npy"
 CACHE_FEATURES = ["cpu_utilization", "memory_utilization"]
 
 
-def load_service_arrays_cache(arrays_path, index_path, feature_set):
+def load_service_arrays_cache(arrays_path, index_path, feature_set,
+                              replica_counts_path=None):
     """Load pre-aggregated service arrays from the build_windows cache.
 
-    Returns dict: msname -> numpy array of shape (N, num_features).
-    Only works for feature sets whose features are a subset of CACHE_FEATURES.
+    Returns dict: msname -> numpy array (N, num_features) and
+    dict: msname -> float baseline replica count.
     """
     spec = get_feature_set(feature_set)
     feature_names = spec["features"]
@@ -133,11 +135,20 @@ def load_service_arrays_cache(arrays_path, index_path, feature_set):
         arr = big[pos[0]:pos[0] + pos[1]][:, feat_indices].copy()
         service_data[svc_name] = arr
 
-    return service_data, CACHE_FEATURES[:len(feat_indices)]
+    baseline_replicas = {}
+    if replica_counts_path and os.path.exists(replica_counts_path):
+        rep_arr = np.load(replica_counts_path, mmap_mode="r")
+        for svc_name, pos in index.items():
+            baseline_replicas[svc_name] = max(1.0, float(rep_arr[pos[0]]))
+        print(f"Loaded baseline replica counts for {len(baseline_replicas)} services")
+    else:
+        print("[WARN] No replica counts cache; using baseline_replicas=1 for all services")
+
+    return service_data, CACHE_FEATURES[:len(feat_indices)], baseline_replicas
 
 
 def load_alibaba_parquet(parquet_root, feature_set, service_arrays_path=None,
-                         service_index_path=None):
+                         service_index_path=None, replica_counts_path=None):
     """Load Alibaba data per msname per minute.
 
     Tries the pre-aggregated service_arrays cache first (fast, handles cpu_mem_both).
@@ -147,14 +158,17 @@ def load_alibaba_parquet(parquet_root, feature_set, service_arrays_path=None,
         service_arrays_path = DEFAULT_SERVICE_ARRAYS
     if service_index_path is None:
         service_index_path = DEFAULT_SERVICE_INDEX
+    if replica_counts_path is None:
+        replica_counts_path = DEFAULT_REPLICA_COUNTS
 
     if os.path.exists(service_arrays_path) and os.path.exists(service_index_path):
         try:
-            raw_dict, cache_feats = load_service_arrays_cache(
-                service_arrays_path, service_index_path, feature_set
+            raw_dict, cache_feats, baseline_replicas = load_service_arrays_cache(
+                service_arrays_path, service_index_path, feature_set,
+                replica_counts_path=replica_counts_path,
             )
             print(f"Loaded {len(raw_dict)} services from cache (features: {cache_feats})")
-            return raw_dict, cache_feats
+            return raw_dict, cache_feats, baseline_replicas
         except (FileNotFoundError, KeyError) as e:
             print(f"[WARN] Cache unavailable: {e}. Falling back to parquet.")
 
@@ -469,11 +483,14 @@ def simulate_trace(raw_feat, model_feat, model, meta, device,
                    num_targets=2, initial_replicas=1,
                    adaptive_cal=None,
                    adaptive_window=500, adaptive_eta=0.01,
-                   timestamps=None):
+                   timestamps=None,
+                   baseline_replicas=1.0):
     """Simulate traditional and predictive HPA on a trace segment.
 
-    If adaptive_cal is provided (pre-calibrated), use it for conformal bounds.
-    Otherwise, no conformal calibration is performed.
+    Uses a closed-loop demand model:
+        total_cpu_demand = raw_cpu * baseline_replicas
+        effective_cpu = total_cpu_demand / simulated_replicas
+    This produces separate SLA violations for each controller.
     """
     input_len = meta["input_len"]
     pred_horizon = meta["pred_horizon"]
@@ -573,6 +590,18 @@ def simulate_trace(raw_feat, model_feat, model, meta, device,
 
         sla_violation = bool(cpu_actual > threshold or mem_actual > threshold)
 
+        # Closed-loop: estimate effective utilization for each controller
+        demand_cpu = cpu_actual * baseline_replicas
+        demand_mem = mem_actual * baseline_replicas if num_targets > 1 else 0.0
+        trad_eff_cpu = demand_cpu / trad_rep
+        trad_eff_mem = demand_mem / trad_rep if num_targets > 1 else 0.0
+        pred_eff_cpu = demand_cpu / pred_rep
+        pred_eff_mem = demand_mem / pred_rep if num_targets > 1 else 0.0
+        trad_sla = bool(trad_eff_cpu > threshold or
+                        (num_targets > 1 and trad_eff_mem > threshold))
+        pred_sla = bool(pred_eff_cpu > threshold or
+                        (num_targets > 1 and pred_eff_mem > threshold))
+
         ts_val = pd.Timestamp(timestamps[idx]) if timestamps is not None else None
         results.append({
             "timestamp": ts_val,
@@ -587,6 +616,12 @@ def simulate_trace(raw_feat, model_feat, model, meta, device,
             "traditional_replicas": trad_rep,
             "predictive_replicas": pred_rep,
             "sla_violation": sla_violation,
+            "traditional_effective_cpu": trad_eff_cpu,
+            "traditional_effective_mem": trad_eff_mem,
+            "predictive_effective_cpu": pred_eff_cpu,
+            "predictive_effective_mem": pred_eff_mem,
+            "traditional_sla": trad_sla,
+            "predictive_sla": pred_sla,
             "inference_time_s": dt,
         })
 
@@ -620,6 +655,28 @@ def compute_metrics(results, pred_horizon, threshold, use_conformal=False):
     # --- SLA violations ---
     m["sla_violations"] = int(df["sla_violation"].sum())
     m["sla_violation_rate"] = float(df["sla_violation"].mean())
+
+    # --- Controller-specific SLA (demand model) ---
+    if "traditional_sla" in df.columns:
+        m["traditional_sla_violations"] = int(df["traditional_sla"].sum())
+        m["traditional_sla_rate"] = float(df["traditional_sla"].mean())
+        m["predictive_sla_violations"] = int(df["predictive_sla"].sum())
+        m["predictive_sla_rate"] = float(df["predictive_sla"].mean())
+        trad_sla_n = m["traditional_sla_violations"]
+        pred_sla_n = m["predictive_sla_violations"]
+        if trad_sla_n > 0:
+            m["sla_reduction_pct"] = ((trad_sla_n - pred_sla_n) / trad_sla_n * 100)
+        else:
+            m["sla_reduction_pct"] = 0.0
+
+    # --- Effective utilization (demand model) ---
+    if "traditional_effective_cpu" in df.columns:
+        m["traditional_effective_cpu_avg"] = float(df["traditional_effective_cpu"].mean())
+        m["traditional_effective_cpu_max"] = float(df["traditional_effective_cpu"].max())
+        m["predictive_effective_cpu_avg"] = float(df["predictive_effective_cpu"].mean())
+        m["predictive_effective_cpu_max"] = float(df["predictive_effective_cpu"].max())
+        m["overprovisioned_minutes_trad"] = int((df["traditional_replicas"] > df["traditional_effective_cpu"] / threshold).sum()) if threshold > 0 else 0
+        m["overprovisioned_minutes_pred"] = int((df["predictive_replicas"] > df["predictive_effective_cpu"] / threshold).sum()) if threshold > 0 else 0
 
     # --- Replica reduction ---
     ta = m.get("traditional_avg_replicas", 0)
@@ -701,7 +758,7 @@ def plot_results(results, msname, plots_dir, pred_horizon, use_conformal, thresh
     has_ts = df["timestamp"].notna().all()
     x = df["timestamp"] if has_ts else df.index
 
-    fig, axes = plt.subplots(3, 1, figsize=(18, 14), sharex=True)
+    fig, axes = plt.subplots(4, 1, figsize=(18, 18), sharex=True)
 
     ax = axes[0]
     ax.plot(x, df["cpu"], label="Actual CPU", color="blue", alpha=0.7)
@@ -732,10 +789,33 @@ def plot_results(results, msname, plots_dir, pred_horizon, use_conformal, thresh
     ax.yaxis.set_major_locator(plt.MaxNLocator(integer=True))
 
     ax = axes[2]
-    ax.fill_between(x, 0, df["sla_violation"].astype(int),
-                    color="red", alpha=0.3, label="SLA Violation")
+    if "traditional_effective_cpu" in df.columns:
+        ax.plot(x, df["traditional_effective_cpu"], label="Trad effective CPU",
+                color="blue", alpha=0.7, linewidth=1.2)
+        ax.plot(x, df["predictive_effective_cpu"], label="Pred effective CPU",
+                color="red", alpha=0.7, linewidth=1.2)
+        ax.plot(x, df["cpu"], label="Raw CPU (observed)", color="gray",
+                alpha=0.4, linewidth=0.8, linestyle="--")
+    else:
+        ax.plot(x, df["cpu"], label="CPU", color="blue", alpha=0.7)
+        ax.plot(x, df["memory"], label="Memory", color="green", alpha=0.7)
+    ax.axhline(y=threshold, color="black", linestyle="--", alpha=0.5)
+    ax.set_ylabel("Effective Utilization")
+    ax.set_title("Effective Per-Pod Utilization (demand / replicas)", fontweight="bold")
+    ax.legend(loc="upper left", fontsize=8)
+    ax.grid(True, alpha=0.3)
+
+    ax = axes[3]
+    if "traditional_sla" in df.columns:
+        ax.fill_between(x, 0, df["traditional_sla"].astype(int),
+                        color="blue", alpha=0.3, label="Traditional SLA")
+        ax.fill_between(x, 0, df["predictive_sla"].astype(int),
+                        color="red", alpha=0.3, label="Predictive SLA")
+    else:
+        ax.fill_between(x, 0, df["sla_violation"].astype(int),
+                        color="red", alpha=0.3, label="SLA Violation")
     ax.set_ylabel("Violation")
-    ax.set_title("SLA Violations", fontweight="bold")
+    ax.set_title("SLA Violations (demand model)", fontweight="bold")
     ax.set_xlabel("Time")
     ax.legend(loc="upper left")
     ax.grid(True, alpha=0.3)
@@ -775,7 +855,7 @@ def main():
         meta["input_len"] = args.input_len
 
     print("Loading Alibaba parquet...")
-    service_data, cache_feats = load_alibaba_parquet(
+    service_data, cache_feats, baseline_replicas_map = load_alibaba_parquet(
         args.parquet_root, meta["feature_set"]
     )
 
@@ -833,6 +913,8 @@ def main():
 
     print(f"Evaluation phase: {args.hours}h ({eval_minutes} min) "
           f"[{test_start}:{test_start + eval_minutes}]")
+    baseline_replicas = baseline_replicas_map.get(msname, 1.0)
+    print(f"Baseline replicas for {msname}: {baseline_replicas:.0f}")
     results = simulate_trace(
         raw_feat, model_feat, model, meta, device,
         start_idx=test_start, n_minutes=eval_minutes,
@@ -843,6 +925,7 @@ def main():
         adaptive_window=args.adaptive_window,
         adaptive_eta=args.adaptive_eta,
         timestamps=timestamps,
+        baseline_replicas=baseline_replicas,
     )
 
     if not results:
@@ -875,8 +958,18 @@ def main():
           f"{metrics.get('predictive_scaling_actions', 0):>12d}")
     print(f"{'Replica Reduction':<35} {metrics.get('replica_reduction_pct', 0):>+11.1f}%")
     print("-" * 72)
-    print(f"  SLA Violations: {metrics.get('sla_violations', 0)} "
+    print(f"  Baseline replicas: {baseline_replicas:.0f}")
+    print(f"  SLA Violations (open-loop): {metrics.get('sla_violations', 0)} "
           f"({metrics.get('sla_violation_rate', 0) * 100:.1f}%)")
+    if "traditional_sla_violations" in metrics:
+        print(f"  Traditional SLA violations: {metrics['traditional_sla_violations']} "
+              f"({metrics['traditional_sla_rate'] * 100:.1f}%)")
+        print(f"  Predictive SLA violations:  {metrics['predictive_sla_violations']} "
+              f"({metrics['predictive_sla_rate'] * 100:.1f}%)")
+        print(f"  SLA reduction (trad→pred):  {metrics.get('sla_reduction_pct', 0):+.1f}%")
+    if "traditional_effective_cpu_avg" in metrics:
+        print(f"  Trad avg effective CPU:     {metrics['traditional_effective_cpu_avg']:.4f}")
+        print(f"  Pred avg effective CPU:     {metrics['predictive_effective_cpu_avg']:.4f}")
     print("-" * 72)
     print(f"{'Prediction Accuracy (CPU)':<35} {'Value':>12}")
     print("-" * 72)
@@ -924,6 +1017,7 @@ def main():
     metrics.update({
         "msname": msname, "checkpoint": args.checkpoint, "hours": args.hours,
         "threshold": args.threshold, "use_conformal": args.adaptive_conformal,
+        "baseline_replicas": baseline_replicas,
     })
     with open(json_path, "w") as f:
         json.dump(metrics, f, indent=2, default=str)
