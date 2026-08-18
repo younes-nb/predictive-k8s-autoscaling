@@ -79,7 +79,8 @@ def parse_args():
     ap.add_argument("--device", default=None)
     ap.add_argument("--plots_dir", default=DEFAULT_PLOTS_DIR)
     ap.add_argument("--adaptive_conformal", action="store_true")
-    ap.add_argument("--warmup_windows", type=int, default=500)
+    ap.add_argument("--calibration_minutes", type=int, default=200,
+                    help="Minutes before evaluation used for online conformal calibration")
     ap.add_argument("--adaptive_window", type=int, default=500)
     ap.add_argument("--adaptive_eta", type=float, default=0.01)
     ap.add_argument("--threshold", type=float, default=BASE_THRESHOLD)
@@ -389,14 +390,91 @@ def _desired_replicas(cpu_demand, mem_demand, current_replicas,
     return raw
 
 
+def _run_calibration(raw_feat, model_feat, model, meta, device,
+                     calibration_start, calibration_minutes,
+                     num_targets, adaptive_window, adaptive_eta):
+    """Run online conformal calibration before the evaluation window.
+
+    Iterates over the calibration segment, runs inference, and feeds the
+    q10/q95 predictions and actual values into an AdaptiveUpperConformalPerTarget
+    calibrator.  Returns the fully calibrated calibrator for use in simulate_trace.
+    """
+    input_len = meta["input_len"]
+    pred_horizon = meta["pred_horizon"]
+
+    if model_feat.ndim == 2:
+        n_samp = model_feat.shape[0]
+        n_win = n_samp - input_len + 1
+        mw = np.zeros((n_win, input_len, model_feat.shape[1]), dtype=np.float32)
+        for i in range(n_win):
+            mw[i] = model_feat[i:i + input_len]
+    else:
+        mw = model_feat
+
+    cal = AdaptiveUpperConformalPerTarget(
+        num_targets=num_targets, window_size=adaptive_window,
+        alpha=0.05, eta=adaptive_eta, alpha_min=0.01, alpha_max=0.20,
+    )
+
+    pending = []
+    n = raw_feat.shape[0]
+    end_idx = min(calibration_start + calibration_minutes, n)
+
+    for idx in range(calibration_start, end_idx):
+        widx = idx - input_len + 1
+        if widx < 0 or widx >= len(mw):
+            continue
+
+        window = torch.tensor(mw[widx], dtype=torch.float32, device=device).unsqueeze(0)
+        with torch.no_grad():
+            out = model(window)
+        preds = out[0] if isinstance(out, tuple) else out
+
+        if preds.dim() == 4:
+            q10 = preds[0, -1, :, 0].cpu().numpy()
+            q95 = preds[0, -1, :, 2].cpu().numpy()
+        else:
+            p = torch.round(preds[0, -1] * 100) / 100
+            q10 = p.cpu().numpy()
+            q95 = q10.copy()
+
+        cpu_actual = float(raw_feat[idx, 0])
+        mem_actual = float(raw_feat[idx, 1]) if num_targets > 1 else 0.0
+
+        # Direct online calibration using current observation
+        cal.states["cpu"].update(cpu_actual, float(q10[0]), float(q95[0]))
+        if num_targets > 1:
+            cal.states["memory"].update(mem_actual, float(q10[1]), float(q95[1]))
+
+        # Delayed calibration using matured predictions
+        pending.append({"idx": idx, "q10": q10.copy(), "q95": q95.copy()})
+        matured = [p for p in pending if p["idx"] <= idx - pred_horizon]
+        for p in matured:
+            aidx = int(p["idx"] + pred_horizon)
+            if aidx < n:
+                ac = float(raw_feat[aidx, 0])
+                am = float(raw_feat[aidx, 1]) if num_targets > 1 else 0.0
+                cal.states["cpu"].update(ac, p["q10"][0], p["q95"][0])
+                if num_targets > 1:
+                    cal.states["memory"].update(am, p["q10"][1], p["q95"][1])
+        pending = [p for p in pending if p["idx"] > idx - pred_horizon]
+
+    print(f"[INFO] Conformal calibration complete ({end_idx - calibration_start} min)")
+    return cal
+
+
 def simulate_trace(raw_feat, model_feat, model, meta, device,
                    start_idx, n_minutes,
                    threshold=BASE_THRESHOLD, tolerance=TOLERANCE,
                    num_targets=2, initial_replicas=1,
-                   use_conformal=False, warmup_windows=500,
+                   adaptive_cal=None,
                    adaptive_window=500, adaptive_eta=0.01,
                    timestamps=None):
-    """Simulate traditional and predictive HPA on a trace segment."""
+    """Simulate traditional and predictive HPA on a trace segment.
+
+    If adaptive_cal is provided (pre-calibrated), use it for conformal bounds.
+    Otherwise, no conformal calibration is performed.
+    """
     input_len = meta["input_len"]
     pred_horizon = meta["pred_horizon"]
 
@@ -413,20 +491,11 @@ def simulate_trace(raw_feat, model_feat, model, meta, device,
     with torch.no_grad():
         model(wt)
 
-    adaptive_cal = None
-    if use_conformal and CONFORMAL_AVAILABLE:
-        adaptive_cal = AdaptiveUpperConformalPerTarget(
-            num_targets=num_targets, window_size=adaptive_window,
-            alpha=0.05, eta=adaptive_eta, alpha_min=0.01, alpha_max=0.20,
-        )
-
     trad_rep = initial_replicas
     pred_rep = initial_replicas
     trad_hist = []
     pred_hist = []
     pending = []
-    cwarmup_cnt = 0
-    in_cwarmup = use_conformal and (warmup_windows > 0)
     n = raw_feat.shape[0]
     end_idx = min(start_idx + n_minutes, n)
     results = []
@@ -466,19 +535,8 @@ def simulate_trace(raw_feat, model_feat, model, meta, device,
         cpu_actual = float(raw_feat[idx, 0])
         mem_actual = float(raw_feat[idx, 1]) if num_targets > 1 else 0.0
 
-        is_warmup = False
-        if in_cwarmup:
-            if adaptive_cal is not None:
-                adaptive_cal.states["cpu"].update(cpu_actual, float(q10[0]), float(q95[0]))
-                if num_targets > 1:
-                    adaptive_cal.states["memory"].update(mem_actual, float(q10[1]), float(q95[1]))
-            cwarmup_cnt += 1
-            is_warmup = True
-            if cwarmup_cnt >= warmup_windows:
-                in_cwarmup = False
-                print(f"[INFO] Conformal warmup complete ({warmup_windows} windows)")
-
-        if not in_cwarmup and adaptive_cal is not None:
+        # Online conformal feedback with delayed horizon alignment
+        if adaptive_cal is not None:
             pending.append({"idx": idx, "q10": q10.copy(), "q95": q95.copy()})
             matured = [p for p in pending if p["idx"] <= idx - pred_horizon]
             for p in matured:
@@ -501,13 +559,10 @@ def simulate_trace(raw_feat, model_feat, model, meta, device,
         trad_rep = int(max(MIN_REPLICAS, min(MAX_REPLICAS, trad_final)))
 
         # Predictive HPA: scale on predicted (or conformal upper) values
-        if not is_warmup:
-            if adaptive_cal is not None:
-                pcpu, pmem = upper_cpu, upper_mem
-            else:
-                pcpu, pmem = pred_cpu, pred_mem
+        if adaptive_cal is not None:
+            pcpu, pmem = upper_cpu, upper_mem
         else:
-            pcpu, pmem = cpu_actual, mem_actual
+            pcpu, pmem = pred_cpu, pred_mem
 
         pred_raw = _desired_replicas(pcpu, pmem, pred_rep,
                                      threshold, tolerance, num_targets)
@@ -533,7 +588,6 @@ def simulate_trace(raw_feat, model_feat, model, meta, device,
             "predictive_replicas": pred_rep,
             "sla_violation": sla_violation,
             "inference_time_s": dt,
-            "warmup": is_warmup,
         })
 
     return results
@@ -548,26 +602,24 @@ def compute_metrics(results, pred_horizon, threshold, use_conformal=False):
     accuracy (MSE/MAE/RMSE/R2/MAPE/MDA), persistence comparison, and
     conformal interval quality (PICP/MPIW) when applicable."""
     df = pd.DataFrame(results)
-    test_df = df[df["warmup"] == False]
-    warmup_df = df[df["warmup"] == True]
 
-    if test_df.empty:
-        print("No test data after warmup")
+    if df.empty:
+        print("No evaluation data")
         return {}
 
     m = {}
 
     # --- Replica metrics (per controller) ---
     for p, c in [("traditional", "traditional_replicas"), ("predictive", "predictive_replicas")]:
-        r = test_df[c].values
+        r = df[c].values
         m[f"{p}_avg_replicas"] = float(np.mean(r))
         m[f"{p}_max_replicas"] = int(np.max(r))
         m[f"{p}_min_replicas"] = int(np.min(r))
         m[f"{p}_scaling_actions"] = int(np.sum(np.abs(np.diff(r)) > 0))
 
     # --- SLA violations ---
-    m["sla_violations"] = int(test_df["sla_violation"].sum())
-    m["sla_violation_rate"] = float(test_df["sla_violation"].mean())
+    m["sla_violations"] = int(df["sla_violation"].sum())
+    m["sla_violation_rate"] = float(df["sla_violation"].mean())
 
     # --- Replica reduction ---
     ta = m.get("traditional_avg_replicas", 0)
@@ -575,10 +627,10 @@ def compute_metrics(results, pred_horizon, threshold, use_conformal=False):
     m["replica_reduction_pct"] = ((ta - pa) / ta * 100) if ta > 0 else 0.0
 
     # --- Prediction accuracy (horizon-aligned) ---
-    ac = test_df["cpu"].values.astype(float)
-    pc = test_df["pred_cpu"].values.astype(float)
-    am = test_df["memory"].values.astype(float)
-    pm = test_df["pred_mem"].values.astype(float)
+    ac = df["cpu"].values.astype(float)
+    pc = df["pred_cpu"].values.astype(float)
+    am = df["memory"].values.astype(float)
+    pm = df["pred_mem"].values.astype(float)
 
     for target_name, actual, pred in [("cpu", ac, pc), ("memory", am, pm)]:
         err = pred - actual
@@ -622,22 +674,21 @@ def compute_metrics(results, pred_horizon, threshold, use_conformal=False):
         m[f"{target_name}_mae_vs_persistence"] = mae_vs_persistence
 
     # --- Conformal interval quality (PICP, MPIW) when upper/lower bounds differ ---
-    if use_conformal and "upper_cpu" in test_df.columns:
+    if use_conformal and "upper_cpu" in df.columns:
         for target_name, col_act, col_lo, col_hi in [
             ("cpu", "cpu", "lower_cpu", "upper_cpu"),
             ("memory", "memory", "lower_mem", "upper_mem"),
         ]:
-            actual = test_df[col_act].values.astype(float)
-            lo = test_df[col_lo].values.astype(float)
-            hi = test_df[col_hi].values.astype(float)
+            actual = df[col_act].values.astype(float)
+            lo = df[col_lo].values.astype(float)
+            hi = df[col_hi].values.astype(float)
             in_interval = (actual >= lo) & (actual <= hi)
             picp = float(np.mean(in_interval))
             mpiw = float(np.mean(hi - lo))
             m[f"{target_name}_picp"] = picp
             m[f"{target_name}_mpiw"] = mpiw
 
-    m["n_test_minutes"] = len(test_df)
-    m["n_warmup_minutes"] = len(warmup_df)
+    m["n_evaluation_minutes"] = len(df)
     return m
 
 
@@ -758,16 +809,37 @@ def main():
         model_feat = raw_feat
 
     timestamps = None
+    eval_minutes = n_minutes
+    cal_minutes = args.calibration_minutes if args.adaptive_conformal else 0
 
-    print(f"\nSimulating {args.hours}h on {msname} (test_start={test_start})...")
+    if args.adaptive_conformal:
+        cal_start = test_start - cal_minutes
+        if cal_start < meta["input_len"]:
+            raise SystemExit(
+                f"Not enough data for calibration: test_start={test_start}, "
+                f"calibration_minutes={cal_minutes}, input_len={meta['input_len']}"
+            )
+        print(f"\nCalibration phase: {cal_minutes} min "
+              f"[{cal_start}:{test_start}]")
+        adaptive_cal = _run_calibration(
+            raw_feat, model_feat, model, meta, device,
+            calibration_start=cal_start, calibration_minutes=cal_minutes,
+            num_targets=meta["num_targets"],
+            adaptive_window=args.adaptive_window,
+            adaptive_eta=args.adaptive_eta,
+        )
+    else:
+        adaptive_cal = None
+
+    print(f"Evaluation phase: {args.hours}h ({eval_minutes} min) "
+          f"[{test_start}:{test_start + eval_minutes}]")
     results = simulate_trace(
         raw_feat, model_feat, model, meta, device,
-        start_idx=test_start, n_minutes=n_minutes,
+        start_idx=test_start, n_minutes=eval_minutes,
         threshold=args.threshold, tolerance=args.tolerance,
         num_targets=meta["num_targets"],
         initial_replicas=args.initial_replicas,
-        use_conformal=args.adaptive_conformal,
-        warmup_windows=args.warmup_windows if args.adaptive_conformal else 0,
+        adaptive_cal=adaptive_cal,
         adaptive_window=args.adaptive_window,
         adaptive_eta=args.adaptive_eta,
         timestamps=timestamps,
@@ -784,9 +856,12 @@ def main():
     print("=" * 72)
     print(f"Service: {msname}")
     print(f"Checkpoint: {args.checkpoint}")
-    print(f"Conformal: {'Yes' if args.adaptive_conformal else 'No'}")
-    print(f"Segment: {args.hours}h ({metrics.get('n_test_minutes', 0)} test min, "
-          f"{metrics.get('n_warmup_minutes', 0)} warmup)")
+    if args.adaptive_conformal:
+        print(f"Conformal: Yes (calibration={cal_minutes} min, "
+              f"eval={eval_minutes} min)")
+    else:
+        print(f"Conformal: No")
+    print(f"Evaluation: {args.hours}h ({metrics.get('n_evaluation_minutes', 0)} min)")
     print("-" * 72)
     print(f"{'Metric':<35} {'Traditional':>12} {'Predictive':>12}")
     print("-" * 72)
