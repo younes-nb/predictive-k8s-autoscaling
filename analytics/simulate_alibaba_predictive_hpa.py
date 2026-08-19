@@ -54,14 +54,6 @@ DEFAULT_PARQUET_ROOT = "/dataset/parquet"
 DEFAULT_CHECKPOINT = "/proj/k8sautoscaledl-PG0/models/model.pt"
 
 BASE_THRESHOLD = 0.80
-TOLERANCE = 0.1
-SCALE_UP_MAX_PERCENT = 100.0
-SCALE_UP_MAX_PODS = 4
-MIN_REPLICAS = 1
-MAX_REPLICAS = 10
-STABILIZATION_WINDOW_SECONDS = 300
-EVAL_INTERVAL_SECONDS = 60
-SCALE_UP_PERIOD_SECONDS = 15
 TRAIN_FRAC = 0.7
 VAL_FRAC = 0.1
 
@@ -84,10 +76,6 @@ def parse_args():
     ap.add_argument("--adaptive_window", type=int, default=500)
     ap.add_argument("--adaptive_eta", type=float, default=0.01)
     ap.add_argument("--threshold", type=float, default=BASE_THRESHOLD)
-    ap.add_argument("--tolerance", type=float, default=TOLERANCE)
-    ap.add_argument("--min_replicas", type=int, default=MIN_REPLICAS)
-    ap.add_argument("--max_replicas", type=int, default=MAX_REPLICAS)
-    ap.add_argument("--initial_replicas", type=int, default=1)
     ap.add_argument("--train_frac", type=float, default=TRAIN_FRAC)
     ap.add_argument("--val_frac", type=float, default=VAL_FRAC)
     ap.add_argument("--max_services", type=int, default=0,
@@ -374,36 +362,6 @@ def apply_swt(raw_feat, feature_set, input_len):
 # HPA Simulation
 # ================================================================
 
-def _scale_up_ceiling(current_replicas):
-    rep = int(current_replicas)
-    periods = max(1, int(EVAL_INTERVAL_SECONDS // SCALE_UP_PERIOD_SECONDS))
-    for _ in range(periods):
-        rep = min(
-            MAX_REPLICAS,
-            rep + max(int(rep * SCALE_UP_MAX_PERCENT / 100), SCALE_UP_MAX_PODS),
-        )
-    return rep
-
-
-def _desired_replicas(cpu_demand, mem_demand, current_replicas,
-                      threshold, tolerance, num_targets):
-    cpu_ratio = cpu_demand / threshold
-    if abs(cpu_ratio - 1.0) <= tolerance:
-        cpu_ratio = 1.0
-    raw = int(np.ceil(current_replicas * cpu_ratio))
-
-    if num_targets > 1:
-        mem_ratio = mem_demand / threshold
-        if abs(mem_ratio - 1.0) <= tolerance:
-            mem_ratio = 1.0
-        raw = max(raw, int(np.ceil(current_replicas * mem_ratio)))
-
-    raw = max(MIN_REPLICAS, min(MAX_REPLICAS, raw))
-    if raw > current_replicas:
-        raw = min(raw, _scale_up_ceiling(current_replicas))
-    return raw
-
-
 def _run_calibration(raw_feat, model_feat, model, meta, device,
                      calibration_start, calibration_minutes,
                      num_targets, adaptive_window, adaptive_eta):
@@ -479,8 +437,8 @@ def _run_calibration(raw_feat, model_feat, model, meta, device,
 
 def simulate_trace(raw_feat, model_feat, model, meta, device,
                    start_idx, n_minutes,
-                   threshold=BASE_THRESHOLD, tolerance=TOLERANCE,
-                   num_targets=2, initial_replicas=1,
+                   threshold=BASE_THRESHOLD,
+                   num_targets=2,
                    adaptive_cal=None,
                    adaptive_window=500, adaptive_eta=0.01,
                    timestamps=None):
@@ -500,10 +458,6 @@ def simulate_trace(raw_feat, model_feat, model, meta, device,
     with torch.no_grad():
         model(wt)
 
-    trad_rep = initial_replicas
-    pred_rep = initial_replicas
-    trad_hist = []
-    pred_hist = []
     pending = []
     n = raw_feat.shape[0]
     end_idx = min(start_idx + n_minutes, n)
@@ -558,28 +512,6 @@ def simulate_trace(raw_feat, model_feat, model, meta, device,
                         adaptive_cal.states["memory"].update(am, p["q10"][1], p["q95"][1])
             pending = [p for p in pending if p["idx"] > idx - pred_horizon]
 
-        # Traditional HPA: scale on actual values
-        trad_raw = _desired_replicas(cpu_actual, mem_actual, trad_rep,
-                                     threshold, tolerance, num_targets)
-        trad_hist.append({"idx": idx, "r": trad_raw})
-        stab = STABILIZATION_WINDOW_SECONDS // 60
-        tw = [h["r"] for h in trad_hist if h["idx"] > idx - stab]
-        trad_final = trad_raw if trad_raw > trad_rep else (max(tw) if tw else trad_raw)
-        trad_rep = int(max(MIN_REPLICAS, min(MAX_REPLICAS, trad_final)))
-
-        # Predictive HPA: scale on predicted (or conformal upper) values
-        if adaptive_cal is not None:
-            pcpu, pmem = upper_cpu, upper_mem
-        else:
-            pcpu, pmem = pred_cpu, pred_mem
-
-        pred_raw = _desired_replicas(pcpu, pmem, pred_rep,
-                                     threshold, tolerance, num_targets)
-        pred_hist.append({"idx": idx, "r": pred_raw})
-        pw = [h["r"] for h in pred_hist if h["idx"] > idx - stab]
-        pred_final = pred_raw if pred_raw > pred_rep else (max(pw) if pw else pred_raw)
-        pred_rep = int(max(MIN_REPLICAS, min(MAX_REPLICAS, pred_final)))
-
         ts_val = pd.Timestamp(timestamps[idx]) if timestamps is not None else None
         results.append({
             "timestamp": ts_val,
@@ -591,8 +523,6 @@ def simulate_trace(raw_feat, model_feat, model, meta, device,
             "upper_cpu": upper_cpu,
             "lower_mem": lower_mem,
             "upper_mem": upper_mem,
-            "traditional_replicas": trad_rep,
-            "predictive_replicas": pred_rep,
             "inference_time_s": dt,
         })
 
@@ -603,97 +533,227 @@ def simulate_trace(raw_feat, model_feat, model, meta, device,
 # Metrics
 # ================================================================
 
-def compute_metrics(results, pred_horizon, threshold, use_conformal=False):
-    """Compute paper-aligned metrics: replica stats, prediction accuracy
-    (MSE/MAE/RMSE/R2/MAPE/MDA), persistence comparison, and
-    conformal interval quality (PICP/MPIW) when applicable."""
-    df = pd.DataFrame(results)
+def _pearson(a, b):
+    """Pearson correlation coefficient."""
+    a = np.asarray(a, dtype=float).ravel()
+    b = np.asarray(b, dtype=float).ravel()
+    a = a - a.mean()
+    b = b - b.mean()
+    denom = np.sqrt(np.sum(a ** 2) * np.sum(b ** 2))
+    return float(np.sum(a * b) / denom) if denom > 1e-12 else float("nan")
 
+
+def _compute_one_step(y_pred, y_true, y_last, y_second_last=None):
+    """Compute all per-step metrics matching training/metrics.py.
+
+    MDA: model direction = sign(y_pred - y_last).
+    When y_second_last is provided, naive direction = sign(y_last - y_second_last)
+    (input trend), otherwise naive also uses sign(y_pred - y_last).
+    """
+    err = y_pred - y_true
+    abs_err = np.abs(err)
+    n = len(y_true)
+
+    mse = float(np.mean(err ** 2))
+    mae = float(np.mean(abs_err))
+    rmse = float(np.sqrt(mse))
+
+    ss_res = float(np.sum(err ** 2))
+    ss_tot = float(np.sum((y_true - np.mean(y_true)) ** 2))
+    r2 = 1.0 - (ss_res / ss_tot) if ss_tot > 1e-12 else 0.0
+
+    nonzero = np.abs(y_true) > 1e-12
+    if int(np.sum(nonzero)) > 0:
+        mape = float(np.mean(np.abs(err[nonzero]) / np.abs(y_true[nonzero]))) * 100.0
+    else:
+        mape = 0.0
+
+    actual_dir = np.sign(y_true - y_last)
+    pred_dir = np.sign(y_pred - y_last)
+    mda = float(np.mean(actual_dir == pred_dir)) * 100.0
+
+    under_mask = y_pred < y_true
+    over_mask = y_pred > y_true
+    n_under = int(np.sum(under_mask))
+    n_over = int(np.sum(over_mask))
+
+    under_rate = (n_under / n * 100.0) if n > 0 else 0.0
+    over_rate = (n_over / n * 100.0) if n > 0 else 0.0
+
+    if n_under > 0:
+        mean_under = float(np.mean(y_true[under_mask] - y_pred[under_mask]))
+        max_under = float(np.max(y_true[under_mask] - y_pred[under_mask]))
+    else:
+        mean_under = 0.0
+        max_under = 0.0
+
+    if n_over > 0:
+        mean_over = float(np.mean(y_pred[over_mask] - y_true[over_mask]))
+        max_over = float(np.max(y_pred[over_mask] - y_true[over_mask]))
+    else:
+        mean_over = 0.0
+        max_over = 0.0
+
+    return {
+        "MSE": mse, "MAE": mae, "RMSE": rmse, "R²": r2,
+        "MAPE (%)": mape, "MDA (%)": mda,
+        "Under-Pred Rate (%)": under_rate, "Over-Pred Rate (%)": over_rate,
+        "Mean Under Error": mean_under, "Mean Over Error": mean_over,
+        "Max Under Error": max_under, "Max Over Error": max_over,
+    }
+
+
+METRIC_NAMES = [
+    "MSE", "MAE", "RMSE", "R²", "MAPE (%)", "MDA (%)",
+    "Under-Pred Rate (%)", "Over-Pred Rate (%)",
+    "Mean Under Error", "Mean Over Error",
+    "Max Under Error", "Max Over Error",
+]
+PCT_METRICS = {"MAPE (%)", "MDA (%)", "Under-Pred Rate (%)", "Over-Pred Rate (%)"}
+
+
+def _delta_pct(model_val, naive_val, is_pct_metric=False):
+    if is_pct_metric:
+        diff = model_val - naive_val
+        return f"{diff:+.1f}"
+    denom = abs(naive_val)
+    if denom < 1e-12:
+        return "N/A"
+    pct = (model_val - naive_val) / denom * 100.0
+    return f"{pct:+.1f}"
+
+
+def compute_metrics(results, pred_horizon, threshold, use_conformal=False):
+    """Compute all metrics from training/metrics.py plus persistence diagnostics.
+
+    For each target (cpu, memory):
+      - Model metrics: last-step and naive forecaster side-by-side
+      - Naive forecaster: persistence (current load = prediction for future)
+      - Persistence diagnostics: Pearson correlations, R², beat-rate, MAE ratio
+      - Conformal interval quality (PICP, MPIW) when applicable
+    """
+    df = pd.DataFrame(results)
     if df.empty:
         print("No evaluation data")
         return {}
 
     m = {}
+    header_printed = False
 
-    # --- Replica metrics (per controller) ---
-    for p, c in [("traditional", "traditional_replicas"), ("predictive", "predictive_replicas")]:
-        r = df[c].values
-        m[f"{p}_avg_replicas"] = float(np.mean(r))
-        m[f"{p}_max_replicas"] = int(np.max(r))
-        m[f"{p}_min_replicas"] = int(np.min(r))
-        m[f"{p}_scaling_actions"] = int(np.sum(np.abs(np.diff(r)) > 0))
+    for target_name, col_act, col_pred, col_lo, col_hi in [
+        ("cpu", "cpu", "pred_cpu", "lower_cpu", "upper_cpu"),
+        ("memory", "memory", "pred_mem", "lower_mem", "upper_mem"),
+    ]:
+        actual_all = df[col_act].values.astype(float)
 
-    # --- Replica reduction ---
-    ta = m.get("traditional_avg_replicas", 0)
-    pa = m.get("predictive_avg_replicas", 0)
-    m["replica_reduction_pct"] = ((ta - pa) / ta * 100) if ta > 0 else 0.0
-
-    # --- Prediction accuracy (horizon-aligned) ---
-    ac = df["cpu"].values.astype(float)
-    pc = np.roll(df["pred_cpu"].values.astype(float), pred_horizon)
-    pc[:pred_horizon] = np.nan
-    am = df["memory"].values.astype(float)
-    pm = np.roll(df["pred_mem"].values.astype(float), pred_horizon)
-    pm[:pred_horizon] = np.nan
-
-    for target_name, actual, pred in [("cpu", ac, pc), ("memory", am, pm)]:
-        valid = ~np.isnan(pred)
-        actual = actual[valid]
-        pred = pred[valid]
-        err = pred - actual
-        abs_err = np.abs(err)
-        mse = float(np.mean(err ** 2))
-        mae = float(np.mean(abs_err))
-        rmse = float(np.sqrt(mse))
-
-        ss_res = float(np.sum(err ** 2))
-        ss_tot = float(np.sum((actual - np.mean(actual)) ** 2))
-        r2 = 1.0 - (ss_res / ss_tot) if ss_tot > 1e-12 else 0.0
-
-        nonzero = np.abs(actual) > 1e-12
-        mape = float(np.mean(np.abs(err[nonzero]) / np.abs(actual[nonzero]))) * 100.0 if np.sum(nonzero) > 0 else 0.0
-
-        if len(actual) > 1:
-            actual_dir = np.sign(actual[1:] - actual[:-1])
-            pred_dir = np.sign(pred[1:] - actual[:-1])
-            mda = float(np.mean(actual_dir == pred_dir)) * 100.0
+        # Model prediction (horizon-aligned)
+        if use_conformal and col_hi in df.columns:
+            model_pred_all = np.roll(df[col_hi].values.astype(float), pred_horizon)
         else:
-            mda = 0.0
+            model_pred_all = np.roll(df[col_pred].values.astype(float), pred_horizon)
 
-        m[f"pred_{target_name}_mse"] = mse
-        m[f"pred_{target_name}_mae"] = mae
-        m[f"pred_{target_name}_rmse"] = rmse
-        m[f"pred_{target_name}_r2"] = r2
-        m[f"pred_{target_name}_mape"] = mape
-        m[f"pred_{target_name}_mda"] = mda
+        # Naive forecaster: persistence baseline
+        # At minute t, predict actual[t] for minute t+pred_horizon
+        naive_pred_all = actual_all.copy()
 
-        # --- Persistence comparison (current load as naive baseline) ---
-        y_last = np.roll(actual, 1)
-        y_last[0] = actual[0]
+        # Build y_last for MDA: value at prediction time (pred_horizon steps ago)
+        y_last_all = np.roll(actual_all, pred_horizon)
+        y_second_last_all = np.roll(actual_all, pred_horizon + 1)
+
+        # Drop first pred_horizon entries (no prediction available)
+        model_pred_all[:pred_horizon] = np.nan
+        naive_pred_all[pred_horizon:] = naive_pred_all[:len(naive_pred_all) - pred_horizon]
+        naive_pred_all[:pred_horizon] = np.nan
+        y_last_all[:pred_horizon] = np.nan
+        y_second_last_all[:pred_horizon] = np.nan
+
+        valid = ~np.isnan(model_pred_all)
+        actual = actual_all[valid]
+        model_pred = model_pred_all[valid]
+        naive_pred = naive_pred_all[valid]
+        y_last = y_last_all[valid]
+        y_second_last = y_second_last_all[valid]
+
+        n = len(actual)
+
+        # --- Model metrics ---
+        model_m = _compute_one_step(model_pred, actual, y_last, y_second_last)
+
+        # --- Naive/persistence metrics ---
+        naive_m = _compute_one_step(naive_pred, actual, y_last)
+        # Override naive MDA: use input trend direction sign(y_last - y_second_last)
+        # as the naive's "predicted direction" (trend-based forecast)
+        actual_dir = np.sign(actual - y_last)
+        naive_trend_dir = np.sign(y_last - y_second_last)
+        naive_m["MDA (%)"] = float(np.mean(actual_dir == naive_trend_dir)) * 100.0
+
+        # --- Persistence diagnostics ---
+        corr_pred_true = _pearson(model_pred, actual)
+        corr_pred_current = _pearson(model_pred, y_last)
+        corr_current_true = _pearson(y_last, actual)
+        mse_model = float(np.mean((model_pred - actual) ** 2))
         mse_naive = float(np.mean((y_last - actual) ** 2))
-        mae_naive = float(np.mean(np.abs(y_last - actual)))
-        r2_vs_persistence = 1.0 - mse / mse_naive if mse_naive > 1e-12 else float("nan")
-        mae_vs_persistence = mae / mae_naive if mae_naive > 1e-12 else float("nan")
-        beat_persistence = float(np.mean(np.abs(err) < np.abs(y_last - actual)) * 100.0)
+        r2_vs_persistence = 1.0 - mse_model / mse_naive if mse_naive > 1e-12 else float("nan")
+        mae_model = float(np.mean(np.abs(model_pred - actual)))
+        mae_naive_val = float(np.mean(np.abs(y_last - actual)))
+        mae_vs_persistence = mae_model / mae_naive_val if mae_naive_val > 1e-12 else float("nan")
+        beat_persistence = float(np.mean(np.abs(model_pred - actual) < np.abs(y_last - actual)) * 100.0)
 
+        # --- Store all metrics ---
+        for name in METRIC_NAMES:
+            m[f"{target_name}_{name}_last_step"] = model_m[name]
+            m[f"{target_name}_{name}_naive"] = naive_m[name]
+            d = _delta_pct(model_m[name], naive_m[name],
+                           is_pct_metric=(name in PCT_METRICS))
+            m[f"{target_name}_{name}_delta"] = d
+
+        m[f"{target_name}_corr_pred_true"] = corr_pred_true
+        m[f"{target_name}_corr_pred_current"] = corr_pred_current
+        m[f"{target_name}_corr_current_true"] = corr_current_true
         m[f"{target_name}_r2_vs_persistence"] = r2_vs_persistence
         m[f"{target_name}_beat_persistence"] = beat_persistence
         m[f"{target_name}_mae_vs_persistence"] = mae_vs_persistence
 
-    # --- Conformal interval quality (PICP, MPIW) when upper/lower bounds differ ---
+        # --- Print table ---
+        if not header_printed:
+            print(f"\n{'Metric':<28s} {'Model':>14s} {'Naive':>14s} {'Δ (%)':>10s}")
+            print("-" * 70)
+            header_printed = True
+
+        print(f"\n--- {target_name.upper()} ---")
+        for name in METRIC_NAMES:
+            ls = model_m[name]
+            nv = naive_m[name]
+            d = _delta_pct(ls, nv, is_pct_metric=(name in PCT_METRICS))
+            if name in PCT_METRICS:
+                print(f"  {name:<26s} {ls:>13.4f}% {nv:>13.4f}% {d:>10s}")
+            else:
+                print(f"  {name:<26s} {ls:>14.8e} {nv:>14.8e} {d:>10s}")
+
+        print(f"\n  Persistence Diagnostics ({target_name.upper()}):")
+        print(f"    ρ(pred, truth)        {corr_pred_true:>10.4f}")
+        print(f"    ρ(pred, current)      {corr_pred_current:>10.4f}")
+        print(f"    ρ(current, truth)     {corr_current_true:>10.4f}")
+        print(f"    R² vs persistence     {r2_vs_persistence:>10.4f}")
+        print(f"    Beat-persistence (%)  {beat_persistence:>10.2f}")
+        print(f"    MAE vs persistence    {mae_vs_persistence:>10.4f}")
+
+    # --- Conformal interval quality (PICP, MPIW) ---
     if use_conformal and "upper_cpu" in df.columns:
-        for target_name, col_act, col_lo, col_hi in [
+        print(f"\n--- Conformal Interval Quality ---")
+        for tname, col_act, col_lo, col_hi in [
             ("cpu", "cpu", "lower_cpu", "upper_cpu"),
             ("memory", "memory", "lower_mem", "upper_mem"),
         ]:
-            actual = df[col_act].values.astype(float)
+            a = df[col_act].values.astype(float)
             lo = df[col_lo].values.astype(float)
             hi = df[col_hi].values.astype(float)
-            in_interval = (actual >= lo) & (actual <= hi)
+            in_interval = (a >= lo) & (a <= hi)
             picp = float(np.mean(in_interval))
             mpiw = float(np.mean(hi - lo))
-            m[f"{target_name}_picp"] = picp
-            m[f"{target_name}_mpiw"] = mpiw
+            m[f"{tname}_picp"] = picp
+            m[f"{tname}_mpiw"] = mpiw
+            print(f"  {tname.upper()} PICP: {picp:.1%}   MPIW: {mpiw:.6f}")
 
     m["n_evaluation_minutes"] = len(df)
     return m
@@ -726,7 +786,7 @@ def plot_results(results, msname, plots_dir, pred_horizon, use_conformal, thresh
          label_actual, label_pred,
          actual_col, lo_col, hi_col, pred_col) in targets:
 
-        fig, axes = plt.subplots(3, 1, figsize=(18, 16), sharex=True)
+        fig, axes = plt.subplots(2, 1, figsize=(18, 12), sharex=True)
 
         # Shift predictions forward by pred_horizon so each predicted point
         # aligns with the actual value it is forecasting
@@ -751,21 +811,8 @@ def plot_results(results, msname, plots_dir, pred_horizon, use_conformal, thresh
                   borderaxespad=0, frameon=True)
         ax.grid(True, alpha=0.3)
 
-        # --- Panel 2: Replica counts ---
+        # --- Panel 2: Prediction error (horizon-aligned) ---
         ax = axes[1]
-        ax.plot(x, df["traditional_replicas"], label="Traditional HPA",
-                color="blue", linewidth=1.5)
-        pred_label = "Predictive HPA" + (" + Conformal" if use_conformal else "")
-        ax.plot(x, df["predictive_replicas"], label=pred_label, color="red", linewidth=1.5)
-        ax.set_ylabel("Replicas")
-        ax.set_title("Replica Count Comparison", fontweight="bold")
-        ax.legend(loc="upper left", fontsize=8, bbox_to_anchor=(1.01, 1),
-                  borderaxespad=0, frameon=True)
-        ax.grid(True, alpha=0.3)
-        ax.yaxis.set_major_locator(plt.MaxNLocator(integer=True))
-
-        # --- Panel 3: Prediction error (horizon-aligned) ---
-        ax = axes[2]
         err = pred_shifted.values.astype(float) - df[actual_col].values.astype(float)
         ax.plot(x, err, label=f"{target.upper()} Pred Error (h={pred_horizon})",
                 color=color_pred, alpha=0.7, linewidth=1.2)
@@ -872,9 +919,8 @@ def main():
     results = simulate_trace(
         raw_feat, model_feat, model, meta, device,
         start_idx=test_start, n_minutes=eval_minutes,
-        threshold=args.threshold, tolerance=args.tolerance,
+        threshold=args.threshold,
         num_targets=meta["num_targets"],
-        initial_replicas=args.initial_replicas,
         adaptive_cal=adaptive_cal,
         adaptive_window=args.adaptive_window,
         adaptive_eta=args.adaptive_eta,
@@ -898,54 +944,19 @@ def main():
     else:
         print(f"Conformal: No")
     print(f"Evaluation: {args.hours}h ({metrics.get('n_evaluation_minutes', 0)} min)")
-    print("-" * 72)
-    print(f"{'Metric':<35} {'Traditional':>12} {'Predictive':>12}")
-    print("-" * 72)
-    print(f"{'Avg Replicas':<35} {metrics.get('traditional_avg_replicas', 0):>12.2f} "
-          f"{metrics.get('predictive_avg_replicas', 0):>12.2f}")
-    print(f"{'Max Replicas':<35} {metrics.get('traditional_max_replicas', 0):>12d} "
-          f"{metrics.get('predictive_max_replicas', 0):>12d}")
-    print(f"{'Min Replicas':<35} {metrics.get('traditional_min_replicas', 0):>12d} "
-          f"{metrics.get('predictive_min_replicas', 0):>12d}")
-    print(f"{'Scaling Actions':<35} {metrics.get('traditional_scaling_actions', 0):>12d} "
-          f"{metrics.get('predictive_scaling_actions', 0):>12d}")
-    print(f"{'Replica Reduction':<35} {metrics.get('replica_reduction_pct', 0):>+11.1f}%")
-    print("-" * 72)
-    print(f"{'Prediction Accuracy (CPU)':<35} {'Value':>12}")
-    print("-" * 72)
-    for k, label in [
-        ("pred_cpu_mse", "MSE"), ("pred_cpu_mae", "MAE"), ("pred_cpu_rmse", "RMSE"),
-        ("pred_cpu_r2", "R²"), ("pred_cpu_mape", "MAPE (%)"), ("pred_cpu_mda", "MDA (%)"),
-    ]:
-        print(f"  {label:<33} {metrics.get(k, 0):>12.6f}")
-    print("-" * 72)
-    print(f"{'Prediction Accuracy (Memory)':<35} {'Value':>12}")
-    print("-" * 72)
-    for k, label in [
-        ("pred_memory_mse", "MSE"), ("pred_memory_mae", "MAE"), ("pred_memory_rmse", "RMSE"),
-        ("pred_memory_r2", "R²"), ("pred_memory_mape", "MAPE (%)"), ("pred_memory_mda", "MDA (%)"),
-    ]:
-        print(f"  {label:<33} {metrics.get(k, 0):>12.6f}")
-    print("-" * 72)
-    print(f"{'Persistence Comparison':<35} {'Value':>12}")
-    print("-" * 72)
+    print("=" * 72)
+
+    # Metrics are printed by compute_metrics; now print summary JSON keys
     for tgt in ["cpu", "memory"]:
-        for k, label in [
-            (f"{tgt}_r2_vs_persistence", f"{tgt.upper()} R² vs persistence"),
-            (f"{tgt}_beat_persistence", f"{tgt.upper()} beat-persistence (%)"),
-            (f"{tgt}_mae_vs_persistence", f"{tgt.upper()} MAE vs persistence"),
-        ]:
-            v = metrics.get(k, float("nan"))
-            print(f"  {label:<33} {v:>12.4f}")
+        print(f"\n{tgt.upper()} Summary:")
+        print(f"  R² (model):          {metrics.get(f'{tgt}_R²_last_step', 0):>10.4f}")
+        print(f"  R² (naive):          {metrics.get(f'{tgt}_R²_naive', 0):>10.4f}")
+        print(f"  Beat-persistence:    {metrics.get(f'{tgt}_beat_persistence', 0):>10.2f}%")
+        print(f"  ρ(pred, truth):      {metrics.get(f'{tgt}_corr_pred_true', 0):>10.4f}")
     if args.adaptive_conformal and metrics.get("cpu_picp") is not None:
-        print("-" * 72)
-        print(f"{'Conformal Interval Quality':<35} {'Value':>12}")
-        print("-" * 72)
         for tgt in ["cpu", "memory"]:
-            picp = metrics.get(f"{tgt}_picp", 0)
-            mpiw = metrics.get(f"{tgt}_mpiw", 0)
-            print(f"  {tgt.upper()+' PICP':<33} {picp:>11.1%}")
-            print(f"  {tgt.upper()+' MPIW':<33} {mpiw:>12.6f}")
+            print(f"  {tgt.upper()} PICP: {metrics.get(f'{tgt}_picp', 0):.1%}   "
+                  f"MPIW: {metrics.get(f'{tgt}_mpiw', 0):.6f}")
     print("=" * 72)
 
     os.makedirs(args.plots_dir, exist_ok=True)
