@@ -560,18 +560,7 @@ def evaluate(args):
         y_last_all = np.stack(last_lasts, axis=0)
         y_second_last_all = np.stack(second_lasts, axis=0)
     else:
-        raw_test_ds = ShardedWindowsDataset(
-            args.windows_dir, split, input_len, horizon
-        )
-        raw_test_ds = head_slice_dataset_by_pct(raw_test_ds, pct)
-        raw_second_lasts = []
-        for idx in range(len(raw_test_ds)):
-            x_raw, *_ = raw_test_ds[idx]
-            x_np = x_raw.numpy()
-            if any(np.std(x_np[:, f].astype(np.float64)) < 1e-12 for f in target_idxs_in_features):
-                continue
-            raw_second_lasts.append(x_np[-2, :])
-        y_second_last_all = np.stack(raw_second_lasts, axis=0)
+        y_second_last_all = np.empty((0,), dtype=np.float32)
     if y_second_last_all.ndim == 1:
         y_second_last_all = y_second_last_all[:, np.newaxis]
     if y_last_all.ndim == 1:
@@ -582,13 +571,16 @@ def evaluate(args):
 
     for t_idx, t_name in zip(target_idxs_in_features, target_features):
         y_last_t = y_last_all[:, t_idx]
-        y_second_last_t = y_second_last_all[:, t_idx]
         if num_targets > 1:
             y_pred_t = y_pred[:, :, t_idx]
             y_true_t = y_true[:, :, t_idx]
         else:
             y_pred_t = y_pred
             y_true_t = y_true
+        if preprocess_approach in ("swt", "cskv"):
+            y_second_last_t = None
+        else:
+            y_second_last_t = y_second_last_all[:, t_idx]
         compute_metrics(
             y_pred_t, y_true_t, y_last_t, horizon, total_samples, log_info,
             target_name=t_name, y_second_last=y_second_last_t,
