@@ -161,15 +161,17 @@ class AdaptiveUpperConformalPerTarget:
             lower = np.zeros_like(q10)
             upper = np.zeros_like(q95)
             for t_idx, cal in enumerate(self.calibrators):
-                lower[t_idx] = cal.get_correction_lower(q10[t_idx])
-                upper[t_idx] = cal.get_correction_upper(q95[t_idx])
+                lower[t_idx] = np.clip(cal.get_correction_lower(q10[t_idx]), 0.0, 1.0)
+                upper[t_idx] = np.clip(cal.get_correction_upper(q95[t_idx]), 0.0, 1.0)
         else:
             # Horizon dimension present
             lower = np.zeros_like(q10)
             upper = np.zeros_like(q95)
             for t_idx, cal in enumerate(self.calibrators):
-                lower[:, t_idx] = [cal.get_correction_lower(q10[h, t_idx]) for h in range(q10.shape[0])]
-                upper[:, t_idx] = [cal.get_correction_upper(q95[h, t_idx]) for h in range(q95.shape[0])]
+                lower[:, t_idx] = [np.clip(cal.get_correction_lower(q10[h, t_idx]), 0.0, 1.0)
+                                   for h in range(q10.shape[0])]
+                upper[:, t_idx] = [np.clip(cal.get_correction_upper(q95[h, t_idx]), 0.0, 1.0)
+                                   for h in range(q95.shape[0])]
         return lower, upper
     
     def update(self, y: np.ndarray, q10: np.ndarray, q95: np.ndarray) -> None:

@@ -218,7 +218,7 @@ def select_best_msname(service_data, hours, input_len, pred_horizon,
         else:
             cpu = segment[:, 0].astype(float)
             mem = segment[:, 1].astype(float) if segment.shape[1] > 1 else np.zeros(1)
-        score = float(np.mean(cpu) + np.std(cpu) + np.mean(mem) + np.std(mem))
+        score = float(np.std(cpu) + np.std(mem))
         candidates.append((svc_name, score, test_start))
 
     if not candidates:
@@ -483,15 +483,7 @@ def simulate_trace(raw_feat, model_feat, model, meta, device,
                    num_targets=2, initial_replicas=1,
                    adaptive_cal=None,
                    adaptive_window=500, adaptive_eta=0.01,
-                   timestamps=None,
-                   baseline_replicas=1.0):
-    """Simulate traditional and predictive HPA on a trace segment.
-
-    Uses a closed-loop demand model:
-        total_cpu_demand = raw_cpu * baseline_replicas
-        effective_cpu = total_cpu_demand / simulated_replicas
-    This produces separate SLA violations for each controller.
-    """
+                   timestamps=None):
     input_len = meta["input_len"]
     pred_horizon = meta["pred_horizon"]
 
@@ -588,20 +580,6 @@ def simulate_trace(raw_feat, model_feat, model, meta, device,
         pred_final = pred_raw if pred_raw > pred_rep else (max(pw) if pw else pred_raw)
         pred_rep = int(max(MIN_REPLICAS, min(MAX_REPLICAS, pred_final)))
 
-        sla_violation = bool(cpu_actual > threshold or mem_actual > threshold)
-
-        # Closed-loop: estimate effective utilization for each controller
-        demand_cpu = cpu_actual * baseline_replicas
-        demand_mem = mem_actual * baseline_replicas if num_targets > 1 else 0.0
-        trad_eff_cpu = demand_cpu / trad_rep
-        trad_eff_mem = demand_mem / trad_rep if num_targets > 1 else 0.0
-        pred_eff_cpu = demand_cpu / pred_rep
-        pred_eff_mem = demand_mem / pred_rep if num_targets > 1 else 0.0
-        trad_sla = bool(trad_eff_cpu > threshold or
-                        (num_targets > 1 and trad_eff_mem > threshold))
-        pred_sla = bool(pred_eff_cpu > threshold or
-                        (num_targets > 1 and pred_eff_mem > threshold))
-
         ts_val = pd.Timestamp(timestamps[idx]) if timestamps is not None else None
         results.append({
             "timestamp": ts_val,
@@ -615,13 +593,6 @@ def simulate_trace(raw_feat, model_feat, model, meta, device,
             "upper_mem": upper_mem,
             "traditional_replicas": trad_rep,
             "predictive_replicas": pred_rep,
-            "sla_violation": sla_violation,
-            "traditional_effective_cpu": trad_eff_cpu,
-            "traditional_effective_mem": trad_eff_mem,
-            "predictive_effective_cpu": pred_eff_cpu,
-            "predictive_effective_mem": pred_eff_mem,
-            "traditional_sla": trad_sla,
-            "predictive_sla": pred_sla,
             "inference_time_s": dt,
         })
 
@@ -633,8 +604,8 @@ def simulate_trace(raw_feat, model_feat, model, meta, device,
 # ================================================================
 
 def compute_metrics(results, pred_horizon, threshold, use_conformal=False):
-    """Compute paper-aligned metrics: replica stats, SLA violations, prediction
-    accuracy (MSE/MAE/RMSE/R2/MAPE/MDA), persistence comparison, and
+    """Compute paper-aligned metrics: replica stats, prediction accuracy
+    (MSE/MAE/RMSE/R2/MAPE/MDA), persistence comparison, and
     conformal interval quality (PICP/MPIW) when applicable."""
     df = pd.DataFrame(results)
 
@@ -652,32 +623,6 @@ def compute_metrics(results, pred_horizon, threshold, use_conformal=False):
         m[f"{p}_min_replicas"] = int(np.min(r))
         m[f"{p}_scaling_actions"] = int(np.sum(np.abs(np.diff(r)) > 0))
 
-    # --- SLA violations ---
-    m["sla_violations"] = int(df["sla_violation"].sum())
-    m["sla_violation_rate"] = float(df["sla_violation"].mean())
-
-    # --- Controller-specific SLA (demand model) ---
-    if "traditional_sla" in df.columns:
-        m["traditional_sla_violations"] = int(df["traditional_sla"].sum())
-        m["traditional_sla_rate"] = float(df["traditional_sla"].mean())
-        m["predictive_sla_violations"] = int(df["predictive_sla"].sum())
-        m["predictive_sla_rate"] = float(df["predictive_sla"].mean())
-        trad_sla_n = m["traditional_sla_violations"]
-        pred_sla_n = m["predictive_sla_violations"]
-        if trad_sla_n > 0:
-            m["sla_reduction_pct"] = ((trad_sla_n - pred_sla_n) / trad_sla_n * 100)
-        else:
-            m["sla_reduction_pct"] = 0.0
-
-    # --- Effective utilization (demand model) ---
-    if "traditional_effective_cpu" in df.columns:
-        m["traditional_effective_cpu_avg"] = float(df["traditional_effective_cpu"].mean())
-        m["traditional_effective_cpu_max"] = float(df["traditional_effective_cpu"].max())
-        m["predictive_effective_cpu_avg"] = float(df["predictive_effective_cpu"].mean())
-        m["predictive_effective_cpu_max"] = float(df["predictive_effective_cpu"].max())
-        m["overprovisioned_minutes_trad"] = int((df["traditional_replicas"] > df["traditional_effective_cpu"] / threshold).sum()) if threshold > 0 else 0
-        m["overprovisioned_minutes_pred"] = int((df["predictive_replicas"] > df["predictive_effective_cpu"] / threshold).sum()) if threshold > 0 else 0
-
     # --- Replica reduction ---
     ta = m.get("traditional_avg_replicas", 0)
     pa = m.get("predictive_avg_replicas", 0)
@@ -685,11 +630,16 @@ def compute_metrics(results, pred_horizon, threshold, use_conformal=False):
 
     # --- Prediction accuracy (horizon-aligned) ---
     ac = df["cpu"].values.astype(float)
-    pc = df["pred_cpu"].values.astype(float)
+    pc = np.roll(df["pred_cpu"].values.astype(float), pred_horizon)
+    pc[:pred_horizon] = np.nan
     am = df["memory"].values.astype(float)
-    pm = df["pred_mem"].values.astype(float)
+    pm = np.roll(df["pred_mem"].values.astype(float), pred_horizon)
+    pm[:pred_horizon] = np.nan
 
     for target_name, actual, pred in [("cpu", ac, pc), ("memory", am, pm)]:
+        valid = ~np.isnan(pred)
+        actual = actual[valid]
+        pred = pred[valid]
         err = pred - actual
         abs_err = np.abs(err)
         mse = float(np.mean(err ** 2))
@@ -753,92 +703,98 @@ def compute_metrics(results, pred_horizon, threshold, use_conformal=False):
 # Plotting
 # ================================================================
 
-def plot_results(results, msname, plots_dir, pred_horizon, use_conformal, threshold):
+def plot_results(results, msname, plots_dir, pred_horizon, use_conformal, threshold,
+                  num_targets=2):
     df = pd.DataFrame(results)
     has_ts = df["timestamp"].notna().all()
     x = df["timestamp"] if has_ts else df.index
 
-    fig, axes = plt.subplots(4, 1, figsize=(18, 18), sharex=True)
-
-    ax = axes[0]
-    ax.plot(x, df["cpu"], label="Actual CPU", color="blue", alpha=0.7)
-    ax.plot(x, df["memory"], label="Actual Memory", color="green", alpha=0.7)
-    ax.plot(x, df["pred_cpu"], label="Predicted CPU", color="orange", alpha=0.7)
-    ax.plot(x, df["pred_mem"], label="Predicted Memory", color="red", alpha=0.7)
-    if use_conformal:
-        ax.fill_between(x, df["lower_cpu"], df["upper_cpu"],
-                        color="orange", alpha=0.15, label="CPU Conformal")
-        ax.fill_between(x, df["lower_mem"], df["upper_mem"],
-                        color="red", alpha=0.15, label="Mem Conformal")
-    ax.axhline(y=threshold, color="black", linestyle="--", alpha=0.5,
-               label=f"Threshold={threshold}")
-    ax.set_ylabel("Utilization")
-    ax.set_title(f"{msname} -- Utilization", fontweight="bold")
-    ax.legend(loc="upper left", fontsize=8)
-    ax.grid(True, alpha=0.3)
-
-    ax = axes[1]
-    ax.plot(x, df["traditional_replicas"], label="Traditional HPA",
-            color="blue", linewidth=1.5)
-    label = "Predictive HPA" + (" + Conformal" if use_conformal else "")
-    ax.plot(x, df["predictive_replicas"], label=label, color="red", linewidth=1.5)
-    ax.set_ylabel("Replicas")
-    ax.set_title("Replica Count Comparison", fontweight="bold")
-    ax.legend(loc="upper left")
-    ax.grid(True, alpha=0.3)
-    ax.yaxis.set_major_locator(plt.MaxNLocator(integer=True))
-
-    ax = axes[2]
-    if "traditional_effective_cpu" in df.columns:
-        ax.plot(x, df["traditional_effective_cpu"], label="Trad effective CPU",
-                color="blue", alpha=0.7, linewidth=1.2)
-        ax.plot(x, df["predictive_effective_cpu"], label="Pred effective CPU",
-                color="red", alpha=0.7, linewidth=1.2)
-        ax.plot(x, df["cpu"], label="Raw CPU (observed)", color="gray",
-                alpha=0.4, linewidth=0.8, linestyle="--")
-    else:
-        ax.plot(x, df["cpu"], label="CPU", color="blue", alpha=0.7)
-        ax.plot(x, df["memory"], label="Memory", color="green", alpha=0.7)
-    ax.axhline(y=threshold, color="black", linestyle="--", alpha=0.5)
-    ax.set_ylabel("Effective Utilization")
-    ax.set_title("Effective Per-Pod Utilization (demand / replicas)", fontweight="bold")
-    ax.legend(loc="upper left", fontsize=8)
-    ax.grid(True, alpha=0.3)
-
-    ax = axes[3]
-    if "traditional_sla" in df.columns:
-        ax.fill_between(x, 0, df["traditional_sla"].astype(int),
-                        color="blue", alpha=0.3, label="Traditional SLA")
-        ax.fill_between(x, 0, df["predictive_sla"].astype(int),
-                        color="red", alpha=0.3, label="Predictive SLA")
-    else:
-        ax.fill_between(x, 0, df["sla_violation"].astype(int),
-                        color="red", alpha=0.3, label="SLA Violation")
-    ax.set_ylabel("Violation")
-    ax.set_title("SLA Violations (demand model)", fontweight="bold")
-    ax.set_xlabel("Time")
-    ax.legend(loc="upper left")
-    ax.grid(True, alpha=0.3)
-    ax.set_ylim(-0.1, 1.1)
-
-    if has_ts:
-        span = (df["timestamp"].iloc[-1] - df["timestamp"].iloc[0]).total_seconds() / 3600
-        loc = mdates.HourLocator(interval=2) if span > 18 else mdates.MinuteLocator(interval=5)
-        for a in axes:
-            a.xaxis.set_major_locator(loc)
-            a.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %H:%M"))
-        plt.setp(axes[-1].get_xticklabels(), rotation=30, ha="right")
-
-    fig.suptitle(f"HPA Simulation -- {msname}", fontsize=14, fontweight="bold")
-    fig.tight_layout(rect=[0, 0, 1, 0.96])
-
     os.makedirs(plots_dir, exist_ok=True)
     stamp = time.strftime("%Y%m%d_%H%M%S")
-    png = os.path.join(plots_dir, f"hpa_sim_{msname}_{stamp}.png")
-    fig.savefig(png, dpi=300)
-    plt.close(fig)
-    print(f"Plot saved: {png}")
-    return png
+
+    targets = [
+        ("cpu", "blue", "orange", "orange", "Actual CPU", "Predicted CPU",
+         "cpu", "lower_cpu", "upper_cpu", "pred_cpu"),
+    ]
+    if num_targets > 1:
+        targets.append(
+            ("memory", "blue", "orange", "orange", "Actual Memory", "Predicted Memory",
+             "memory", "lower_mem", "upper_mem", "pred_mem"),
+        )
+
+    for (target, color_actual, color_pred, color_pred_fill,
+         label_actual, label_pred,
+         actual_col, lo_col, hi_col, pred_col) in targets:
+
+        fig, axes = plt.subplots(3, 1, figsize=(18, 16), sharex=True)
+
+        # Shift predictions forward by pred_horizon so each predicted point
+        # aligns with the actual value it is forecasting
+        pred_shifted = df[pred_col].shift(pred_horizon)
+        lo_shifted = df[lo_col].shift(pred_horizon) if lo_col in df.columns else None
+        hi_shifted = df[hi_col].shift(pred_horizon) if hi_col in df.columns else None
+
+        # --- Panel 1: Raw + predicted utilization ---
+        ax = axes[0]
+        ax.plot(x, df[actual_col], label=label_actual, color=color_actual, alpha=0.7)
+        ax.plot(x, pred_shifted, label=f"{label_pred} (+{pred_horizon}m ahead)",
+                color=color_pred, alpha=0.7)
+        if use_conformal and lo_shifted is not None:
+            ax.fill_between(x, lo_shifted, hi_shifted,
+                            color=color_pred_fill, alpha=0.15,
+                            label=f"{target.upper()} Conformal (+{pred_horizon}m)")
+        ax.axhline(y=threshold, color="black", linestyle="--", alpha=0.5,
+                   label=f"Threshold={threshold}")
+        ax.set_ylabel("Utilization")
+        ax.set_title(f"{msname} -- {target.upper()} Utilization", fontweight="bold")
+        ax.legend(loc="upper left", fontsize=8, bbox_to_anchor=(1.01, 1),
+                  borderaxespad=0, frameon=True)
+        ax.grid(True, alpha=0.3)
+
+        # --- Panel 2: Replica counts ---
+        ax = axes[1]
+        ax.plot(x, df["traditional_replicas"], label="Traditional HPA",
+                color="blue", linewidth=1.5)
+        pred_label = "Predictive HPA" + (" + Conformal" if use_conformal else "")
+        ax.plot(x, df["predictive_replicas"], label=pred_label, color="red", linewidth=1.5)
+        ax.set_ylabel("Replicas")
+        ax.set_title("Replica Count Comparison", fontweight="bold")
+        ax.legend(loc="upper left", fontsize=8, bbox_to_anchor=(1.01, 1),
+                  borderaxespad=0, frameon=True)
+        ax.grid(True, alpha=0.3)
+        ax.yaxis.set_major_locator(plt.MaxNLocator(integer=True))
+
+        # --- Panel 3: Prediction error (horizon-aligned) ---
+        ax = axes[2]
+        err = pred_shifted.values.astype(float) - df[actual_col].values.astype(float)
+        ax.plot(x, err, label=f"{target.upper()} Pred Error (h={pred_horizon})",
+                color=color_pred, alpha=0.7, linewidth=1.2)
+        ax.axhline(y=0, color="black", linestyle="--", alpha=0.5)
+        ax.axhline(y=threshold, color="red", linestyle=":", alpha=0.3)
+        ax.axhline(y=-threshold, color="red", linestyle=":", alpha=0.3)
+        ax.set_ylabel("Error (Predicted - Actual)")
+        ax.set_title(f"{target.upper()} Prediction Error (h={pred_horizon}m)",
+                     fontweight="bold")
+        ax.set_xlabel("Time")
+        ax.legend(loc="upper left", fontsize=8, bbox_to_anchor=(1.01, 1),
+                  borderaxespad=0, frameon=True)
+        ax.grid(True, alpha=0.3)
+
+        if has_ts:
+            span = (df["timestamp"].iloc[-1] - df["timestamp"].iloc[0]).total_seconds() / 3600
+            loc = mdates.HourLocator(interval=2) if span > 18 else mdates.MinuteLocator(interval=5)
+            for a in axes:
+                a.xaxis.set_major_locator(loc)
+                a.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %H:%M"))
+            plt.setp(axes[-1].get_xticklabels(), rotation=30, ha="right")
+
+        fig.suptitle(f"HPA Simulation -- {msname} ({target.upper()})", fontsize=14, fontweight="bold")
+        fig.tight_layout(rect=[0, 0, 0.88, 0.96])
+
+        png = os.path.join(plots_dir, f"hpa_sim_{msname}_{target}_{stamp}.png")
+        fig.savefig(png, dpi=300, bbox_inches="tight")
+        plt.close(fig)
+        print(f"Plot saved: {png}")
 
 
 # ================================================================
@@ -855,7 +811,7 @@ def main():
         meta["input_len"] = args.input_len
 
     print("Loading Alibaba parquet...")
-    service_data, cache_feats, baseline_replicas_map = load_alibaba_parquet(
+    service_data, cache_feats, _ = load_alibaba_parquet(
         args.parquet_root, meta["feature_set"]
     )
 
@@ -913,8 +869,6 @@ def main():
 
     print(f"Evaluation phase: {args.hours}h ({eval_minutes} min) "
           f"[{test_start}:{test_start + eval_minutes}]")
-    baseline_replicas = baseline_replicas_map.get(msname, 1.0)
-    print(f"Baseline replicas for {msname}: {baseline_replicas:.0f}")
     results = simulate_trace(
         raw_feat, model_feat, model, meta, device,
         start_idx=test_start, n_minutes=eval_minutes,
@@ -925,7 +879,6 @@ def main():
         adaptive_window=args.adaptive_window,
         adaptive_eta=args.adaptive_eta,
         timestamps=timestamps,
-        baseline_replicas=baseline_replicas,
     )
 
     if not results:
@@ -957,19 +910,6 @@ def main():
     print(f"{'Scaling Actions':<35} {metrics.get('traditional_scaling_actions', 0):>12d} "
           f"{metrics.get('predictive_scaling_actions', 0):>12d}")
     print(f"{'Replica Reduction':<35} {metrics.get('replica_reduction_pct', 0):>+11.1f}%")
-    print("-" * 72)
-    print(f"  Baseline replicas: {baseline_replicas:.0f}")
-    print(f"  SLA Violations (open-loop): {metrics.get('sla_violations', 0)} "
-          f"({metrics.get('sla_violation_rate', 0) * 100:.1f}%)")
-    if "traditional_sla_violations" in metrics:
-        print(f"  Traditional SLA violations: {metrics['traditional_sla_violations']} "
-              f"({metrics['traditional_sla_rate'] * 100:.1f}%)")
-        print(f"  Predictive SLA violations:  {metrics['predictive_sla_violations']} "
-              f"({metrics['predictive_sla_rate'] * 100:.1f}%)")
-        print(f"  SLA reduction (trad→pred):  {metrics.get('sla_reduction_pct', 0):+.1f}%")
-    if "traditional_effective_cpu_avg" in metrics:
-        print(f"  Trad avg effective CPU:     {metrics['traditional_effective_cpu_avg']:.4f}")
-        print(f"  Pred avg effective CPU:     {metrics['predictive_effective_cpu_avg']:.4f}")
     print("-" * 72)
     print(f"{'Prediction Accuracy (CPU)':<35} {'Value':>12}")
     print("-" * 72)
@@ -1017,7 +957,6 @@ def main():
     metrics.update({
         "msname": msname, "checkpoint": args.checkpoint, "hours": args.hours,
         "threshold": args.threshold, "use_conformal": args.adaptive_conformal,
-        "baseline_replicas": baseline_replicas,
     })
     with open(json_path, "w") as f:
         json.dump(metrics, f, indent=2, default=str)
@@ -1026,7 +965,8 @@ def main():
     print(f"JSON: {json_path}")
 
     plot_results(results, msname, args.plots_dir, meta["pred_horizon"],
-                 args.adaptive_conformal, args.threshold)
+                 args.adaptive_conformal, args.threshold,
+                 num_targets=meta["num_targets"])
 
 
 if __name__ == "__main__":
