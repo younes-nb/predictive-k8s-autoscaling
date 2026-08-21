@@ -572,7 +572,7 @@ def evaluate(args):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--windows_dir", required=True)
+    p.add_argument("--windows_dir", default=PATHS.WINDOWS_DIR)
     p.add_argument("--checkpoint_path", required=True)
     p.add_argument("--logs_dir", default=PATHS.LOGS_DIR,
                    help="Directory for log files (default: %(default)s)")

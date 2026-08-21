@@ -204,15 +204,14 @@ def main():
         cmd_pre = [
             sys.executable,
             preprocess_script,
-            "--start_date",
-            args.start_date,
-            "--end_date",
-            args.end_date,
-            "--feature_set",
-            args.feature_set,
-            "--windows_dir",
-            args.windows_dir,
         ]
+        env_pre = {
+            "INPUT_LEN": str(args.input_len),
+            "PRED_HORIZON": str(args.pred_horizon),
+            "WINDOWS_DIR": args.windows_dir,
+            "FEATURE_SET": args.feature_set,
+            "SUBSET_SEED": str(args.seed),
+        }
         if args.max_services is not None:
             cmd_pre.extend(["--max_services", str(args.max_services)])
         if args.csv_path:
@@ -238,9 +237,6 @@ def main():
             cmd_pre.append("--recompute_preprocessing")
         cmd_pre.extend(["--preprocess_approach", args.preprocess_approach])
         cmd_pre.extend(["--smooth_window", str(args.smooth_window)])
-        cmd_pre.extend(["--subset_seed", str(args.seed)])
-        cmd_pre.extend(["--input_len", str(args.input_len)])
-        cmd_pre.extend(["--pred_horizon", str(args.pred_horizon)])
         if args.input_len != PREPROCESSING.INPUT_LEN:
             print(
                 f"\n[INFO] input_len={args.input_len} != default {PREPROCESSING.INPUT_LEN}; "
@@ -252,7 +248,7 @@ def main():
         if args.mem_swt_level is not None:
             cmd_pre.extend(["--mem_swt_level", str(args.mem_swt_level)])
 
-        total_times["preprocessing"] = run(cmd_pre, "Step 1: Preprocessing")
+        total_times["preprocessing"] = run(cmd_pre, "Step 1: Preprocessing", env=env_pre)
 
     current_checkpoint = os.path.join(args.models_dir, args.model_name)
 
@@ -275,36 +271,28 @@ def main():
     if not args.skip_training:
         cmd_train = launcher_cmd + [
             train_script,
-            "--windows_dir",
-            args.windows_dir,
             "--checkpoint_path",
             current_checkpoint,
-            "--logs_dir",
-            args.logs_dir,
-            "--feature_set",
-            args.feature_set,
-            "--batch_size",
-            str(TRAINING.BATCH_SIZE),
-            "--epochs",
-            str(TRAINING.EPOCHS),
-            "--model_type",
-            args.model_type,
-            "--preprocess_approach",
-            args.preprocess_approach,
-            "--input_len",
-            str(args.input_len),
-            "--pred_horizon",
-            str(args.pred_horizon),
         ]
+        env_train = {
+            "INPUT_LEN": str(args.input_len),
+            "PRED_HORIZON": str(args.pred_horizon),
+            "WINDOWS_DIR": args.windows_dir,
+            "LOGS_DIR": args.logs_dir,
+            "FEATURE_SET": args.feature_set,
+            "BATCH_SIZE": str(TRAINING.BATCH_SIZE),
+            "EPOCHS": str(TRAINING.EPOCHS),
+            "SEED": str(args.seed),
+            "TRAIN_PCT": str(args.train_pct),
+            "VAL_PCT": str(args.val_pct),
+            "SFOA_TRAIN_PCT": str(args.sfoa_train_pct),
+            "SFOA_VAL_PCT": str(args.sfoa_val_pct),
+            "SFOA_NUM_WORKERS": str(args.sfoa_num_workers),
+        }
         if args.preprocess_approach in ("swt", "cskv", "smoothing"):
             cmd_train.extend(["--preprocess_dir", os.path.join(args.windows_dir, args.preprocess_approach)])
             cmd_train.extend(["--dataset_workers", str(args.dataset_workers)])
         cmd_train.extend(["--hyperparam_optimizer", args.hyperparam_optimizer])
-        cmd_train.extend(["--sfoa_train_pct", str(args.sfoa_train_pct)])
-        cmd_train.extend(["--sfoa_val_pct", str(args.sfoa_val_pct)])
-        cmd_train.extend(["--sfoa_num_workers", str(args.sfoa_num_workers)])
-        cmd_train.extend(["--train_pct", str(args.train_pct)])
-        cmd_train.extend(["--val_pct", str(args.val_pct)])
         cmd_train.extend(["--loss_mode", args.loss_mode])
         if args.last_step_only:
             cmd_train.append("--last_step_only")
@@ -332,7 +320,6 @@ def main():
             cmd_train.append("--resume_training")
         if args.cpu:
             cmd_train.append("--cpu")
-        cmd_train.extend(["--seed", str(args.seed)])
         if args.preprocess_approach in ("swt", "cskv"):
             if args.swt_level is not None:
                 cmd_train.extend(["--swt_level", str(args.swt_level)])
@@ -352,41 +339,39 @@ def main():
         else:
             cmd_train.append("--no-dpam_mem_disable_drift")
 
-        total_times["training"] = run(cmd_train, "Step 2: Training")
+        total_times["training"] = run(cmd_train, "Step 2: Training", env=env_train)
 
     if not args.skip_testing:
         cmd_test = launcher_cmd + [
             test_script,
-            "--windows_dir",
-            args.windows_dir,
             "--checkpoint_path",
             current_checkpoint,
-            "--logs_dir",
-            args.logs_dir,
-            "--batch_size",
-            str(TRAINING.BATCH_SIZE),
-            "--input_len",
-            str(args.input_len),
-            "--pred_horizon",
-            str(args.pred_horizon),
         ]
+        env_test = {
+            "INPUT_LEN": str(args.input_len),
+            "PRED_HORIZON": str(args.pred_horizon),
+            "WINDOWS_DIR": args.windows_dir,
+            "LOGS_DIR": args.logs_dir,
+            "BATCH_SIZE": str(TRAINING.BATCH_SIZE),
+            "TEST_PCT": str(args.test_pct),
+            "VAL_PCT": str(args.val_pct),
+            "SEED": str(args.seed),
+            "SMOOTHING_WINDOW": str(args.smooth_window),
+        }
         if args.preprocess_approach in ("swt", "cskv", "smoothing"):
             cmd_test.extend(["--preprocess_dir", os.path.join(args.windows_dir, args.preprocess_approach)])
         if args.preprocess_approach == "smoothing":
             cmd_test.extend(["--smoothing_window", str(args.smooth_window)])
         if args.cpu:
             cmd_test.append("--cpu")
-        cmd_test.extend(["--test_pct", str(args.test_pct)])
         cmd_test.extend(["--split", args.split])
-        cmd_test.extend(["--val_pct", str(args.val_pct)])
-        cmd_test.extend(["--seed", str(args.seed)])
         if args.preprocess_approach in ("swt", "cskv"):
             if args.swt_level is not None:
                 cmd_test.extend(["--swt_level", str(args.swt_level)])
             if args.mem_swt_level is not None:
                 cmd_test.extend(["--mem_swt_level", str(args.mem_swt_level)])
 
-        total_times["testing"] = run(cmd_test, "Step 3: Evaluation & Diagnostics")
+        total_times["testing"] = run(cmd_test, "Step 3: Evaluation & Diagnostics", env=env_test)
 
     print("\n========== PIPELINE COMPLETE ==========")
     for stage, t in total_times.items():
