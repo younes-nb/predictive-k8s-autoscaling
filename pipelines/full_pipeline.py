@@ -38,6 +38,8 @@ def main():
         help="Directory for log files (default: %(default)s)")
     ap.add_argument("--input_len", type=int, default=PREPROCESSING.INPUT_LEN,
         help="Sliding window input length; changing it auto-rebuilds the windows (default: %(default)s)")
+    ap.add_argument("--pred_horizon", type=int, default=PREPROCESSING.PRED_HORIZON,
+        help="Prediction horizon (default: %(default)s)")
     ap.add_argument("--skip_preprocessing", action="store_true", help="Skip the entire preprocessing pipeline (fetch+ingest+windows)")
     ap.add_argument("--skip_training", action="store_true", help="Skip the training step")
     ap.add_argument("--skip_testing", action="store_true", help="Skip the evaluation step")
@@ -238,6 +240,7 @@ def main():
         cmd_pre.extend(["--smooth_window", str(args.smooth_window)])
         cmd_pre.extend(["--subset_seed", str(args.seed)])
         cmd_pre.extend(["--input_len", str(args.input_len)])
+        cmd_pre.extend(["--pred_horizon", str(args.pred_horizon)])
         if args.input_len != PREPROCESSING.INPUT_LEN:
             print(
                 f"\n[INFO] input_len={args.input_len} != default {PREPROCESSING.INPUT_LEN}; "
@@ -290,6 +293,8 @@ def main():
             args.preprocess_approach,
             "--input_len",
             str(args.input_len),
+            "--pred_horizon",
+            str(args.pred_horizon),
         ]
         if args.preprocess_approach in ("swt", "cskv", "smoothing"):
             cmd_train.extend(["--preprocess_dir", os.path.join(args.windows_dir, args.preprocess_approach)])
@@ -362,6 +367,8 @@ def main():
             str(TRAINING.BATCH_SIZE),
             "--input_len",
             str(args.input_len),
+            "--pred_horizon",
+            str(args.pred_horizon),
         ]
         if args.preprocess_approach in ("swt", "cskv", "smoothing"):
             cmd_test.extend(["--preprocess_dir", os.path.join(args.windows_dir, args.preprocess_approach)])

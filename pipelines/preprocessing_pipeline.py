@@ -26,6 +26,8 @@ def main():
     ap.add_argument("--windows_dir", default=PATHS.WINDOWS_DIR)
     ap.add_argument("--input_len", type=int, default=PREPROCESSING.INPUT_LEN,
                      help="Sliding window input length passed to build_windows (default: %(default)s)")
+    ap.add_argument("--pred_horizon", type=int, default=PREPROCESSING.PRED_HORIZON,
+                     help="Prediction horizon passed to build_windows (default: %(default)s)")
     ap.add_argument("--skip_fetch", action="store_true")
     ap.add_argument("--skip_ingest", action="store_true")
     ap.add_argument("--skip_raw_windows", action="store_true",
@@ -139,6 +141,7 @@ def main():
             cmd.extend(["--max_services", str(args.max_services)])
         cmd.extend(["--subset_seed", str(args.subset_seed)])
         cmd.extend(["--input_len", str(args.input_len)])
+        cmd.extend(["--pred_horizon", str(args.pred_horizon)])
         for h in ("train_hours", "val_hours", "test_hours"):
             v = getattr(args, h)
             if v is not None:
