@@ -25,7 +25,7 @@ def decompose_window(window: np.ndarray, cfg) -> np.ndarray:
     window = np.asarray(window, dtype=np.float64)
     n = len(window)
 
-    if n < 2 ** cfg.SWT_LEVEL or np.std(window) < 1e-12:
+    if n < 2 ** cfg.SWT_LEVEL:
         return None
 
     swt_coeffs = pywt.swt(window, 'sym4', level=cfg.SWT_LEVEL, norm=True, trim_approx=True)

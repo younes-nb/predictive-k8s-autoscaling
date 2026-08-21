@@ -195,20 +195,6 @@ def decompose_service_signal(
             zeros.astype(np.float32),
         ]
 
-    if np.std(signal) < 1e-12:
-        logger.warning(
-            "Constant signal (std=%.2e); returning trivial decomposition.",
-            float(np.std(signal)),
-        )
-        zeros = np.zeros_like(signal)
-        if return_raw_imfs:
-            return [signal.astype(np.float32)]
-        return [
-            signal.astype(np.float32),
-            zeros.astype(np.float32),
-            zeros.astype(np.float32),
-        ]
-
     imfs, residue = ceemdan_decompose(signal, cfg.CEEMDAN_EPSILON, cfg.CEEMDAN_TRIALS)
     logger.debug("CEEMDAN produced %d IMFs.", imfs.shape[0])
 

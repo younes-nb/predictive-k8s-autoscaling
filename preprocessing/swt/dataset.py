@@ -1,6 +1,7 @@
 import argparse
 import bisect
 import glob
+import json
 import logging
 import os
 import sys
@@ -15,10 +16,20 @@ REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, "..", ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from preprocessing.swt.config import CFG as SWT_CFG, channel_dirs_for
 from shared.features import get_feature_set
 
 logger = logging.getLogger(__name__)
+
+
+def _load_meta(preprocess_dir: str) -> dict:
+    meta_path = os.path.join(preprocess_dir, "meta.json")
+    if not os.path.exists(meta_path):
+        raise FileNotFoundError(
+            f"Metadata file not found at {meta_path}. "
+            "Run swt/preprocess.py first to generate it."
+        )
+    with open(meta_path) as f:
+        return json.load(f)
 
 
 class SwtDataset(Dataset):
@@ -29,19 +40,22 @@ class SwtDataset(Dataset):
         input_len: int = 128,
         pred_horizon: int = 5,
         feature_set: str = "cpu",
-        swt_level: int = SWT_CFG.SWT_LEVEL,
-        mem_swt_level: int = SWT_CFG.MEM_SWT_LEVEL,
+        swt_level: int = 5,
+        mem_swt_level: int = 5,
     ):
         assert split in ("train", "val", "test"), f"Unknown split: {split}"
         self.split = split
         self.input_len = input_len
         self.pred_horizon = pred_horizon
-        self.has_mem = "memory_utilization" in get_feature_set(feature_set).get("targets", [])
 
-        cpu_channel_dirs = channel_dirs_for(swt_level)
-        mem_channel_dirs = channel_dirs_for(mem_swt_level, prefix="mem_")
-        self.channel_dirs = cpu_channel_dirs + (mem_channel_dirs if self.has_mem else [])
-        self.n_channels = len(self.channel_dirs)
+        # Load metadata from preprocessing
+        meta = _load_meta(preprocess_dir)
+        self.features = meta["features"]
+        self.target_features = meta["target_features"]
+        self.target_indices = meta["target_indices"]
+        self.channel_counts = meta["channel_counts"]
+        self.n_channels = meta["total_channels"]
+        self.has_mem = "memory_utilization" in self.target_features
 
         t_start = time.time()
 
@@ -117,8 +131,8 @@ class SwtDataset(Dataset):
 
 
 def _smoke_check(preprocess_dir: str, split: str,
-                  feature_set: str = "cpu", swt_level: int = SWT_CFG.SWT_LEVEL,
-                  mem_swt_level: int = SWT_CFG.MEM_SWT_LEVEL) -> None:
+                  feature_set: str = "cpu", swt_level: int = 5,
+                  mem_swt_level: int = 5) -> None:
     from shared.config_preprocessing_defaults import PREPROCESSING
 
     ds = SwtDataset(
@@ -135,17 +149,18 @@ def _smoke_check(preprocess_dir: str, split: str,
     expected_x_shape = (PREPROCESSING.INPUT_LEN, ds.n_channels)
     assert tuple(x.shape) == expected_x_shape, \
         f"Bad x shape: {tuple(x.shape)} expected {expected_x_shape}"
-    if ds.has_mem:
-        expected_y_shape = (PREPROCESSING.PRED_HORIZON, 2)
-        expected_last_shape = (2,)
-    else:
-        expected_y_shape = (PREPROCESSING.PRED_HORIZON,)
-        expected_last_shape = ()
+    expected_y_shape = (PREPROCESSING.PRED_HORIZON, len(ds.target_indices))
+    expected_last_shape = (len(ds.target_indices),)
     assert tuple(y.shape) == expected_y_shape, \
         f"Bad y shape: {tuple(y.shape)} expected {expected_y_shape}"
     assert tuple(last.shape) == expected_last_shape, \
         f"Bad last shape: {tuple(last.shape)} expected {expected_last_shape}"
     print(f"Dataset windows: {len(ds)}")
+    print(f"Features: {ds.features}")
+    print(f"Target features: {ds.target_features}")
+    print(f"Target indices: {ds.target_indices}")
+    print(f"Channel counts: {ds.channel_counts}")
+    print(f"Total channels: {ds.n_channels}")
     print(f"x={tuple(x.shape)} y={tuple(y.shape)} last={tuple(last.shape)}")
     print("SwtDataset smoke test passed")
 
@@ -155,8 +170,8 @@ if __name__ == "__main__":
     ap.add_argument("--preprocess_dir", required=True)
     ap.add_argument("--split", choices=("train", "val", "test"), default="train")
     ap.add_argument("--feature_set", default="cpu")
-    ap.add_argument("--swt_level", type=int, default=SWT_CFG.SWT_LEVEL)
-    ap.add_argument("--mem_swt_level", type=int, default=SWT_CFG.MEM_SWT_LEVEL)
+    ap.add_argument("--swt_level", type=int, default=5)
+    ap.add_argument("--mem_swt_level", type=int, default=5)
     args = ap.parse_args()
     _smoke_check(args.preprocess_dir, args.split,
                  feature_set=args.feature_set, swt_level=args.swt_level,

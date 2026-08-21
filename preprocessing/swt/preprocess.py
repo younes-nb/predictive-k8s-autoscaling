@@ -1,6 +1,7 @@
 import argparse
 import ctypes
 import glob
+import json
 import logging
 import multiprocessing as mp
 import os
@@ -85,7 +86,7 @@ def _memory_aware_workers(requested, per_worker, max_fraction=0.8):
 def _decompose_shard(task, windows_done, shards_done, cur_shard_idx):
     (shard_x_path, shard_y_path, shard_sid_path,
      shard_out_x_path, shard_out_y_path, shard_out_sid_path, shard_out_last_path,
-     cpu_cfg, mem_cfg, feature_idx_cpu, feature_idx_mem, has_mem, shard_idx) = task
+     feature_cfgs, feature_indices, target_indices, shard_idx) = task
 
     t0 = time.time()
 
@@ -93,90 +94,65 @@ def _decompose_shard(task, windows_done, shards_done, cur_shard_idx):
     cur_shard_idx.value = shard_idx
 
     X = np.load(shard_x_path, mmap_mode="r")
-    Y = np.load(shard_y_path)
-    S = np.load(shard_sid_path)
-    N, input_len, _ = X.shape
+    Y_full = np.load(shard_y_path)
+    S = np.load(shard_y_path.replace("_y_", "_sid_"))
+    N, input_len, n_input_features = X.shape
 
-    last_cpu = np.asarray(X[:, -1, feature_idx_cpu], dtype=np.float16)
-    if has_mem:
-        last_mem = np.asarray(X[:, -1, feature_idx_mem], dtype=np.float16)
-    else:
-        last_mem = None
+    # Extract last values for target features
+    last_vals = np.asarray(X[:, -1, target_indices], dtype=np.float16)
 
-    n_cpu_channels = cpu_cfg.SWT_LEVEL + 1
-    n_mem_channels = (mem_cfg.SWT_LEVEL + 1) if has_mem else 0
-    total_channels = n_cpu_channels + n_mem_channels
+    # Compute channel counts per feature
+    n_channels_per_feat = [cfg.SWT_LEVEL + 1 for cfg in feature_cfgs]
+    total_channels = sum(n_channels_per_feat)
 
     out_dir = os.path.dirname(shard_out_x_path)
     os.makedirs(out_dir, exist_ok=True)
 
     chunk_size, _ = _chunk_and_per_worker_mem(input_len, total_channels)
 
-    # Stream X_dec into a full-size memmap at a running offset, writing only
-    # kept windows. RAM stays bounded to one chunk (~1GB), not the whole shard
-    # (~4GB for a 12-channel train shard).
+    # Stream X_dec into a full-size memmap. All windows are kept.
     tmp_x = shard_out_x_path + ".tmp"
     out_mmap = np.lib.format.open_memmap(
         tmp_x, mode="w+", dtype="float16",
         shape=(N, input_len, total_channels),
     )
-    keep = np.zeros(N, dtype=bool)
-    offset = 0
     for a in range(0, N, chunk_size):
         b = min(a + chunk_size, N)
         X_chunk = X[a:b]
         m = b - a
         X_dec_chunk = np.zeros((m, input_len, total_channels), dtype=np.float16)
-        keep_chunk = np.ones(m, dtype=bool)
         for i in range(m):
-            cpu_ch = decompose_window(X_chunk[i, :, feature_idx_cpu], cpu_cfg)
-            if cpu_ch is None:
-                keep_chunk[i] = False
-                continue
-            X_dec_chunk[i, :, :n_cpu_channels] = cpu_ch.T
-            if has_mem:
-                mem_ch = decompose_window(X_chunk[i, :, feature_idx_mem], mem_cfg)
-                if mem_ch is None:
-                    keep_chunk[i] = False
-                    continue
-                X_dec_chunk[i, :, n_cpu_channels:] = mem_ch.T
-        keep[a:b] = keep_chunk
-        n_kept = int(keep_chunk.sum())
-        if n_kept:
-            out_mmap[offset:offset + n_kept] = X_dec_chunk[keep_chunk]
-            offset += n_kept
+            ch_offset = 0
+            for feat_idx, feat_cfg in zip(feature_indices, feature_cfgs):
+                n_ch = feat_cfg.SWT_LEVEL + 1
+                feat_ch = decompose_window(X_chunk[i, :, feat_idx], feat_cfg)
+                if feat_ch is None:
+                    feat_ch = np.zeros((n_ch, input_len), dtype=np.float32)
+                    feat_ch[0] = X_chunk[i, :, feat_idx].astype(np.float32)
+                X_dec_chunk[i, :, ch_offset:ch_offset + n_ch] = feat_ch.T
+                ch_offset += n_ch
+        out_mmap[a:b] = X_dec_chunk
         windows_done.value += m
-        del X_dec_chunk, X_chunk, keep_chunk
+        del X_dec_chunk, X_chunk
         gc.collect()
 
-    n_kept_total = int(keep.sum())
     del out_mmap
-    if n_kept_total != N:
-        # Rare: some windows skipped (constant signal -> std ~ 0). Compact into
-        # the final file with the true row count, streaming to stay bounded.
-        final = np.lib.format.open_memmap(
-            shard_out_x_path, mode="w+", dtype="float16",
-            shape=(n_kept_total, input_len, total_channels),
-        )
-        tmp = np.load(tmp_x, mmap_mode="r")
-        for a in range(0, n_kept_total, chunk_size):
-            b = min(a + chunk_size, n_kept_total)
-            final[a:b] = tmp[a:b]
-        del final, tmp
-        gc.collect()
-        os.remove(tmp_x)
-    else:
-        os.replace(tmp_x, shard_out_x_path)
+    os.replace(tmp_x, shard_out_x_path)
 
-    last = np.stack([last_cpu, last_mem], axis=-1) if has_mem else last_cpu
-    np.save(shard_out_last_path, last[keep])
-    np.save(shard_out_y_path, Y[keep].astype(np.float16))
-    np.save(shard_out_sid_path, S[keep])
+    # Slice Y to only include the target features for this feature set.
+    # Y_full has shape (N, pred_horizon, num_targets_total); we take the first
+    # len(target_indices) targets, which matches the order of target_features.
+    num_targets = len(target_indices)
+    Y_subset = Y_full[..., :num_targets].astype(np.float16)
+
+    np.save(shard_out_last_path, last_vals)
+    np.save(shard_out_y_path, Y_subset)
+    np.save(shard_out_sid_path, S)
 
     shards_done.value += 1
 
     elapsed = time.time() - t0
-    return (os.path.basename(shard_x_path), n_kept_total, N - n_kept_total, elapsed)
+    return (os.path.basename(shard_x_path), N, 0, elapsed)
 
 
 def main() -> None:
@@ -188,11 +164,13 @@ def main() -> None:
     ap.add_argument("--out_dir", default="/dataset/swt_preprocess",
                     help="Output directory for decomposed shards")
     ap.add_argument("--feature_set", default="cpu",
-                    help="Feature set: 'cpu' for CPU only, 'cpu_mem_both' for CPU + memory")
+                    help="Feature set: 'cpu' for CPU only, 'cpu_mem_both' for CPU + memory, 'cpu_mem_http_rpc' for CPU + memory + http/rpc MCR")
     ap.add_argument("--swt_level", type=int, default=CFG.SWT_LEVEL,
                     help=f"SWT decomposition level for CPU (default: {CFG.SWT_LEVEL})")
     ap.add_argument("--mem_swt_level", type=int, default=CFG.MEM_SWT_LEVEL,
                     help=f"SWT decomposition level for memory (default: {CFG.MEM_SWT_LEVEL})")
+    ap.add_argument("--extra_swt_level", type=int, default=None,
+                    help=f"SWT decomposition level for extra features (default: same as --swt_level)")
     ap.add_argument("--num_workers", type=float, default=0.9,
                     help="Fraction of CPU cores to use (default: 0.9)")
     ap.add_argument("--recompute_preprocessing", action="store_true",
@@ -200,10 +178,23 @@ def main() -> None:
     args = ap.parse_args()
 
     spec = get_feature_set(args.feature_set)
+    feature_names = list(spec["features"])
     target_features = spec.get("targets", [spec.get("target")])
-    has_mem = "memory_utilization" in target_features
-    cpu_cfg = replace(CFG, SWT_LEVEL=args.swt_level)
-    mem_cfg = replace(CFG, SWT_LEVEL=args.mem_swt_level)
+    target_indices = [feature_names.index(tf) for tf in target_features]
+
+    extra_swt_level = args.extra_swt_level if args.extra_swt_level is not None else args.swt_level
+
+    # Build config for each feature
+    feature_cfgs = []
+    for feat in feature_names:
+        if feat == "cpu_utilization":
+            feature_cfgs.append(replace(CFG, SWT_LEVEL=args.swt_level))
+        elif feat == "memory_utilization":
+            feature_cfgs.append(replace(CFG, SWT_LEVEL=args.mem_swt_level))
+        else:
+            feature_cfgs.append(replace(CFG, SWT_LEVEL=extra_swt_level))
+
+    feature_indices = list(range(len(feature_names)))
 
     n_cpus = os.cpu_count() or 1
     num_workers = max(1, int(n_cpus * args.num_workers))
@@ -211,7 +202,7 @@ def main() -> None:
     setup_logging(args.out_dir)
 
     input_len = PREPROCESSING.INPUT_LEN
-    total_channels = (cpu_cfg.SWT_LEVEL + 1) + ((mem_cfg.SWT_LEVEL + 1) if has_mem else 0)
+    total_channels = sum(cfg.SWT_LEVEL + 1 for cfg in feature_cfgs)
     _, per_worker = _chunk_and_per_worker_mem(input_len, total_channels)
     capped = _memory_aware_workers(num_workers, per_worker)
     if capped != num_workers:
@@ -221,9 +212,21 @@ def main() -> None:
         )
     num_workers = capped
 
-    feature_names = list(spec["features"])
-    feature_idx_cpu = feature_names.index("cpu_utilization")
-    feature_idx_mem = feature_names.index("memory_utilization") if has_mem else -1
+    # Write metadata file describing channel structure
+    meta = {
+        "feature_set": args.feature_set,
+        "features": feature_names,
+        "target_features": target_features,
+        "target_indices": target_indices,
+        "swt_levels": {feat: cfg.SWT_LEVEL for feat, cfg in zip(feature_names, feature_cfgs)},
+        "channel_counts": {feat: cfg.SWT_LEVEL + 1 for feat, cfg in zip(feature_names, feature_cfgs)},
+        "total_channels": total_channels,
+        "input_len": input_len,
+    }
+    meta_path = os.path.join(args.out_dir, "meta.json")
+    with open(meta_path, "w") as f:
+        json.dump(meta, f, indent=2)
+    logging.info("Wrote metadata to %s", meta_path)
 
     splits = ["train", "val", "test"]
     shard_tasks = []
@@ -252,7 +255,7 @@ def main() -> None:
             shard_tasks.append((
                 x_path, y_path, sid_path,
                 out_x, out_y, out_sid, out_last,
-                cpu_cfg, mem_cfg, feature_idx_cpu, feature_idx_mem, has_mem,
+                feature_cfgs, feature_indices, target_indices,
             ))
 
     if not shard_tasks:
@@ -280,6 +283,8 @@ def main() -> None:
 
     logging.info("Processing %d shards (%d windows) with %d workers",
                  len(shard_tasks), total_windows, num_workers)
+    logging.info("Feature set: %s, features: %s, total_channels: %d",
+                 args.feature_set, feature_names, total_channels)
 
     t_start = time.time()
     kept_windows = 0

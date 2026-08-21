@@ -163,21 +163,11 @@ def _build_model_from_checkpoint(checkpoint, input_size, device):
 
 
 def _near_constant_valid_indices(ds, target_idxs):
-    valid = []
-    for i in range(len(ds)):
-        x, *_ = ds[i]
-        x_np = x.numpy()
-        if any(np.std(x_np[:, f].astype(np.float64)) < 1e-12 for f in target_idxs):
-            continue
-        valid.append(i)
-    return valid
+    return list(range(len(ds)))
 
 
 def _filter_near_constant_windows(ds, target_idxs):
-    valid = _near_constant_valid_indices(ds, target_idxs)
-    if len(valid) == len(ds):
-        return ds
-    return Subset(ds, valid)
+    return ds
 
 
 def _load_test_dataset(args, ckpt_args, device, log_info, feature_set_name="cpu"):
@@ -292,23 +282,6 @@ def _prepare_benchmark_indices(args, ckpt_args, log_info):
         n_samples = min(n_bench, len(raw_ds))
         rng = random.Random(42)
         indices = rng.sample(range(len(raw_ds)), n_samples)
-
-    if preprocess_approach == "swt":
-        STDSTD = 1e-12
-        _valid = []
-        for idx in indices:
-            x_raw, *_ = raw_ds[idx]
-            x_np = x_raw.numpy()
-            if any(np.std(x_np[:, f].astype(np.float64)) < STDSTD for f in range(x_np.shape[1])):
-                continue
-            _valid.append(idx)
-        n_skipped = len(indices) - len(_valid)
-        if n_skipped:
-            log_info(f"Skipped {n_skipped} windows with near-zero std for inference benchmark")
-        indices = _valid
-        if not indices:
-            log_info("No valid windows after filtering near-zero std; skipping benchmark.")
-            return None, None
 
     return raw_ds, indices
 
