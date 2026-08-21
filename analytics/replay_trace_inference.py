@@ -204,31 +204,34 @@ def _feature_matrix(df_all, df_sub, feature_set):
     return mat, cols
 
 
-def _apply_swt_per_window(raw_feat, feature_set, input_len):
+def _apply_swt_per_window(raw_feat, feature_set, input_len, swt_level=None, mem_swt_level=None):
+    from dataclasses import replace
     spec = get_feature_set(feature_set)
-    target_features = spec.get("targets", [spec.get("target")])
-    has_mem = "memory_utilization" in target_features
-    cpu_idx = 0
-    mem_idx = 1 if has_mem else -1
-    n_cpu_channels = SWT_CFG.SWT_LEVEL + 1
-    n_mem_channels = (SWT_CFG.MEM_SWT_LEVEL + 1) if has_mem else 0
-    total_channels = n_cpu_channels + n_mem_channels
+    feature_names = spec["features"]
+    
+    feature_cfgs = []
+    for f in feature_names:
+        lvl = swt_level if swt_level is not None else SWT_CFG.SWT_LEVEL
+        if f == "memory_utilization" and mem_swt_level is not None:
+            lvl = mem_swt_level
+        feature_cfgs.append(replace(SWT_CFG, SWT_LEVEL=lvl))
+
+    total_channels = sum(cfg.SWT_LEVEL + 1 for cfg in feature_cfgs)
     n_samples = raw_feat.shape[0]
     n_windows = n_samples - input_len + 1
     swt_windows = np.zeros((n_windows, input_len, total_channels), dtype=np.float32)
+
     for i in range(n_windows):
         window = raw_feat[i:i + input_len]
-        cpu_ch = decompose_window(window[:, cpu_idx].astype(np.float64), SWT_CFG)
-        if cpu_ch is None:
-            cpu_ch = np.zeros((n_cpu_channels, input_len), dtype=np.float32)
-            cpu_ch[0] = window[:, cpu_idx]
-        swt_windows[i, :, :n_cpu_channels] = cpu_ch.T
-        if has_mem:
-            mem_ch = decompose_window(window[:, mem_idx].astype(np.float64), SWT_CFG)
-            if mem_ch is None:
-                mem_ch = np.zeros((n_mem_channels, input_len), dtype=np.float32)
-                mem_ch[0] = window[:, mem_idx]
-            swt_windows[i, :, n_cpu_channels:] = mem_ch.T
+        ch_offset = 0
+        for feat_idx, cfg in enumerate(feature_cfgs):
+            n_ch = cfg.SWT_LEVEL + 1
+            ch = decompose_window(window[:, feat_idx].astype(np.float64), cfg)
+            if ch is None:
+                ch = np.zeros((n_ch, input_len), dtype=np.float32)
+                ch[0] = window[:, feat_idx]
+            swt_windows[i, :, ch_offset:ch_offset + n_ch] = ch.T
+            ch_offset += n_ch
     return swt_windows
 
 
@@ -298,7 +301,11 @@ def replay(df, model, meta, raw_feat, model_feat, device,
             q50 = preds[0, -1, :, 1].cpu().numpy()
             q95 = preds[0, -1, :, 2].cpu().numpy()
         else:
-            p = torch.round(preds[0, -1] * 100) / 100
+            # preds: (batch, horizon, targets) or (batch, targets)
+            if preds.dim() == 3:
+                p = torch.round(preds[0, -1] * 100) / 100
+            else:
+                p = torch.round(preds[0] * 100) / 100
             q50 = p.cpu().numpy()
             q10 = q50.copy()
             q95 = q50.copy()
@@ -431,16 +438,17 @@ def print_metrics(res, pred_horizon, spike_threshold=0.6099):
             continue
 
         y_arr = test_res[acol].iloc[pred_horizon:].values
-        pred_arr = test_res[pcol].iloc[pred_horizon:].values
-        lower = test_res[lcol].iloc[pred_horizon:].values
-        upper = test_res[ucol].iloc[pred_horizon:].values
+        pred_arr = test_res[pcol].iloc[:-pred_horizon].values
+        lower = test_res[lcol].iloc[:-pred_horizon].values
+        upper = test_res[ucol].iloc[:-pred_horizon].values
 
         if len(y_arr) == 0:
             continue
 
         mse = float(((y_arr - pred_arr) ** 2).mean())
         mae = float(np.abs(y_arr - pred_arr).mean())
-        naive_mae = float(np.abs(y_arr - test_res[acol].iloc[pred_horizon - 1:-1].values).mean())
+        # Naive baseline: y(t+H) = y(t)
+        naive_mae = float(np.abs(y_arr - test_res[acol].iloc[:-pred_horizon].values).mean())
         d = (mae - naive_mae) / naive_mae * 100 if naive_mae > 0 else float("nan")
         print(f"{label:5s}  MSE {mse:.5f}  MAE {mae:.5f} ({mae*100:.2f}%)  naive MAE {naive_mae:.4f}  delta {d:+.1f}%")
 
@@ -568,10 +576,15 @@ def main():
 
     ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
     ckpt_args = ckpt.get("args", {}) or {}
-    preprocess_approach = ckpt_args.get("preprocess_approach", "none")
+    preprocess_approach = ckpt.get("preprocess_approach", ckpt_args.get("preprocess_approach", "none"))
 
     if preprocess_approach == "swt":
-        feat_swt_windows = _apply_swt_per_window(feat_raw, meta["feature_set"], meta["input_len"])
+        swt_level = ckpt_args.get("swt_level")
+        mem_swt_level = ckpt_args.get("mem_swt_level")
+        feat_swt_windows = _apply_swt_per_window(
+            feat_raw, meta["feature_set"], meta["input_len"],
+            swt_level=swt_level, mem_swt_level=mem_swt_level
+        )
         print(f"Raw feature shape: {feat_raw.shape}, SWT windows shape: {feat_swt_windows.shape}")
         model_feat = feat_swt_windows
     else:
