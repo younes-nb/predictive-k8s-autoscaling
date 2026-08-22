@@ -533,6 +533,20 @@ def evaluate(args):
         y_last_all = np.stack(last_lasts, axis=0)
         y_second_last_all = np.stack(second_lasts, axis=0)
     else:
+        # For CSKV/SWT: the dataset returns `last` as raw target (1 column),
+        # but we need last values for ALL target features.
+        # Load raw reference data to get last values for each target.
+        raw_ref = ShardedWindowsDataset(
+            args.windows_dir, split, input_len, horizon
+        )
+        valid = _near_constant_valid_indices(raw_ref, target_idxs_in_features)
+        raw_ref = Subset(raw_ref, valid) if len(valid) < len(raw_ref) else raw_ref
+        raw_ref = head_slice_dataset_by_pct(raw_ref, pct)
+        last_lasts = []
+        for idx in range(len(raw_ref)):
+            x_np = raw_ref[idx][0].numpy()
+            last_lasts.append(x_np[-1, :])
+        y_last_all = np.stack(last_lasts, axis=0)
         y_second_last_all = np.empty((0,), dtype=np.float32)
     if y_second_last_all.ndim == 1:
         y_second_last_all = y_second_last_all[:, np.newaxis]
