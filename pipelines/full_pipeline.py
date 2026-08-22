@@ -234,6 +234,8 @@ def main():
             cmd_pre.append("--skip_raw_windows")
         if args.recompute_windows:
             cmd_pre.append("--recompute_windows")
+        if args.msname is not None:
+            cmd_pre.extend(["--msname", args.msname])
         if args.skip_preprocessing_approach:
             cmd_pre.append("--skip_preprocessing_approach")
         if args.recompute_preprocessing:
