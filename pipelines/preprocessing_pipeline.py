@@ -154,14 +154,13 @@ def main():
                 cmd.extend([f"--{h}", str(v)])
         if args.recompute_windows:
             cmd.append("--recompute")
+        if args.msname is not None:
+            cmd.extend(["--msname", args.msname])
         if args.csv_path:
             cmd.extend(["--csv_path", args.csv_path,
                         "--csv_time_col", args.csv_time_col,
                         "--csv_id_col", args.csv_id_col,
                         "--csv_tz", args.csv_tz])
-            if args.msname:
-                cmd.append("--msname")
-                cmd.append(args.msname)
             label = f"Step 3: Build windows (CSV source {args.csv_path})"
         else:
             label = "Step 3: Build windows (join tables)"
