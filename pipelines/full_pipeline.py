@@ -114,10 +114,13 @@ def main():
         choices=["lstm", "gru", "bilstm", "bigrue", "cnn_bilstm", "dlinear", "dpam"],
         help="Model architecture: lstm/gru (unidirectional), bilstm/bigrue (bidirectional), cnn_bilstm, dlinear (linear decomposition baseline), dpam (DualPathAnchorMixer)",
     )
+    ap.add_argument(
+        "--msname",
+        type=str,
+        default=None,
+        help="Train/evaluate only on a specific microservice (msname). Passed through to preprocessing, training, and evaluation."
+    )
     ap.add_argument("--change_head", action="store_true",
-                    help="Residual/change model: inject last target values so the "
-                         "network learns only the delta to the horizon")
-    ap.add_argument("--change_head_mem", action="store_true",
                     help="Residual/change injection for the LAST target only "
                          "(memory): keeps a level formulation for the other targets")
     ap.add_argument("--smooth_window", type=int, default=5, help="Moving average window size for 'smoothing' approach (default: %(default)s)")
@@ -237,6 +240,8 @@ def main():
             cmd_pre.append("--recompute_preprocessing")
         cmd_pre.extend(["--preprocess_approach", args.preprocess_approach])
         cmd_pre.extend(["--smooth_window", str(args.smooth_window)])
+        if args.msname is not None:
+            cmd_pre.extend(["--msname", args.msname])
         if args.input_len != PREPROCESSING.INPUT_LEN:
             print(
                 f"\n[INFO] input_len={args.input_len} != default {PREPROCESSING.INPUT_LEN}; "
@@ -339,6 +344,8 @@ def main():
             cmd_train.append("--dpam_mem_disable_drift")
         else:
             cmd_train.append("--no-dpam_mem_disable_drift")
+        if args.msname is not None:
+            cmd_train.extend(["--msname", args.msname])
 
         total_times["training"] = run(cmd_train, "Step 2: Training", env=env_train)
 
@@ -371,6 +378,8 @@ def main():
                 cmd_test.extend(["--swt_level", str(args.swt_level)])
             if args.mem_swt_level is not None:
                 cmd_test.extend(["--mem_swt_level", str(args.mem_swt_level)])
+        if args.msname is not None:
+            cmd_test.extend(["--msname", args.msname])
 
         total_times["testing"] = run(cmd_test, "Step 3: Evaluation & Diagnostics", env=env_test)
 

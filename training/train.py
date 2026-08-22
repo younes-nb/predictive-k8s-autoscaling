@@ -616,6 +616,12 @@ def main():
     p.add_argument("--swt_level", type=int, default=None, help="SWT level for CPU (swt only, default: config)")
     p.add_argument("--mem_swt_level", type=int, default=None, help="SWT level for memory (swt only, default: config)")
     p.add_argument("--max_services", type=int, default=0, help="Max services for swt/cskv")
+    p.add_argument(
+        "--msname",
+        type=str,
+        default=None,
+        help="Train/evaluate only on a specific microservice (msname). Passed through for logging consistency."
+    )
     p.add_argument("--dpam_cnn_kernels", type=int, nargs="+", default=None,
                    help="MultiKernelConv1D kernel sizes for dpam (ablation; default (3,5))")
     p.add_argument("--dpam_group_blocks", type=int, default=None,

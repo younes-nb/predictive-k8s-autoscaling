@@ -47,6 +47,12 @@ def main():
         default=PREPROCESSING.MAX_SERVICES,
     )
     ap.add_argument(
+        "--msname",
+        type=str,
+        default=None,
+        help="Train/evaluate only on a specific microservice (msname). Passed through to build_windows.py to filter data at creation time."
+    )
+    ap.add_argument(
         "--preprocess_approach",
         default="swt",
         choices=["none", "smoothing", "swt", "cskv"],
@@ -153,6 +159,9 @@ def main():
                         "--csv_time_col", args.csv_time_col,
                         "--csv_id_col", args.csv_id_col,
                         "--csv_tz", args.csv_tz])
+            if args.msname:
+                cmd.append("--msname")
+                cmd.append(args.msname)
             label = f"Step 3: Build windows (CSV source {args.csv_path})"
         else:
             label = "Step 3: Build windows (join tables)"

@@ -626,6 +626,8 @@ def main():
     p.add_argument("--service_col", type=str, default=PREPROCESSING.SERVICE_COL)
     p.add_argument("--max_services", type=int, default=PREPROCESSING.MAX_SERVICES)
     p.add_argument("--subset_seed", type=int, default=PREPROCESSING.SUBSET_SEED)
+    p.add_argument("--msname", type=str, default=None,
+                    help="Train/evaluate only on a specific microservice (msname). If set, only windows for this service will be created.")
     p.add_argument("--batch_size", type=int, default=0,
                     help="Services per worker group; 0 = auto-size to the worker pool (default: 0)")
     p.add_argument("--num_workers", type=float, default=0.9,
@@ -720,6 +722,15 @@ def main():
         print(f"Selected subset: {len(all_services_list)} services")
     else:
         print(f"Processing all {len(all_services_list)} services globally")
+
+    if args.msname is not None:
+        if args.msname not in all_services_list:
+            raise SystemExit(
+                f"Service '{args.msname}' not found in data. "
+                f"Available services (first 20): {', '.join(all_services_list[:20])}"
+            )
+        all_services_list = [args.msname]
+        print(f"Filtering to single service: {args.msname}")
 
     os.makedirs(args.out_dir, exist_ok=True)
 

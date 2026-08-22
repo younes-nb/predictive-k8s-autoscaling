@@ -597,6 +597,12 @@ def main():
         choices=["test", "val"],
         help="Which split to evaluate on (default: %(default)s)",
     )
+    p.add_argument(
+        "--msname",
+        type=str,
+        default=None,
+        help="Train/evaluate only on a specific microservice (msname). Passed through for logging consistency."
+    )
     p.add_argument("--preprocess_dir", default=None, help="Preprocessing output dir (for smoothing/swt/cskv)")
     p.add_argument("--smoothing_window", type=int, default=5, help="Moving average window size (for 'smoothing' approach)")
     p.add_argument("--seed", type=int, default=TRAINING.SEED, help="Random seed for reproducibility")
