@@ -508,11 +508,27 @@ def _run_csv_source(args, spec, feature_names, target_indices,
             all_services_list = sorted(json.load(f)["index"].keys())
         print(f"CSV service-array cache is valid: {len(all_services_list)} "
               f"services", flush=True)
+        if args.msname is not None:
+            if args.msname not in all_services_list:
+                raise SystemExit(
+                    f"Service '{args.msname}' not found in cached CSV index. "
+                    f"Available services (first 20): {', '.join(all_services_list[:20])}"
+                )
+            all_services_list = [args.msname]
+            print(f"Filtering to single service (CSV cache): {args.msname}")
     elif cache_valid:
         with open(index_path, "r") as f:
             all_services_list = sorted(json.load(f)["index"].keys())
         print(f"CSV service-array cache is valid: {len(all_services_list)} "
               f"services", flush=True)
+        if args.msname is not None:
+            if args.msname not in all_services_list:
+                raise SystemExit(
+                    f"Service '{args.msname}' not found in cached CSV index. "
+                    f"Available services (first 20): {', '.join(all_services_list[:20])}"
+                )
+            all_services_list = [args.msname]
+            print(f"Filtering to single service (CSV cache): {args.msname}")
     else:
         service_arrays = _load_csv_service_arrays(
             csv_path, feature_names, args.csv_time_col, args.csv_id_col,
@@ -528,6 +544,16 @@ def _run_csv_source(args, spec, feature_names, target_indices,
             print(f"Selected subset: {len(service_arrays)} services")
         else:
             print(f"Processing all {len(service_arrays)} services")
+
+        if args.msname is not None:
+            if args.msname not in service_arrays:
+                raise SystemExit(
+                    f"Service '{args.msname}' not found in CSV. "
+                    f"Available services (first 20): {', '.join(sorted(service_arrays.keys())[:20])}"
+                )
+            service_arrays = {args.msname: service_arrays[args.msname]}
+            print(f"Filtering to single service (CSV): {args.msname}")
+
         if not service_arrays:
             print("No services with enough data in CSV; nothing to do.")
             return
