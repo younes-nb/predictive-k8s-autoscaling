@@ -242,8 +242,6 @@ def main():
             cmd_pre.append("--recompute_preprocessing")
         cmd_pre.extend(["--preprocess_approach", args.preprocess_approach])
         cmd_pre.extend(["--smooth_window", str(args.smooth_window)])
-        if args.msname is not None:
-            cmd_pre.extend(["--msname", args.msname])
         if args.input_len != PREPROCESSING.INPUT_LEN:
             print(
                 f"\n[INFO] input_len={args.input_len} != default {PREPROCESSING.INPUT_LEN}; "
