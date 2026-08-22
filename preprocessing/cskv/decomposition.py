@@ -193,7 +193,7 @@ def decompose_service_signal(
             signal.astype(np.float32),
             zeros.astype(np.float32),
             zeros.astype(np.float32),
-        ]
+        ], None
 
     imfs, residue = ceemdan_decompose(signal, cfg.CEEMDAN_EPSILON, cfg.CEEMDAN_TRIALS)
     logger.debug("CEEMDAN produced %d IMFs.", imfs.shape[0])

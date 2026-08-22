@@ -292,6 +292,7 @@ def main():
         if args.preprocess_approach in ("swt", "cskv", "smoothing"):
             cmd_train.extend(["--preprocess_dir", os.path.join(args.windows_dir, args.preprocess_approach)])
             cmd_train.extend(["--dataset_workers", str(args.dataset_workers)])
+        cmd_train.extend(["--preprocess_approach", args.preprocess_approach])
         cmd_train.extend(["--hyperparam_optimizer", args.hyperparam_optimizer])
         cmd_train.extend(["--loss_mode", args.loss_mode])
         if args.last_step_only:
