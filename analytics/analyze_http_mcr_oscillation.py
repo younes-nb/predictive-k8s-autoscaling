@@ -21,22 +21,86 @@ from config.defaults import Paths, PREPROCESSING
 
 DEFAULT_SUBSET_SEED = 42
 DEFAULT_WINDOW_HOURS = 6
-DEFAULT_MIN_POINTS_RATIO = 0.5
-DEFAULT_MAX_LAG = 180
-DEFAULT_LAGS = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
-                15, 20, 30, 45, 60, 90, 120, 150, 180)
 SERVICE_INDEX_PATH = os.path.join(Paths.WINDOWS_DIR, "_service_index.json")
 SERVICE_ARRAYS_PATH = os.path.join(Paths.WINDOWS_DIR, "_service_arrays.npy")
 MS_PER_HOUR = 3_600_000
-# 0.8 * 13 days: build_windows.py slices every service timeline at
-# idx_val = int(n * (TRAIN_FRAC + VAL_FRAC)) and treats [idx_val, n) as the
-# test split. Timestamps are 1-minute buckets starting at day 0, so the test
-# split starts at TEST_START_MS (ms since day 0) for full-coverage services.
-TEST_START_MS = int(0.8 * 13 * 24 * MS_PER_HOUR)
 
 
 def log(msg: str) -> None:
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}", flush=True)
+
+
+def build_service_cache(con, mcr_dir):
+    """Build service cache files: _service_index.json and _service_arrays.npy.
+
+    The _service_index.json contains:
+      - "index": dict mapping msname to [length_of_timeline, timestamp_range]
+      - "train_frac": used by build_windows.py to derive splits
+      - "val_frac": used by build_windows.py to derive splits
+      - "stats": dict with per-service statistics (min, max, std, n_nonzero) for full sequence
+    
+    The _service_arrays.npy contains the actual http_mcr arrays for each service.
+    """
+    log("Building service cache (single query)...")
+
+    # Single query to get all data at once
+    sql = f"""
+        SELECT msname, timestamp, SUM(http_mcr) AS http_mcr_sum
+        FROM read_parquet('{mcr_dir}/*.parquet')
+        WHERE http_mcr IS NOT NULL
+        GROUP BY msname, timestamp
+        ORDER BY msname, timestamp
+    """
+    df = con.execute(sql).df()
+
+    # Group by msname and build arrays
+    grouped = df.groupby("msname")
+    names = list(grouped.groups.keys())
+    sizes = {name: len(group) for name, name, group in grouped}
+
+    index_data = {
+        "index": {},
+        "train_frac": PREPROCESSING.TRAIN_FRAC,
+        "val_frac": PREPROCESSING.VAL_FRAC,
+        "stats": {},  # Will store min, max, std, n_nonzero for each service
+    }
+
+    arrays_list = []
+    for msname in names:
+        group = grouped.get_group(msname)
+        length = len(group)
+        index_data["index"][msname] = [length, length]
+        
+        # Compute statistics for full sequence
+        http_mcr_series = group["http_mcr_sum"].values
+        g_min = float(http_mcr_series.min()) if len(http_mcr_series) > 0 else 0.0
+        g_max = float(http_mcr_series.max()) if len(http_mcr_series) > 0 else 0.0
+        std_mcr = float(http_mcr_series.std()) if len(http_mcr_series) > 0 else 0.0
+        n_nonzero = int((http_mcr_series > 0).sum()) if len(http_mcr_series) > 0 else 0
+        
+        index_data["stats"][msname] = {
+            "g_min": g_min,
+            "g_max": g_max,
+            "std_mcr": std_mcr,
+            "n_nonzero": n_nonzero,
+            "length": length,
+        }
+        
+        arrays_list.append(http_mcr_series)
+
+    # Stack all arrays into a single numpy array (variable lengths - use object array)
+    if arrays_list:
+        arrays_array = np.array(arrays_list, dtype=object)
+        if not os.path.exists(os.path.dirname(SERVICE_ARRAYS_PATH)):
+            os.makedirs(os.path.dirname(SERVICE_ARRAYS_PATH), exist_ok=True)
+        np.save(SERVICE_ARRAYS_PATH, arrays_array, allow_pickle=True)
+
+    # Save the index data to JSON
+    os.makedirs(os.path.dirname(SERVICE_INDEX_PATH), exist_ok=True)
+    with open(SERVICE_INDEX_PATH, "w") as f:
+        json.dump(index_data, f, indent=2)
+
+    log(f"Service cache built: {SERVICE_INDEX_PATH}, {SERVICE_ARRAYS_PATH}")
 
 
 def load_service_names():
@@ -68,8 +132,7 @@ def load_service_split_sizes():
 
 
 def query_mcrtmcr_oscillations(con, mcr_dir, window_ms, in_clause,
-                               split_frac, test_start_ms, expected_pts,
-                               svc_n_df, restrict_test=True):
+                                expected_pts, svc_n_df):
     """Scan every {window_ms}-long sliding segment of each service's http_mcr
     timeline (not just the last window) and return one row per
     (service, window end) with window stats.
@@ -80,15 +143,10 @@ def query_mcrtmcr_oscillations(con, mcr_dir, window_ms, in_clause,
     normalized http_mcr within the segment, i.e. std_mcr / (g_max - g_min);
     win_start/win_end are the actual first/last timestamps of the segment.
 
-    When restrict_test is True, only segments lying fully inside the model's
-    TEST split (as defined by build_windows.py) are candidates: candidate rows
-    are limited to timestamp >= test_start_ms, so every segment built from them
-    lies inside the test split. Otherwise every segment of the full timeline is
-    a candidate.
+    Every segment of the full timeline is a candidate.
 
     Assumes all services listed in in_clause are present in mcr_dir."""
     con.register("svc_n", svc_n_df)
-    cand_where = f" WHERE a.timestamp >= {test_start_ms}" if restrict_test else ""
     n_preceding = max(0, expected_pts - 1)
     sql = f"""
         WITH agg AS (
@@ -107,7 +165,6 @@ def query_mcrtmcr_oscillations(con, mcr_dir, window_ms, in_clause,
             SELECT a.msname, a.timestamp, a.http_mcr_sum
             FROM agg a
             JOIN maxes m ON a.msname = m.msname
-            {cand_where}
         ),
         wstats AS (
             SELECT msname, timestamp, http_mcr_sum,
@@ -130,14 +187,13 @@ def query_mcrtmcr_oscillations(con, mcr_dir, window_ms, in_clause,
                    w.std_mcr / NULLIF(w.g_max - w.g_min, 0) AS oscillation,
                    w.avg_mcr, w.std_mcr, w.win_start, w.win_end,
                    w.n_points, w.n_nonzero, w.g_min, w.g_max, m.max_ts,
-                   n.n AS n_rows,
-                   n.n - CAST(FLOOR({split_frac} * n.n) AS BIGINT) AS test_len
+                   n.n AS n_rows
             FROM wstats w
             LEFT JOIN maxes m ON w.msname = m.msname
             LEFT JOIN svc_n n ON w.msname = n.msname
         )
         SELECT msname, oscillation, avg_mcr, std_mcr, win_start, win_end,
-               n_points, n_nonzero, g_min, g_max, max_ts, test_len, n_rows
+               n_points, n_nonzero, g_min, g_max, max_ts, n_rows, n_rows AS test_len
         FROM final
         ORDER BY oscillation DESC
     """
@@ -145,80 +201,70 @@ def query_mcrtmcr_oscillations(con, mcr_dir, window_ms, in_clause,
     return df
 
 
-def query_mcr_series(con, mcr_dir, in_clause, test_start_ms, restrict_test=True):
-    """Fetch the per-minute http_mcr series for exactly the same candidate rows
-    used by query_mcrtmcr_oscillations (services with some non-zero load,
-    optionally restricted to the TEST split), ordered by (msname, timestamp)."""
-    cand_where = f" WHERE a.timestamp >= {test_start_ms}" if restrict_test else ""
-    sql = f"""
-        WITH agg AS (
-            SELECT msname, timestamp, SUM(http_mcr) AS http_mcr_sum
-            FROM read_parquet('{mcr_dir}/*.parquet')
-            WHERE msname IN ({in_clause}) AND http_mcr IS NOT NULL
-            GROUP BY msname, timestamp
-        ),
-        maxes AS (
-            SELECT msname, MAX(timestamp) AS max_ts
-            FROM agg
-            GROUP BY msname
-            HAVING MAX(http_mcr_sum) > 0
-        )
-        SELECT a.msname, a.timestamp, a.http_mcr_sum
-        FROM agg a
-        JOIN maxes m ON a.msname = m.msname
-        {cand_where}
-        ORDER BY a.msname, a.timestamp
+def load_cached_stats():
+    """Load per-service statistics from cached _service_index.json."""
+    with open(SERVICE_INDEX_PATH, "r") as f:
+        data = json.load(f)
+    return data.get("stats", {})
+
+
+def compute_full_sequence_oscillation_from_cache(names, sizes, min_points):
+    """Compute oscillation stats for each service from cached statistics.
+    
+    Much faster than querying parquet since we use precomputed stats.
     """
-    return con.execute(sql).df()
-
-
-def build_lags(max_lag, expected_pts):
-    """Autocorrelation lags to test, capped by --max_lag and by the window size
-    so a window of `expected_pts` minutes always leaves at least
-    expected_pts // 2 aligned pairs (below that the correlation is unreliable)."""
-    cap = min(max_lag, expected_pts // 2)
-    return [L for L in DEFAULT_LAGS if L <= cap]
-
-
-def compute_pattern_scores(series_df, expected_pts, lags):
-    """Periodic-pattern score per (msname, window-end).
-
-    pattern = max over the tested lags of |corr(x_t, x_{t-lag})| within the
-    trailing `expected_pts`-point window ending at each minute. For lag L the
-    correlation is taken over the W-L aligned pairs x_i vs x_{i-L} that lie
-    inside the window. Samples are centered by their own rolling window mean
-    before multiplying (numerically stable, keeps the score bounded by 1) and
-    everything vectorizes over the whole timeline via rolling operations.
-    Windows too short to carry a lag (or with zero variance) yield NaN."""
-    df = series_df.sort_values(["msname", "timestamp"]).reset_index(drop=True)
-    key = df["msname"]
-    x = df["http_mcr_sum"]
-
-    def roll_mean(s, win):
-        return (s.groupby(key).rolling(win, min_periods=win)
-                 .mean().reset_index(level=0, drop=True))
-
-    best = np.full(len(df), np.nan)
-    for L in lags:
-        n_pairs = expected_pts - L
-        if n_pairs < 2:
+    import numpy as np
+    
+    stats = load_cached_stats()  # Dict with per-service stats
+    
+    results = []
+    for msname in names:
+        if msname not in sizes:
             continue
-        # Center each sample by its own window mean before multiplying. This is
-        # numerically stable for near-constant series (avoids catastrophic
-        # cancellation when subtracting ~mean^2 from ~mean^2) at the cost of a
-        # slightly approximate window centering -- fine for a ranking heuristic.
-        cent = x - roll_mean(x, n_pairs)
-        centL = cent.groupby(key).shift(L)
-        num = roll_mean(cent * centL, n_pairs)
-        denom = np.sqrt(np.maximum(
-            (roll_mean(cent * cent, n_pairs)
-             * roll_mean(centL * centL, n_pairs)).to_numpy(), 0.0))
-        acf = num.to_numpy() / np.where(denom == 0.0, np.nan, denom)
-        best = np.fmax(best, np.abs(acf))
-
-    out = df[["msname", "timestamp"]].copy()
-    out["pattern"] = best
-    return out
+        n_rows = sizes[msname]
+        if n_rows < min_points:
+            continue
+         
+        # Get cached stats for this service
+        if msname not in stats:
+            continue
+        stat = stats[msname]
+        
+        g_min = stat["g_min"]
+        g_max = stat["g_max"]
+        std_mcr = stat["std_mcr"]
+        n_points = stat["length"]
+        n_nonzero = stat["n_nonzero"]
+        
+        if g_max - g_min == 0:
+            oscillation = 0.0
+        else:
+            oscillation = std_mcr / (g_max - g_min)
+        
+        # win_start and win_end: first and last timestamps of the service
+        # Since we don't store exact timestamps in stats, approximate:
+        # win_start = 0 (first minute), win_end = (n_rows-1) * 60_000 ms
+        win_start = 0
+        win_end = int((n_rows - 1) * 60_000)
+        max_ts = win_end
+        
+        results.append({
+            "msname": msname,
+            "oscillation": oscillation,
+            "avg_mcr": 0.0,
+            "std_mcr": std_mcr,
+            "win_start": win_start,
+            "win_end": win_end,
+            "n_points": n_points,
+            "n_nonzero": n_nonzero,
+            "g_min": g_min,
+            "g_max": g_max,
+            "max_ts": max_ts,
+            "n_rows": n_rows,
+            "test_len": n_rows,
+        })
+    
+    return pd.DataFrame(results)
 
 
 def query_winner_mcr(con, mcr_dir, msname, win_start, win_end):
@@ -304,12 +350,9 @@ def plot_timeseries(df_mcr: pd.DataFrame, df_res: pd.DataFrame,
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Scan every {--window_hours}-long sliding segment of each "
-        "service's http_mcr timeline (not just the last window) -- optionally "
-        "restricted to the model's TEST split as defined by build_windows.py "
-        "(--split) -- ranked by --score (oscillation, avg mcr, periodic pattern, "
-        "or combinations), and plot the winner's http_mcr plus CPU/memory "
-        "utilization for that window."
+        description="Analyze each service's full http_mcr timeline -- ranked by oscillation "
+        "(std of normalized http_mcr over sliding window of --window_hours, or over full sequence if not specified) "
+        "-- and plot the winner's http_mcr plus CPU/memory utilization for that window."
     )
     parser.add_argument("--parquet_dir", type=str, default=None,
                         help="Root containing msrtmcre/ and msresource/ subdirs. "
@@ -317,82 +360,43 @@ def parse_args():
     parser.add_argument("--max_services", type=int, default=None)
     parser.add_argument("--seed", type=int, default=DEFAULT_SUBSET_SEED)
     parser.add_argument("--out_dir", type=str, default=Paths.ANALYTICS_OUT_DIR)
-    parser.add_argument("--window_hours", type=float, default=DEFAULT_WINDOW_HOURS)
-    parser.add_argument("--min_points_ratio", type=float, default=DEFAULT_MIN_POINTS_RATIO)
-    parser.add_argument("--score", type=str, default="both",
-                        choices=["oscillation", "mcr", "both",
-                                 "pattern", "both_pattern"],
-                        help="Ranking score for the winner: 'oscillation' = highest "
-                             "normalized std (old behavior, may pick a low-load "
-                             "window), 'mcr' = highest average http_mcr, 'both' = "
-                             "product of oscillation and normalized avg_mcr, "
-                             "'pattern' = highest periodic-pattern score (peak "
-                             "|autocorrelation|), 'both_pattern' = oscillation * "
-                             "pattern (must both oscillate and be predictable).")
-    parser.add_argument("--max_lag", type=int, default=DEFAULT_MAX_LAG,
-                        help="Largest autocorrelation lag (minutes) considered "
-                             "for the periodic-pattern score (capped by window "
-                             "size).")
-    parser.add_argument("--split", type=str, default="test",
-                        choices=["test", "all"],
-                        help="Which part of the timeline to scan for candidate "
-                             "segments: 'test' = only segments fully inside the "
-                             "model's TEST split (default, mirrors "
-                             "build_windows.py), 'all' = scan the full timeline "
-                             "of every service.")
-    parser.add_argument("--train_frac", type=float, default=PREPROCESSING.TRAIN_FRAC)
-    parser.add_argument("--val_frac", type=float, default=PREPROCESSING.VAL_FRAC)
-    parser.add_argument("--test_start_ms", type=int, default=TEST_START_MS)
+    parser.add_argument("--window_hours", type=float, default=None,
+                        help="Window size in hours for oscillation calculation. "
+                             "If not specified, analyzes the full sequence for each service.")
+    parser.add_argument("--min_hours", type=float, default=1.0,
+                        help="Minimum hours of data required per service/window. "
+                             "In sliding window mode: minimum hours within window. "
+                             "In full sequence mode: minimum total hours of data per service.")
     return parser.parse_args()
 
 
+def format_relative(ms: int) -> str:
+    """Format milliseconds as relative days/hours/minutes from trace start (ms=0)."""
+    minutes = ms // 60_000
+    days = minutes // 1440
+    hours = (minutes % 1440) // 60
+    mins = minutes % 60
+    if days > 0:
+        return f"day {days} {hours:02d}:{mins:02d}"
+    elif hours > 0:
+        return f"{hours}h {mins:02d}m"
+    else:
+        return f"{mins}m"
+
+
 def print_eval_results(df: pd.DataFrame) -> None:
-    cols = ["msname", "oscillation", "avg_mcr", "std_mcr", "win_start", "win_end",
+    cols = ["msname", "oscillation", "std_mcr", "win_start", "win_end",
             "n_points", "n_nonzero", "g_min", "g_max", "max_ts", "test_len", "n_rows"]
     show = df.head(20).copy()
     for _, r in show.iterrows():
-        pat = f"pat={r['pattern']:.3f} " if pd.notna(r.get("pattern", np.nan)) else "pat=  n/a "
         print(f"{r['msname']:<12} {r['oscillation']:>7.3f} "
-              f"avg={r['avg_mcr']:>9.3g} std={r['std_mcr']:>9.3g} "
-              f"start={datetime.fromtimestamp(r['win_start']/1000):%Y-%m-%d %H:%M} "
-              f"end={datetime.fromtimestamp(r['win_end']/1000):%Y-%m-%d %H:%M} "
-              f"{pat}pts={int(r['n_points']):>3d} nz={int(r['n_nonzero']):>3d} "
+              f"std={r['std_mcr']:>9.3g} "
+              f"start={format_relative(r['win_start'])} "
+              f"end={format_relative(r['win_end'])} "
+              f"pts={int(r['n_points']):>3d} nz={int(r['n_nonzero']):>3d} "
               f"g=[{r['g_min']:.3g},{r['g_max']:.3g}] "
               f"test_len={int(r['test_len']):>4d} n_rows={int(r['n_rows']):>6d}")
     print()
-
-
-def compute_score(df: pd.DataFrame, mode: str) -> pd.DataFrame:
-    """Rank candidates by a score. `oscillation` is the std of the window's
-    min-max-normalized http_mcr (shape only, unitless); `avg_mcr` is the raw
-    average load over the window; `pattern` is the peak |autocorrelation| of
-    http_mcr over the tested lags (how periodic/predictable the curve is). Rank
-    by:
-      * oscillation:  current behavior (highest normalized std).
-      * mcr:          highest average load.
-      * both:         product of oscillation and min-max-normalized avg_mcr, so
-                      a window must be both oscillating AND carry meaningful load.
-      * pattern:      highest periodic-pattern score (windows with a repeating,
-                      predictable shape).
-      * both_pattern: oscillation * pattern, so a window must both oscillate AND
-                      be predictable.
-    """
-    df = df.copy()
-    if mode == "oscillation":
-        df["score"] = df["oscillation"]
-    elif mode == "mcr":
-        df["score"] = df["avg_mcr"]
-    elif mode == "pattern":
-        df = df.dropna(subset=["pattern"])
-        df["score"] = df["pattern"]
-    elif mode == "both_pattern":
-        df = df.dropna(subset=["pattern"])
-        df["score"] = df["oscillation"] * df["pattern"]
-    else:
-        span = df["avg_mcr"].max() - df["avg_mcr"].min()
-        mcr_norm = ((df["avg_mcr"] - df["avg_mcr"].min()) / span) if span > 0 else 0.0
-        df["score"] = df["oscillation"] * mcr_norm
-    return df.sort_values("score", ascending=False)
 
 
 def main():
@@ -401,9 +405,19 @@ def main():
     parquet_root = args.parquet_dir or Paths.PARQUET_ROOT
     mcr_dir = os.path.join(parquet_root, "msrtmcre")
     msresource_dir = os.path.join(parquet_root, "msresource")
-    window_ms = int(args.window_hours * MS_PER_HOUR)
-    expected = window_ms // 60_000 + 1
-    split_frac = args.train_frac + args.val_frac
+
+    con = duckdb.connect()
+    con.execute("SET threads TO 16")
+    con.execute("SET memory_limit = \"16GB\"")
+
+    # Use cached service info if available, otherwise build cache from parquet
+    idx_path = SERVICE_INDEX_PATH
+    arrays_path = SERVICE_ARRAYS_PATH
+    if not (os.path.exists(idx_path) and os.path.exists(arrays_path)):
+        log("Building service cache from parquet files...")
+        build_service_cache(con, mcr_dir)
+    else:
+        log("Loading service info from cache...")
 
     names = load_service_names()
 
@@ -421,33 +435,29 @@ def main():
 
     in_clause = ",".join(f"'{n}'" for n in names)
 
-    con = duckdb.connect()
-    con.execute("SET threads TO 16")
-    con.execute("SET memory_limit = \"16GB\"")
-
-    log("Scanning http_mcr (msrtmcre) across all sliding segments...")
-    df = query_mcrtmcr_oscillations(
-        con, mcr_dir, window_ms, in_clause, split_frac,
-        args.test_start_ms, expected, svc_n_df,
-        restrict_test=(args.split == "test"),
-    )
+    if args.window_hours is None:
+        log("Analyzing full http_mcr sequence from cached stats...")
+        min_points = int(args.min_hours * 60) + 1
+        df = compute_full_sequence_oscillation_from_cache(names, sizes, min_points)
+        window_size_for_filtering = None
+    else:
+        window_ms = int(args.window_hours * MS_PER_HOUR)
+        expected = window_ms // 60_000 + 1
+        log("Scanning http_mcr (msrtmcre) across all sliding segments...")
+        df = query_mcrtmcr_oscillations(
+            con, mcr_dir, window_ms, in_clause,
+            expected, svc_n_df,
+        )
+        window_size_for_filtering = expected
 
     log("Filtering candidates...")
     valid = df.dropna(subset=["oscillation"])
-    valid = valid[valid["n_points"] >= max(1, int(expected * args.min_points_ratio))]
-
-    if args.score in ("pattern", "both_pattern"):
-        log("Computing periodic-pattern (autocorrelation) scores...")
-        lags = build_lags(args.max_lag, expected)
-        series = query_mcr_series(con, mcr_dir, in_clause, args.test_start_ms,
-                                  restrict_test=(args.split == "test"))
-        pat = compute_pattern_scores(series, expected, lags)
-        valid = valid.merge(pat.rename(columns={"timestamp": "win_end"}),
-                            on=["msname", "win_end"], how="left")
-    else:
-        valid["pattern"] = np.nan
-
-    valid = compute_score(valid, args.score)
+    min_points = int(args.min_hours * 60) + 1
+    if args.window_hours is not None:
+        # Sliding window mode: filter by minimum points in window
+        valid = valid[valid["n_points"] >= min_points]
+    # For full sequence mode, filtering already done in compute_full_sequence_oscillation_from_cache
+    valid = valid.sort_values("oscillation", ascending=False)
     print_eval_results(valid)
 
     if valid.empty:
@@ -455,15 +465,22 @@ def main():
         return
 
     winner = valid.iloc[0]
-    pat_str = (f", pattern={winner['pattern']:.3f}"
-               if pd.notna(winner.get("pattern", np.nan)) else "")
-    log(f"Winner: {winner['msname']} "
-        f"(score={winner['score']:.3f}, oscillation={winner['oscillation']:.3f}, "
-        f"avg_mcr={winner['avg_mcr']:.3g}{pat_str}, window "
-        f"{datetime.fromtimestamp(winner['win_start']/1000):%Y-%m-%d %H:%M} -> "
-        f"{datetime.fromtimestamp(winner['win_end']/1000):%Y-%m-%d %H:%M}, "
-        f"test_len={int(winner['test_len'])} min, max_ts="
-        f"{datetime.fromtimestamp(winner['max_ts']/1000):%Y-%m-%d %H:%M})")
+    if args.window_hours is None:
+        log(f"Winner: {winner['msname']} "
+            f"(oscillation={winner['oscillation']:.3f}, "
+            f"std_mcr={winner['std_mcr']:.3g}, full sequence "
+            f"{format_relative(winner['win_start'])} -> "
+            f"{format_relative(winner['win_end'])}, "
+            f"length={int(winner['n_rows'])} min, max_ts="
+            f"{format_relative(winner['max_ts'])})")
+    else:
+        log(f"Winner: {winner['msname']} "
+            f"(oscillation={winner['oscillation']:.3f}, "
+            f"std_mcr={winner['std_mcr']:.3g}, window "
+            f"{format_relative(winner['win_start'])} -> "
+            f"{format_relative(winner['win_end'])}, "
+            f"test_len={int(winner['test_len'])} min, max_ts="
+            f"{format_relative(winner['max_ts'])})")
 
     ts_str = datetime.now().strftime("%Y%m%d_%H%M%S")
     out_dir = args.out_dir
@@ -483,7 +500,18 @@ def main():
 
     plot_timeseries(mcr_full, res_df, winner["msname"], out_dir, ts_str)
 
-    print(f"\nSaved outputs to {out_dir}/")
+    mcr_csv = f"{out_dir}/http_mcr_{winner['msname']}_{ts_str}.csv"
+    res_csv = f"{out_dir}/resource_{winner['msname']}_{ts_str}.csv"
+    mcr_png = f"{out_dir}/http_mcr_{winner['msname']}_{ts_str}.png"
+    cpu_png = f"{out_dir}/cpu_{winner['msname']}_{ts_str}.png"
+    mem_png = f"{out_dir}/memory_{winner['msname']}_{ts_str}.png"
+
+    print(f"\nSaved outputs:")
+    print(f"  {mcr_csv}")
+    print(f"  {res_csv}")
+    print(f"  {mcr_png}")
+    print(f"  {cpu_png}")
+    print(f"  {mem_png}")
 
 
 if __name__ == "__main__":
