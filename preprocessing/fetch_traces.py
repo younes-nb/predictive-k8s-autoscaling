@@ -3,8 +3,8 @@ import glob
 import json
 import os
 import sys
-import tarfile
 import subprocess
+import time
 
 import polars as pl
 import pyarrow.parquet as pq
@@ -35,352 +35,275 @@ def parse_dh(s: str):
 def compute_indices(start_date: str, end_date: str, ratio_min: int):
     sd, sh = parse_dh(start_date)
     ed, eh = parse_dh(end_date)
-
-    start_min = sd * 24 * 60 + sh * 60
-    end_min = ed * 24 * 60 + eh * 60
-    if end_min <= start_min:
-        raise ValueError("end_date must be after start_date")
-
-    start_idx = start_min // ratio_min
-    end_idx = end_min // ratio_min - 1
-    if end_idx < start_idx:
-        end_idx = start_idx
-    return start_idx, end_idx
+    start_idx = (sd * 24 * 60 + sh * 60) // ratio_min
+    end_idx = (ed * 24 * 60 + eh * 60) // ratio_min - 1
+    return start_idx, max(start_idx, end_idx)
 
 
-def download_file(url: str, dst_path: str, max_retries: int = 3) -> bool:
+def download_file(url: str, dst_path: str, max_retries: int = 5) -> bool:
     os.makedirs(os.path.dirname(dst_path), exist_ok=True)
+    for attempt in range(max_retries):
+        try:
+            result = subprocess.run(
+                ["curl", "-fL", "--retry", "3", "--retry-delay", "5", "--max-time", "300",
+                 "-o", dst_path, url],
+                timeout=400,
+                capture_output=True
+            )
+            if result.returncode == 0 and os.path.exists(dst_path):
+                size = os.path.getsize(dst_path)
+                if size > 1_000_000:  # At least 1MB
+                    return True
+                else:
+                    print(f"  Download too small ({size} bytes)", file=sys.stderr)
+            else:
+                print(f"  Download failed (attempt {attempt+1}/{max_retries}): {result.stderr.decode()[:100] if result.stderr else 'Unknown error'}", file=sys.stderr)
+        except subprocess.TimeoutExpired:
+            print(f"  Download timeout (attempt {attempt+1}/{max_retries})", file=sys.stderr)
+        except Exception as e:
+            print(f"  Download error (attempt {attempt+1}/{max_retries}): {e}", file=sys.stderr)
+        
+        try:
+            if os.path.exists(dst_path):
+                os.remove(dst_path)
+        except OSError:
+            pass
+        
+        if attempt < max_retries - 1:
+            time.sleep(2 ** attempt)  # Exponential backoff
+    
+    return False
 
-    dir_name = os.path.dirname(dst_path)
-    file_name = os.path.basename(dst_path)
 
-    cmd = [
-        "aria2c",
-        "-x",
-        "16",
-        "-s",
-        "16",
-        "-c",
-        "--check-certificate=false",
-        f"--max-tries={max_retries}",
-        f"--dir={dir_name}",
-        f"--out={file_name}",
-        url,
-    ]
-
-    print(f"Downloading {url} -> {dst_path} via aria2c...")
+def extract_tar(tar_path: str, raw_dir: str) -> str:
     try:
-        subprocess.run(cmd, check=True)
-        return True
-    except subprocess.CalledProcessError as e:
-        print(f"[WARN] Failed to download {url}: {e}", file=sys.stderr)
-        return False
-    except FileNotFoundError:
-        print(
-            "[ERROR] aria2c is not installed. Please install it.",
-            file=sys.stderr,
+        result = subprocess.run(
+            ["tar", "-xzf", tar_path, "-C", raw_dir],
+            timeout=180,
+            capture_output=True
         )
-        sys.exit(1)
-
-
-def extract_and_remove_tar(tar_path: str, out_dir: str) -> bool:
-    print(f"Extracting {tar_path} into {out_dir}")
-    try:
-        with tarfile.open(tar_path, "r:gz") as tar:
-            try:
-                tar.extractall(path=out_dir, filter="data")
-            except TypeError:
-                tar.extractall(path=out_dir)
-        os.remove(tar_path)
-        return True
+        if result.returncode == 0:
+            os.remove(tar_path)
+            # Extract the index from tar filename to get CSV name
+            # Format: mscallgraph_IDX_wID.tar.gz
+            basename = os.path.basename(tar_path)
+            parts = basename.split("_")
+            if len(parts) >= 3:
+                idx = parts[1]  # mscallgraph_IDX_wID
+                csv_name = f"CallGraph_{idx}.csv"
+                csv_path = os.path.join(raw_dir, csv_name)
+                if os.path.exists(csv_path):
+                    return csv_path
+            # Fallback: look for any CSV in the directory
+            csv_files = [f for f in os.listdir(raw_dir) if f.endswith('.csv') and f.startswith('CallGraph_')]
+            if csv_files:
+                return os.path.join(raw_dir, csv_files[0])
+        else:
+            print(f"  Extract failed: {result.stderr.decode()[:200] if result.stderr else 'Unknown error'}", file=sys.stderr)
     except Exception as e:
-        print(f"[WARN] Failed to extract {tar_path}: {e}", file=sys.stderr)
-        return False
+        print(f"  Extract error: {e}", file=sys.stderr)
+    return None
 
 
-def recover_orphan_parts(out_dir, raw_dir):
-    """Recover completed-but-unrenamed flush temps left by a crash.
-
-    A flush writes a temp parquet, drops a ``.tmp.done`` sentinel, deletes the
-    source CSVs, then renames the temp to its final name. If the process dies
-    in between, the temp (with sentinel) is promoted to its final part and any
-    remaining covered CSVs are removed; temps without a sentinel are discarded
-    (their CSVs are still present and will be re-ingested).
-    """
-    for done in glob.glob(os.path.join(out_dir, "part-*.parquet.tmp.done")):
-        try:
-            with open(done) as fh:
-                meta = json.load(fh)
-        except Exception:
-            print(f"[WARN] Unreadable sentinel {done}; leaving it.", file=sys.stderr)
-            continue
-
-        tmp = done[:-5]
-        final = os.path.join(out_dir, f"part-{meta['part']:05d}.parquet")
-        if os.path.exists(tmp) and not os.path.exists(final):
-            os.rename(tmp, final)
-            print(f"Recovered {tmp} -> {final}")
-
-        for name in meta.get("csvs", []):
-            p = os.path.join(raw_dir, name)
-            if os.path.exists(p):
-                try:
-                    os.remove(p)
-                except OSError as e:
-                    print(f"[WARN] Failed to remove {p}: {e}", file=sys.stderr)
-
-        try:
-            os.remove(done)
-        except OSError as e:
-            print(f"[WARN] Failed to remove {done}: {e}", file=sys.stderr)
-
-    for tmp in glob.glob(os.path.join(out_dir, "part-*.parquet.tmp")):
-        try:
-            os.remove(tmp)
-            print(f"Removed incomplete temp {tmp}")
-        except OSError as e:
-            print(f"[WARN] Failed to remove {tmp}: {e}", file=sys.stderr)
-
-
-def flush_batch(pending, out_dir, part_num, key_cols, feature_cols, scan_kwargs):
-    """Read pending CSV chunks into one Parquet part (zstd), then delete the CSVs.
-
-    Returns the next part index. Crash-safe: the part is written to a temp file
-    guarded by a ``.tmp.done`` sentinel and only renamed once the CSVs are gone,
-    so a re-run can recover or discard it without losing or duplicating data.
-    """
-    pending = [f for f in pending if os.path.exists(f)]
-    if not pending:
+def process_batch(pending_csv_paths, out_dir, part_num, key_cols, feature_cols, table, worker_id):
+    """Process a batch of CSV files into a parquet file."""
+    if not pending_csv_paths:
         return part_num
-
-    tmp_path = os.path.join(out_dir, f"part-{part_num:05d}.parquet.tmp")
-    done_path = tmp_path + ".done"
-    out_path = os.path.join(out_dir, f"part-{part_num:05d}.parquet")
-
-    needed = {"timestamp", *key_cols, *feature_cols}
-    select_cols = ["timestamp", "timestamp_dt", *key_cols, *feature_cols]
-    select_cols = list(dict.fromkeys(select_cols))
-    sort_cols = ["timestamp_dt", *key_cols]
-
-    writer = None
-    total_rows = 0
-    processed = []
-
+    
+    # Determine output path
+    out_dir_abs = DATASET_TABLES[table]["parquet_dir"]
+    existing_parts = glob.glob(os.path.join(out_dir_abs, f"part-*_w{worker_id}.parquet"))
+    current_part_num = len(existing_parts)
+    out_path = os.path.join(out_dir_abs, f"part-{current_part_num:05d}_w{worker_id}.parquet")
+    tmp_path = out_path + ".tmp"
+    
     try:
-        for f in pending:
-            print(f"  Ingesting {f} ...")
+        all_dfs = []
+        total_rows = 0
+        
+        for csv_path in pending_csv_paths:
             try:
-                df = pl.read_csv(f, **scan_kwargs)
-
-                missing = needed - set(df.columns)
-                if missing:
-                    print(f"  [WARN] missing columns {sorted(list(missing))}; skipping.")
-                    continue
-
-                df = df.drop_nulls(subset=list(needed))
-                if df.height == 0:
-                    continue
-
-                df = df.with_columns(
-                    pl.from_epoch(pl.col("timestamp") / 1000, time_unit="s").alias(
-                        "timestamp_dt"
-                    )
+                print(f"  Processing {os.path.basename(csv_path)} ...", end=" ", flush=True)
+                
+                # Read CSV with robust settings
+                df = pl.read_csv(
+                    csv_path,
+                    low_memory=True,
+                    try_parse_dates=False,
+                    infer_schema_length=0,
+                    truncate_ragged_lines=True,
+                    ignore_errors=True
                 )
-                df = df.select(select_cols).sort(sort_cols)
+                
                 if df.height == 0:
+                    print("empty")
                     continue
-
-                table = df.to_arrow()
-                if writer is None:
-                    writer = pq.ParquetWriter(
-                        tmp_path, table.schema, compression="zstd"
+                
+                # Filter for target services
+                if table == "mscallgraph":
+                    S = {"MS_15135", "MS_58542", "MS_30441", "MS_7951", "MS_48031", "MS_60792"}
+                    df = df.filter(
+                        pl.col("dm").is_in(S) | pl.col("um").is_in(S)
                     )
-                writer.write_table(table)
-                total_rows += table.num_rows
-                processed.append(f)
+                
+                if df.height == 0:
+                    print("filtered empty")
+                    continue
+                
+                # Convert timestamp to datetime
+                df = df.with_columns(
+                    pl.col("timestamp")
+                    .str.strip_chars()
+                    .cast(pl.Int64)
+                    .alias("ts_int")
+                )
+                df = df.with_columns(
+                    pl.from_epoch(pl.col("ts_int") // 1000, time_unit="s")
+                    .alias("timestamp_dt")
+                )
+                
+                # Select and order columns - be explicit to avoid duplicates
+                select_cols = ["timestamp", "timestamp_dt", "traceid", "rpc_id", "um", "dm", "rpctype", "rt", "service", "interface", "uminstanceid", "dminstanceid"]
+                available_cols = [c for c in select_cols if c in df.columns]
+                df = df.select(available_cols)
+                df = df.sort(["timestamp_dt", "traceid", "rpc_id"])
+                
+                if df.height == 0:
+                    print("no data after processing")
+                    continue
+                
+                all_dfs.append(df)
+                total_rows += df.height
+                print(f"{df.height} rows")
+                
             except Exception as e:
-                bad = f + ".bad"
-                print(f"[ERROR] Failed to ingest {f}: {e}", file=sys.stderr)
-                try:
-                    os.rename(f, bad)
-                except OSError:
-                    pass
-                raise RuntimeError(
-                    f"Batch flush failed on {f}; moved to {bad}. Re-run the fetch "
-                    "to resume; the incomplete temp will be discarded and this "
-                    "file retried."
-                ) from e
-    finally:
-        if writer is not None:
-            writer.close()
-
-    if not processed:
+                print(f"ERROR: {e}")
+        
+        if all_dfs:
+            # Combine all dataframes
+            combined = pl.concat(all_dfs) if len(all_dfs) > 1 else all_dfs[0]
+            if combined.height > 0:
+                # Write to temporary file then rename
+                combined.write_parquet(tmp_path, compression="zstd")
+                os.rename(tmp_path, out_path)
+                print(f"  Wrote {total_rows} rows to {os.path.basename(out_path)}")
+                return current_part_num + 1
+            else:
+                print("  No data to write")
+                return part_num
+        else:
+            print("  No valid dataframes")
+            return part_num
+            
+    except Exception as e:
+        print(f"  Batch processing error: {e}")
+        # Clean up temp file if it exists
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except:
+                pass
         return part_num
-
-    with open(done_path, "w") as fh:
-        json.dump(
-            {"part": part_num, "csvs": [os.path.basename(f) for f in processed]},
-            fh,
-        )
-
-    for f in processed:
-        try:
-            os.remove(f)
-        except OSError as e:
-            print(f"[WARN] Failed to remove {f}: {e}", file=sys.stderr)
-
-    os.rename(tmp_path, out_path)
-    os.remove(done_path)
-
-    print(f"  Wrote {total_rows} rows -> {out_path}")
-
-    return part_num + 1
 
 
 def main():
-    ap = argparse.ArgumentParser(
-        description="Download and extract Alibaba v2022 trace chunks."
-    )
-    ap.add_argument("--start_date", default="0d0", help="e.g. 0d0")
-    ap.add_argument("--end_date", default="7d0", help="e.g. 7d0")
-    ap.add_argument(
-        "--feature_set",
-        default=PREPROCESSING.FEATURE_SET,
-        choices=list(FEATURE_SETS.keys()),
-    )
-    ap.add_argument(
-        "--tables",
-        nargs="+",
-        default=None,
-    )
-    ap.add_argument(
-        "--ingest",
-        action="store_true",
-        help="Stream-consume mode: flush batches of extracted CSVs to Parquet "
-        "and delete them, so raw files never accumulate.",
-    )
-    ap.add_argument(
-        "--batch_size",
-        type=int,
-        default=20,
-        help="Chunks per Parquet flush when --ingest is set.",
-    )
-
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--start_date", default="0d0")
+    ap.add_argument("--end_date", default="7d0")
+    ap.add_argument("--feature_set", default=PREPROCESSING.FEATURE_SET if hasattr(PREPROCESSING, 'FEATURE_SET') else "cpu_mem_both")
+    ap.add_argument("--tables", nargs="+")
+    ap.add_argument("--ingest", action="store_true")
+    ap.add_argument("--batch_size", type=int, default=20)
+    ap.add_argument("--worker_id", type=int, default=0)
+    ap.add_argument("--n_workers", type=int, default=1)
+    
     args = ap.parse_args()
-
-    if args.tables is None:
-        needed_tables = sorted(list(tables_for_feature_set(args.feature_set)))
-    else:
-        needed_tables = list(args.tables)
-
+    
+    needed_tables = args.tables or sorted(list(tables_for_feature_set(args.feature_set)))
     print(f"Feature set: {args.feature_set}")
     print(f"Tables to fetch: {needed_tables}")
     print(f"Range: {args.start_date} -> {args.end_date}")
-
+    print(f"Worker {args.worker_id}/{args.n_workers}")
+    
+    scan_kwargs = dict(
+        low_memory=True,
+        try_parse_dates=False,
+        infer_schema_length=0,
+        truncate_ragged_lines=True,
+        ignore_errors=True,
+    )
+    
     for table in needed_tables:
-        if table not in DATASET_TABLES:
-            raise SystemExit(
-                f"Unknown table '{table}'. Add it to DATASET_TABLES in config/defaults.py"
-            )
-
         cfg = DATASET_TABLES[table]
         raw_dir = cfg["raw_dir"]
+        out_dir = cfg["parquet_dir"]
         os.makedirs(raw_dir, exist_ok=True)
-
-        try:
-            start_idx, end_idx = compute_indices(
-                args.start_date, args.end_date, int(cfg["ratio_min"])
-            )
-        except ValueError as e:
-            print("ERROR:", e, file=sys.stderr)
-            sys.exit(2)
-
-        print(f"\n=== TABLE {table} ===")
-        print(f"prefix={cfg['prefix']}")
-        print(f"indices: {start_idx} .. {end_idx}")
-        print(f"raw_dir: {raw_dir}")
-
+        os.makedirs(out_dir, exist_ok=True)
+        
+        start_idx, end_idx = compute_indices(args.start_date, args.end_date, int(cfg["ratio_min"]))
+        
+        # Worker splitting
+        all_indices = list(range(start_idx, end_idx + 1))
+        my_indices = [idx for i, idx in enumerate(all_indices) if i % args.n_workers == args.worker_id]
+        print(f"Worker {args.worker_id}: processing {len(my_indices)} chunks (indices {my_indices[0]} to {my_indices[-1]} if any)")
+        
         key_cols = list(cfg.get("key_cols", []))
-        pending = []
+        feature_cols = table_to_raw_columns(args.feature_set).get(table, [])
+        
         part_num = 0
-        scan_kwargs = dict(
-            low_memory=True,
-            try_parse_dates=False,
-            infer_schema_length=50000,
-        )
-
-        if args.ingest:
-            out_dir = cfg["parquet_dir"]
-            os.makedirs(out_dir, exist_ok=True)
-            recover_orphan_parts(out_dir, raw_dir)
-            feature_cols = table_to_raw_columns(args.feature_set).get(table, [])
-            if not feature_cols:
-                print(
-                    f"ERROR: feature_set='{args.feature_set}' provides no columns for "
-                    f"table='{table}'. Pass a feature set that includes columns for "
-                    f"this table.",
-                    file=sys.stderr,
-                )
-                sys.exit(2)
-            existing_parts = glob.glob(os.path.join(out_dir, "part-*.parquet"))
-            part_num = len(existing_parts)
-            print(
-                f"Ingest mode ON: existing parts={len(existing_parts)}, "
-                f"next part idx={part_num}, batch_size={args.batch_size}"
-            )
-            print(f"Ingesting columns: {feature_cols}")
-
-        def maybe_flush():
-            nonlocal pending, part_num
-            if args.ingest and len(pending) >= args.batch_size:
-                part_num = flush_batch(
-                    pending, out_dir, part_num, key_cols, feature_cols, scan_kwargs
-                )
-                pending = []
-
-        for idx in range(start_idx, end_idx + 1):
+        pending = []
+        pending_indices = []
+        
+        def _flush_batch(label):
+            nonlocal part_num, pending, pending_indices
+            if not pending:
+                return
+            print(f"  {label} of {len(pending)} files...")
+            old_part = part_num
+            part_num = process_batch(pending_csv_paths=pending, out_dir=out_dir, part_num=part_num, key_cols=key_cols, feature_cols=feature_cols, table=table, worker_id=args.worker_id)
+            if part_num > old_part:
+                for di in pending_indices:
+                    dp = os.path.join(out_dir, f"{table}_{di}.csv_done")
+                    with open(dp, 'w') as f:
+                        f.write("")
+            pending = []
+            pending_indices = []
+        
+        skipped = 0
+        for idx in my_indices:
+            csv_done = os.path.join(out_dir, f"{table}_{idx}.csv_done")
+            if os.path.exists(csv_done):
+                skipped += 1
+                continue
+            
             url = f"{BASE_URL}/{cfg['prefix']}_{idx}.tar.gz"
-            tar_path = os.path.join(raw_dir, f"{table}_{idx}.tar.gz")
-
-            base_prefix = os.path.basename(cfg["prefix"])
-            expected_csv_path = os.path.join(raw_dir, f"{base_prefix}_{idx}.csv")
-
-            marker_path = os.path.join(raw_dir, f"{table}_{idx}.extracted")
-
-            if os.path.exists(expected_csv_path):
-                if args.ingest:
-                    pending.append(expected_csv_path)
-                    maybe_flush()
-                continue
-
-            if os.path.exists(marker_path):
-                print(
-                    f"Data for {table} (idx {idx}) already extracted. Skipping download."
-                )
-                continue
-
-            if not os.path.exists(tar_path):
-                ok = download_file(url, tar_path, max_retries=10)
-                if not ok:
+            tar_path = os.path.join(raw_dir, f"{table}_{idx}_w{args.worker_id}.tar.gz")
+            csv_path = os.path.join(raw_dir, f"CallGraph_{idx}.csv")
+            
+            if not os.path.exists(csv_path):
+                print(f"  Downloading chunk {idx}...", end=" ", flush=True)
+                if download_file(url, tar_path):
+                    print("extracting...", end=" ", flush=True)
+                    result_csv_path = extract_tar(tar_path, raw_dir)
+                    if result_csv_path and os.path.exists(result_csv_path):
+                        print("done")
+                    else:
+                        print("extract failed")
+                        continue
+                else:
+                    print("download failed")
                     continue
-            else:
-                print(f"Tar already exists, reusing: {tar_path}")
-
-            ok = extract_and_remove_tar(tar_path, raw_dir)
-            if ok:
-                open(marker_path, "a").close()
-                if args.ingest:
-                    pending.append(expected_csv_path)
-                    maybe_flush()
-            else:
-                continue
-
-        if args.ingest and pending:
-            part_num = flush_batch(
-                pending, out_dir, part_num, key_cols, feature_cols, scan_kwargs
-            )
-
-    print("\nDone downloading and extracting.")
+            
+            pending.append(csv_path)
+            pending_indices.append(idx)
+            if len(pending) >= args.batch_size:
+                _flush_batch("Processing batch")
+        
+        if skipped:
+            print(f"  Skipped {skipped} already-parquetified chunks")
+        _flush_batch("Processing final batch")
+    
+    print("\nDone.")
 
 
 if __name__ == "__main__":
