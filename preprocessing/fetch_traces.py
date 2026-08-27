@@ -4,6 +4,8 @@ import os
 import sys
 import subprocess
 import time
+import tempfile
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 
 import polars as pl
 
@@ -37,86 +39,62 @@ def compute_indices(start_date: str, end_date: str, ratio_min: int):
     return start_idx, max(start_idx, end_idx)
 
 
-def download_file(url: str, dst_path: str, max_retries: int = 5) -> bool:
-    os.makedirs(os.path.dirname(dst_path), exist_ok=True)
-    for attempt in range(max_retries):
-        try:
-            result = subprocess.run(
-                ["curl", "-fL", "--retry", "3", "--retry-delay", "5", "--max-time", "300",
-                 "-o", dst_path, url],
-                timeout=400,
-                capture_output=True
-            )
-            if result.returncode == 0 and os.path.exists(dst_path):
-                size = os.path.getsize(dst_path)
-                if size > 1_000_000:
-                    return True
-                else:
-                    print(f"  Download too small ({size} bytes)", file=sys.stderr)
-            else:
-                print(f"  Download failed (attempt {attempt+1}/{max_retries}): {result.stderr.decode()[:100] if result.stderr else 'Unknown error'}", file=sys.stderr)
-        except subprocess.TimeoutExpired:
-            print(f"  Download timeout (attempt {attempt+1}/{max_retries})", file=sys.stderr)
-        except Exception as e:
-            print(f"  Download error (attempt {attempt+1}/{max_retries}): {e}", file=sys.stderr)
+def get_all_indices(args):
+    needed_tables = args.tables or sorted(list(tables_for_feature_set(args.feature_set)))
+    result = {}
+    for table in needed_tables:
+        cfg = DATASET_TABLES[table]
+        start_idx, end_idx = compute_indices(args.start_date, args.end_date, int(cfg["ratio_min"]))
+        result[table] = list(range(start_idx, end_idx + 1))
+    return needed_tables, result
 
+
+def _pool_extract_one(args):
+    tar_path, raw_dir, idx, use_pigz = args
+    csv_path = os.path.join(raw_dir, f"CallGraph_{idx}.csv")
+    try:
+        if use_pigz:
+            cmd = ["tar", "-xf", tar_path, "-C", raw_dir,
+                   "--use-compress-program=pigz"]
+        else:
+            cmd = ["tar", "-xzf", tar_path, "-C", raw_dir]
+        result = subprocess.run(cmd, timeout=None, capture_output=True)
+        if result.returncode == 0:
+            try:
+                os.remove(tar_path)
+            except OSError:
+                pass
+            if os.path.exists(csv_path):
+                return idx, csv_path, None
+            return idx, None, "CSV not found after extract"
+        else:
+            err = result.stderr.decode()[:200] if result.stderr else "unknown"
+            try:
+                os.remove(csv_path)
+            except OSError:
+                pass
+            return idx, None, f"tar failed: {err}"
+    except Exception as e:
         try:
-            if os.path.exists(dst_path):
-                os.remove(dst_path)
+            os.remove(csv_path)
         except OSError:
             pass
-
-        if attempt < max_retries - 1:
-            time.sleep(2 ** attempt)
-
-    return False
+        return idx, None, str(e)
 
 
-def extract_tar(tar_path: str, raw_dir: str) -> str:
-    try:
-        result = subprocess.run(
-            ["tar", "-xzf", tar_path, "-C", raw_dir],
-            timeout=180,
-            capture_output=True
-        )
-        if result.returncode == 0:
-            os.remove(tar_path)
-            basename = os.path.basename(tar_path)
-            parts = basename.split("_")
-            if len(parts) >= 3:
-                idx = parts[1]
-                csv_name = f"CallGraph_{idx}.csv"
-                csv_path = os.path.join(raw_dir, csv_name)
-                if os.path.exists(csv_path):
-                    return csv_path
-            csv_files = [f for f in os.listdir(raw_dir) if f.endswith('.csv') and f.startswith('CallGraph_')]
-            if csv_files:
-                return os.path.join(raw_dir, csv_files[0])
-        else:
-            print(f"  Extract failed: {result.stderr.decode()[:200] if result.stderr else 'Unknown error'}", file=sys.stderr)
-    except Exception as e:
-        print(f"  Extract error: {e}", file=sys.stderr)
-    return None
-
-
-def process_batch(pending_csv_paths, out_dir, part_num, key_cols, feature_cols, table, worker_id):
-    if not pending_csv_paths:
-        return part_num
-
+def _pool_ingest_one(args):
+    csv_paths, out_dir, table, worker_id, batch_idx = args
     out_dir_abs = DATASET_TABLES[table]["parquet_dir"]
-    existing_parts = glob.glob(os.path.join(out_dir_abs, f"part-*_w{worker_id}.parquet"))
-    current_part_num = len(existing_parts)
-    out_path = os.path.join(out_dir_abs, f"part-{current_part_num:05d}_w{worker_id}.parquet")
+    out_path = os.path.join(out_dir_abs, f"part-{batch_idx:05d}_w{worker_id}.parquet")
     tmp_path = out_path + ".tmp"
 
     try:
         all_dfs = []
         total_rows = 0
+        done_indices = []
 
-        for csv_path in pending_csv_paths:
+        for csv_path, idx in csv_paths:
             try:
-                print(f"  Processing {os.path.basename(csv_path)} ...", end=" ", flush=True)
-
                 df = pl.read_csv(
                     csv_path,
                     low_memory=True,
@@ -125,9 +103,8 @@ def process_batch(pending_csv_paths, out_dir, part_num, key_cols, feature_cols, 
                     truncate_ragged_lines=True,
                     ignore_errors=True
                 )
-
                 if df.height == 0:
-                    print("empty")
+                    done_indices.append(idx)
                     continue
 
                 if table == "mscallgraph":
@@ -137,7 +114,7 @@ def process_batch(pending_csv_paths, out_dir, part_num, key_cols, feature_cols, 
                     )
 
                 if df.height == 0:
-                    print("filtered empty")
+                    done_indices.append(idx)
                     continue
 
                 df = df.with_columns(
@@ -156,222 +133,232 @@ def process_batch(pending_csv_paths, out_dir, part_num, key_cols, feature_cols, 
                 df = df.select(available_cols)
                 df = df.sort(["timestamp_dt", "traceid", "rpc_id"])
 
-                if df.height == 0:
-                    print("no data after processing")
-                    continue
-
-                all_dfs.append(df)
-                total_rows += df.height
-                print(f"{df.height} rows")
-
+                if df.height > 0:
+                    all_dfs.append(df)
+                    total_rows += df.height
+                done_indices.append(idx)
             except Exception as e:
-                print(f"ERROR: {e}")
+                done_indices.append(idx)
 
         if all_dfs:
             combined = pl.concat(all_dfs) if len(all_dfs) > 1 else all_dfs[0]
             if combined.height > 0:
                 combined.write_parquet(tmp_path, compression="zstd")
                 os.rename(tmp_path, out_path)
-                print(f"  Wrote {total_rows} rows to {os.path.basename(out_path)}")
-                return current_part_num + 1
-            else:
-                print("  No data to write")
-                return part_num
-        else:
-            print("  No valid dataframes")
-            return part_num
+
+        return done_indices, total_rows, None
 
     except Exception as e:
-        print(f"  Batch processing error: {e}")
         if os.path.exists(tmp_path):
             try:
                 os.remove(tmp_path)
             except:
                 pass
-        return part_num
+        return [idx for _, idx in csv_paths], 0, str(e)
 
 
-def run_worker(args, worker_id):
-    needed_tables = args.tables or sorted(list(tables_for_feature_set(args.feature_set)))
+def phase1_download(args, needed_tables, all_indices):
+    from tqdm import tqdm
+
+    for table in needed_tables:
+        cfg = DATASET_TABLES[table]
+        raw_dir = cfg["raw_dir"]
+        os.makedirs(raw_dir, exist_ok=True)
+
+        indices = all_indices[table]
+        urls_to_download = []
+        for idx in indices:
+            tar_path = os.path.join(raw_dir, f"{table}_{idx}.tar.gz")
+            csv_path = os.path.join(raw_dir, f"CallGraph_{idx}.csv")
+            csv_done = os.path.join(cfg["parquet_dir"], f"{table}_{idx}.csv_done")
+            if os.path.exists(csv_done) or os.path.exists(csv_path) or os.path.exists(tar_path):
+                continue
+            url = f"{BASE_URL}/{cfg['prefix']}_{idx}.tar.gz"
+            urls_to_download.append((idx, url))
+
+        if not urls_to_download:
+            print(f"  [{table}] All chunks already downloaded/extracted, skipping phase 1")
+            continue
+
+        print(f"  [{table}] Downloading {len(urls_to_download)} chunks with aria2c...")
+
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, dir='/tmp') as f:
+            input_file = f.name
+            for idx, url in urls_to_download:
+                f.write(f"{url}\n")
+                f.write(f"  out={table}_{idx}.tar.gz\n")
+                f.write(f"  dir={raw_dir}\n")
+
+        try:
+            cmd = [
+                "aria2c",
+                "-i", input_file,
+                "-j", str(args.aria_concurrent),
+                "-x", str(args.aria_connections),
+                "-s", str(args.aria_connections),
+                "-k", "10M",
+                "-c",
+                "--max-tries=10",
+                "--retry-wait=10",
+                "--timeout=600",
+                "--auto-file-renaming=false",
+                "--console-log-level=warn",
+                "--summary-interval=30",
+            ]
+            proc = subprocess.run(cmd)
+            if proc.returncode != 0:
+                print(f"  [{table}] aria2c exited with code {proc.returncode}")
+        finally:
+            try:
+                os.remove(input_file)
+            except OSError:
+                pass
+
+
+def phase2_extract(args, needed_tables, all_indices):
+    from tqdm import tqdm
+
+    for table in needed_tables:
+        cfg = DATASET_TABLES[table]
+        raw_dir = cfg["raw_dir"]
+
+        tarballs = []
+        for idx in all_indices[table]:
+            csv_done = os.path.join(cfg["parquet_dir"], f"{table}_{idx}.csv_done")
+            csv_path = os.path.join(raw_dir, f"CallGraph_{idx}.csv")
+            tar_path = os.path.join(raw_dir, f"{table}_{idx}.tar.gz")
+            if os.path.exists(csv_done):
+                continue
+            if os.path.exists(tar_path):
+                if os.path.exists(csv_path):
+                    os.remove(csv_path)
+                tarballs.append((tar_path, raw_dir, idx, args.use_pigz))
+
+        if not tarballs:
+            print(f"  [{table}] No tarballs to extract, skipping phase 2")
+            continue
+
+        print(f"  [{table}] Extracting {len(tarballs)} tarballs ({args.extract_workers} threads)...")
+
+        with ThreadPoolExecutor(max_workers=args.extract_workers) as pool:
+            futures = {pool.submit(_pool_extract_one, t): t for t in tarballs}
+            with tqdm(total=len(futures), desc=f"  [{table}] Extract", unit="tar", ncols=80) as pbar:
+                for future in as_completed(futures):
+                    idx, csv_path, err = future.result()
+                    if err:
+                        print(f"\n  Extract failed idx={idx}: {err}", file=sys.stderr)
+                    pbar.update(1)
+
+
+def phase3_ingest(args, needed_tables, all_indices):
+    from tqdm import tqdm
 
     for table in needed_tables:
         cfg = DATASET_TABLES[table]
         raw_dir = cfg["raw_dir"]
         out_dir = cfg["parquet_dir"]
-        os.makedirs(raw_dir, exist_ok=True)
         os.makedirs(out_dir, exist_ok=True)
-
-        start_idx, end_idx = compute_indices(args.start_date, args.end_date, int(cfg["ratio_min"]))
-
-        all_indices = list(range(start_idx, end_idx + 1))
-        my_indices = [idx for i, idx in enumerate(all_indices) if i % args.n_workers == worker_id]
-        print(f"Worker {worker_id}: processing {len(my_indices)} chunks (indices {my_indices[0]} to {my_indices[-1]} if any)")
 
         key_cols = list(cfg.get("key_cols", []))
         feature_cols = table_to_raw_columns(args.feature_set).get(table, [])
 
-        part_num = 0
-        pending = []
-        pending_indices = []
-
-        def _flush_batch(label):
-            nonlocal part_num, pending, pending_indices
-            if not pending:
-                return
-            print(f"  {label} of {len(pending)} files...")
-            old_part = part_num
-            part_num = process_batch(pending_csv_paths=pending, out_dir=out_dir, part_num=part_num, key_cols=key_cols, feature_cols=feature_cols, table=table, worker_id=worker_id)
-            if part_num > old_part:
-                for di in pending_indices:
-                    dp = os.path.join(out_dir, f"{table}_{di}.csv_done")
-                    with open(dp, 'w') as f:
-                        f.write("")
-                if args.ingest:
-                    for csv in pending:
-                        try:
-                            os.remove(csv)
-                        except OSError:
-                            pass
-            pending = []
-            pending_indices = []
-
-        skipped = 0
-        for idx in my_indices:
+        indices_to_ingest = []
+        for idx in all_indices[table]:
             csv_done = os.path.join(out_dir, f"{table}_{idx}.csv_done")
             if os.path.exists(csv_done):
-                skipped += 1
                 continue
-
-            url = f"{BASE_URL}/{cfg['prefix']}_{idx}.tar.gz"
-            tar_path = os.path.join(raw_dir, f"{table}_{idx}_w{worker_id}.tar.gz")
             csv_path = os.path.join(raw_dir, f"CallGraph_{idx}.csv")
+            if os.path.exists(csv_path):
+                indices_to_ingest.append((csv_path, idx))
 
-            if not os.path.exists(csv_path):
-                print(f"  Downloading chunk {idx}...", end=" ", flush=True)
-                if download_file(url, tar_path):
-                    print("extracting...", end=" ", flush=True)
-                    result_csv_path = extract_tar(tar_path, raw_dir)
-                    if result_csv_path and os.path.exists(result_csv_path):
-                        print("done")
-                    else:
-                        print("extract failed")
-                        continue
-                else:
-                    print("download failed")
-                    continue
+        if not indices_to_ingest:
+            print(f"  [{table}] All chunks already ingested, skipping phase 3")
+            continue
 
-            pending.append(csv_path)
-            pending_indices.append(idx)
-            if len(pending) >= args.batch_size:
-                _flush_batch("Processing batch")
+        print(f"  [{table}] Ingesting {len(indices_to_ingest)} CSVs into parquet ({args.ingest_workers} workers)...")
 
-        if skipped:
-            print(f"  Skipped {skipped} already-parquetified chunks")
-        _flush_batch("Processing final batch")
+        existing_parts = glob.glob(os.path.join(out_dir, f"part-*_w*.parquet"))
+        batch_size = args.batch_size
+        batches = []
+        for i in range(0, len(indices_to_ingest), batch_size):
+            batch = indices_to_ingest[i:i+batch_size]
+            batches.append((batch, out_dir, table, 0, len(existing_parts) + len(batches)))
 
+        with ProcessPoolExecutor(max_workers=args.ingest_workers) as pool:
+            futures = {}
+            for batch_args in batches:
+                csv_paths, od, tbl, wid, batch_idx = batch_args
+                future = pool.submit(_pool_ingest_one, (csv_paths, od, tbl, wid, batch_idx))
+                futures[future] = batch_args
 
-def count_done_markers(out_dir, table, total):
-    count = 0
-    for f in os.listdir(out_dir):
-        if f.startswith(f"{table}_") and f.endswith(".csv_done"):
-            count += 1
-    return min(count, total)
-
-
-def spawn_workers(args):
-    needed_tables = args.tables or sorted(list(tables_for_feature_set(args.feature_set)))
-    total_chunks = 0
-    for table in needed_tables:
-        cfg = DATASET_TABLES[table]
-        start_idx, end_idx = compute_indices(args.start_date, args.end_date, int(cfg["ratio_min"]))
-        total_chunks += end_idx - start_idx + 1
-
-    print(f"Spawning {args.n_workers} workers for {total_chunks} total chunks")
-
-    cmd_base = [
-        sys.executable, os.path.abspath(__file__),
-        "--feature_set", args.feature_set,
-        "--start_date", args.start_date,
-        "--end_date", args.end_date,
-        "--batch_size", str(args.batch_size),
-        "--n_workers", str(args.n_workers),
-    ]
-    if args.tables:
-        cmd_base += ["--tables"] + args.tables
-    if args.ingest:
-        cmd_base.append("--ingest")
-
-    workers = []
-    for wid in range(args.n_workers):
-        cmd = cmd_base + ["--_worker_id", str(wid)]
-        log_path = f"/tmp/fetch_traces_w{wid}.log"
-        log_fh = open(log_path, "w")
-        p = subprocess.Popen(cmd, stdout=log_fh, stderr=subprocess.STDOUT)
-        workers.append((p, log_fh, wid, log_path))
-        print(f"  Worker {wid} started (pid={p.pid}, log={log_path})")
-
-    from tqdm import tqdm
-    with tqdm(total=total_chunks, desc="Fetching", unit="chunk", ncols=80) as pbar:
-        while any(p.poll() is None for p, _, _, _ in workers):
-            done = 0
-            for table in needed_tables:
-                out_dir = DATASET_TABLES[table]["parquet_dir"]
-                cfg = DATASET_TABLES[table]
-                start_idx, end_idx = compute_indices(args.start_date, args.end_date, int(cfg["ratio_min"]))
-                done += count_done_markers(out_dir, table, end_idx - start_idx + 1)
-            pbar.n = done
-            pbar.refresh()
-
-            alive = [p for p, _, _, _ in workers if p.poll() is None]
-            if not alive:
-                break
-            time.sleep(3)
-
-        for p, _, _, _ in workers:
-            p.wait()
-        pbar.n = total_chunks
-        pbar.refresh()
-
-    for _, fh, wid, log_path in workers:
-        fh.close()
-
-    failed = [(wid, log_path) for p, _, wid, log_path in workers if p.returncode != 0]
-    if failed:
-        print(f"\n{len(failed)} worker(s) failed:")
-        for wid, log_path in failed:
-            print(f"  Worker {wid}: see {log_path}")
-    else:
-        print(f"\nAll {args.n_workers} workers completed successfully.")
+            with tqdm(total=len(indices_to_ingest), desc=f"  [{table}] Ingest", unit="csv", ncols=80) as pbar:
+                for future in as_completed(futures):
+                    done_indices, total_rows, err = future.result()
+                    if err:
+                        print(f"\n  Ingest error: {err}", file=sys.stderr)
+                    for idx in done_indices:
+                        dp = os.path.join(out_dir, f"{table}_{idx}.csv_done")
+                        with open(dp, 'w') as f:
+                            f.write("")
+                    if args.ingest:
+                        csv_paths_batch, _, _, _, _ = futures[future]
+                        for csv_path, _ in csv_paths_batch:
+                            try:
+                                os.remove(csv_path)
+                            except OSError:
+                                pass
+                    pbar.update(len(done_indices))
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Download and ingest Alibaba trace chunks.")
+    ap = argparse.ArgumentParser(description="Download and ingest Alibaba trace chunks (3-phase pipeline).")
     ap.add_argument("--start_date", default="0d0")
     ap.add_argument("--end_date", default="7d0")
     ap.add_argument("--feature_set", default=PREPROCESSING.FEATURE_SET if hasattr(PREPROCESSING, 'FEATURE_SET') else "cpu_mem_both")
     ap.add_argument("--tables", nargs="+")
     ap.add_argument("--ingest", action="store_true", help="Delete CSVs after parquetification")
     ap.add_argument("--batch_size", type=int, default=20)
-    ap.add_argument("--n_workers", type=int, default=1)
-    ap.add_argument("--_worker_id", type=int, default=None, dest="worker_id",
-                    help=argparse.SUPPRESS)
+    ap.add_argument("--aria_concurrent", type=int, default=4, help="aria2c concurrent downloads (-j)")
+    ap.add_argument("--aria_connections", type=int, default=4, help="aria2c connections per file (-x/-s)")
+    ap.add_argument("--extract_workers", type=int, default=8, help="Thread pool size for tar extraction")
+    ap.add_argument("--ingest_workers", type=int, default=4, help="Process pool size for CSV->parquet")
+    ap.add_argument("--use_pigz", action="store_true", default=True, help="Use pigz for parallel tar decompression")
+    ap.add_argument("--skip_download", action="store_true", help="Skip phase 1 (download)")
+    ap.add_argument("--skip_extract", action="store_true", help="Skip phase 2 (extract)")
+    ap.add_argument("--skip_ingest", action="store_true", help="Skip phase 3 (ingest)")
 
     args = ap.parse_args()
 
-    if args.worker_id is not None:
-        worker_id = args.worker_id
-        print(f"Worker {worker_id}/{args.n_workers} (feature_set={args.feature_set})")
-        run_worker(args, worker_id)
-        print(f"\nWorker {worker_id} done.")
-    else:
-        needed_tables = args.tables or sorted(list(tables_for_feature_set(args.feature_set)))
-        print(f"Feature set: {args.feature_set}")
-        print(f"Tables: {needed_tables}")
-        print(f"Range: {args.start_date} -> {args.end_date}")
-        print(f"Workers: {args.n_workers}")
-        print(f"Ingest (rm CSVs): {args.ingest}")
-        spawn_workers(args)
-        print("\nDone.")
+    needed_tables, all_indices = get_all_indices(args)
+    total = sum(len(v) for v in all_indices.values())
+
+    print(f"Feature set: {args.feature_set}")
+    print(f"Tables: {needed_tables}")
+    print(f"Range: {args.start_date} -> {args.end_date}")
+    print(f"Total chunks: {total}")
+    print(f"aria2c: -j {args.aria_concurrent} -x {args.aria_connections}")
+    print(f"Extract threads: {args.extract_workers}")
+    print(f"Ingest workers: {args.ingest_workers}")
+    print(f"Ingest (rm CSVs): {args.ingest}")
+
+    t0 = time.time()
+
+    if not args.skip_download:
+        print(f"\n--- Phase 1: Download ---")
+        phase1_download(args, needed_tables, all_indices)
+
+    if not args.skip_extract:
+        print(f"\n--- Phase 2: Extract ---")
+        phase2_extract(args, needed_tables, all_indices)
+
+    if not args.skip_ingest:
+        print(f"\n--- Phase 3: Ingest ---")
+        phase3_ingest(args, needed_tables, all_indices)
+
+    elapsed = time.time() - t0
+    m, s = divmod(int(elapsed), 60)
+    h, m = divmod(m, 60)
+    print(f"\nDone in {h}h {m}m {s}s.")
 
 
 if __name__ == "__main__":
