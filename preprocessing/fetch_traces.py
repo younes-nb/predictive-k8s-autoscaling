@@ -351,12 +351,9 @@ def phase2_extract(args, needed_tables, all_indices):
             tar_path = os.path.join(raw_dir, f"{table}_{idx}.tar.gz")
             if os.path.exists(csv_done):
                 continue
+            if os.path.exists(csv_path):
+                continue
             if os.path.exists(tar_path):
-                if os.path.exists(csv_path):
-                    try:
-                        os.remove(csv_path)
-                    except OSError:
-                        pass
                 tarballs.append((tar_path, raw_dir, idx, args.use_pigz))
 
         if len(validated) > 0:
