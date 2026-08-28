@@ -195,6 +195,7 @@ def _find_corrupt_tars(args, table, raw_dir, indices):
 
     print(f"  [{table}] Validating {len(to_val)} tars in parallel...")
     corrupt = []
+    count = 0
     with ThreadPoolExecutor(max_workers=args.recheck_workers) as pool:
         futs = {pool.submit(_tar_ok, tp): idx for idx, tp in to_val}
         with tqdm(total=len(futs), desc=f"  [{table}] Validate", unit="tar", ncols=80, dynamic_ncols=True) as pbar:
@@ -205,6 +206,11 @@ def _find_corrupt_tars(args, table, raw_dir, indices):
                 else:
                     corrupt.append((idx, f"{BASE_URL}/{cfg['prefix']}_{idx}.tar.gz"))
                 pbar.update(1)
+                count += 1
+                if count % args.recheck_workers == 0:
+                    with open(cache, "w") as f:
+                        for i in sorted(validated):
+                            f.write(f"{i}\n")
 
     with open(cache, "w") as f:
         for idx in sorted(validated):
