@@ -352,14 +352,6 @@ def phase2_extract(args, needed_tables, all_indices):
             if os.path.exists(csv_done):
                 continue
             if os.path.exists(tar_path):
-                if args.recheck and idx not in validated:
-                    if not _tar_ok(tar_path):
-                        bad_tars.append(tar_path)
-                        continue
-                    validated.add(idx)
-                elif not args.recheck and not _tar_ok(tar_path):
-                    bad_tars.append(tar_path)
-                    continue
                 if os.path.exists(csv_path):
                     os.remove(csv_path)
                 tarballs.append((tar_path, raw_dir, idx, args.use_pigz))
@@ -369,22 +361,76 @@ def phase2_extract(args, needed_tables, all_indices):
                 for idx in sorted(validated):
                     f.write(f"{idx}\n")
 
-        if bad_tars:
-            print(f"  [{table}] {len(bad_tars)} tars still corrupt - run phase1 with --recheck or re-download:", file=sys.stderr)
         if not tarballs:
             print(f"  [{table}] No tarballs to extract, skipping phase 2")
             continue
 
         print(f"  [{table}] Extracting {len(tarballs)} tarballs ({args.extract_workers} threads)...")
 
+        failed = []
         with ThreadPoolExecutor(max_workers=args.extract_workers) as pool:
             futures = {pool.submit(_pool_extract_one, t): t for t in tarballs}
             with tqdm(total=len(futures), desc=f"  [{table}] Extract", unit="tar", ncols=80) as pbar:
                 for future in as_completed(futures):
                     idx, csv_path, err = future.result()
                     if err:
-                        print(f"\n  Extract failed idx={idx}: {err}", file=sys.stderr)
+                        failed.append((idx, f"{BASE_URL}/{cfg['prefix']}_{idx}.tar.gz"))
                     pbar.update(1)
+
+        if failed:
+            print(f"  [{table}] {len(failed)} tars failed extraction, re-downloading...")
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, dir='/tmp') as f:
+                input_file = f.name
+                for idx, url in failed:
+                    for stale in (raw_dir + f"/{table}_{idx}.tar.gz",
+                                  raw_dir + f"/{table}_{idx}.tar.gz.aria2"):
+                        try:
+                            if os.path.exists(stale):
+                                os.remove(stale)
+                        except OSError:
+                            pass
+                    f.write(f"{url}\n")
+                    f.write(f"  out={table}_{idx}.tar.gz\n")
+                    f.write(f"  dir={raw_dir}\n")
+                f.flush()
+            try:
+                cmd = [
+                    "aria2c",
+                    "-i", input_file,
+                    "-j", str(args.aria_concurrent),
+                    "-x", str(args.aria_connections),
+                    "-s", str(args.aria_connections),
+                    "-k", "10M",
+                    "--max-tries=10",
+                    "--retry-wait=10",
+                    "--timeout=600",
+                    "--auto-file-renaming=false",
+                    "--console-log-level=warn",
+                    "--summary-interval=30",
+                ]
+                subprocess.run(cmd)
+            finally:
+                try:
+                    os.remove(input_file)
+                except OSError:
+                    pass
+
+            retry = []
+            for idx, url in failed:
+                tar_path = os.path.join(raw_dir, f"{table}_{idx}.tar.gz")
+                csv_path = os.path.join(raw_dir, f"CallGraph_{idx}.csv")
+                if os.path.exists(csv_path):
+                    os.remove(csv_path)
+                retry.append((tar_path, raw_dir, idx, args.use_pigz))
+            if retry:
+                with ThreadPoolExecutor(max_workers=args.extract_workers) as pool:
+                    futures = {pool.submit(_pool_extract_one, t): t for t in retry}
+                    with tqdm(total=len(futures), desc=f"  [{table}] Re-extract", unit="tar", ncols=80) as pbar:
+                        for future in as_completed(futures):
+                            idx, csv_path, err = future.result()
+                            if err:
+                                print(f"\n  STILL FAILED idx={idx}: {err}", file=sys.stderr)
+                            pbar.update(1)
 
 
 def phase3_ingest(args, needed_tables, all_indices):
