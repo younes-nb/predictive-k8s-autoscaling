@@ -185,7 +185,7 @@ def _find_corrupt_tars(args, table, raw_dir, indices):
     corrupt = []
     with ThreadPoolExecutor(max_workers=args.recheck_workers) as pool:
         futs = {pool.submit(_tar_ok, tp): idx for idx, tp in to_val}
-        with tqdm(total=len(futs), desc=f"  [{table}] Validate", unit="tar", ncols=80) as pbar:
+        with tqdm(total=len(futs), desc=f"  [{table}] Validate", unit="tar", ncols=80, dynamic_ncols=True) as pbar:
             for fut in as_completed(futs):
                 idx = futs[fut]
                 if not fut.result():
@@ -278,6 +278,13 @@ def phase2_extract(args, needed_tables, all_indices):
                 with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, dir='/tmp') as f:
                     input_file = f.name
                     for idx, url in corrupt:
+                        for stale in (raw_dir + f"/{table}_{idx}.tar.gz",
+                                      raw_dir + f"/{table}_{idx}.tar.gz.aria2"):
+                            try:
+                                if os.path.exists(stale):
+                                    os.remove(stale)
+                            except OSError:
+                                pass
                         f.write(f"{url}\n")
                         f.write(f"  out={table}_{idx}.tar.gz\n")
                         f.write(f"  dir={raw_dir}\n")
