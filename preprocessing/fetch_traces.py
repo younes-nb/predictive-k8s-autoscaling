@@ -157,6 +157,62 @@ def _pool_ingest_one(args):
         return [idx for _, idx in csv_paths], 0, str(e)
 
 
+def _tar_ok(tar_path):
+    try:
+        r = subprocess.run(["pigz", "-t", tar_path], capture_output=True)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def _find_corrupt_tars(args, table, raw_dir, indices):
+    from tqdm import tqdm
+    cfg = DATASET_TABLES[table]
+    to_val = []
+    for idx in indices:
+        tar_path = os.path.join(raw_dir, f"{table}_{idx}.tar.gz")
+        csv_path = os.path.join(raw_dir, f"CallGraph_{idx}.csv")
+        csv_done = os.path.join(cfg["parquet_dir"], f"{table}_{idx}.csv_done")
+        if os.path.exists(csv_done) or os.path.exists(csv_path):
+            continue
+        if os.path.exists(tar_path):
+            to_val.append((idx, tar_path))
+
+    if not to_val:
+        return []
+
+    print(f"  [{table}] Validating {len(to_val)} tars in parallel...")
+    corrupt = []
+    with ThreadPoolExecutor(max_workers=args.recheck_workers) as pool:
+        futs = {pool.submit(_tar_ok, tp): idx for idx, tp in to_val}
+        with tqdm(total=len(futs), desc=f"  [{table}] Validate", unit="tar", ncols=80) as pbar:
+            for fut in as_completed(futs):
+                idx = futs[fut]
+                if not fut.result():
+                    corrupt.append((idx, f"{BASE_URL}/{cfg['prefix']}_{idx}.tar.gz"))
+                pbar.update(1)
+    return corrupt
+
+
+def _collect_downloads(args, table, raw_dir, indices, include_corrupt):
+    cfg = DATASET_TABLES[table]
+    urls_to_download = []
+    for idx in indices:
+        tar_path = os.path.join(raw_dir, f"{table}_{idx}.tar.gz")
+        csv_path = os.path.join(raw_dir, f"CallGraph_{idx}.csv")
+        csv_done = os.path.join(cfg["parquet_dir"], f"{table}_{idx}.csv_done")
+        if os.path.exists(csv_done) or os.path.exists(csv_path):
+            continue
+        if os.path.exists(tar_path):
+            if include_corrupt:
+                if not _tar_ok(tar_path):
+                    urls_to_download.append((idx, f"{BASE_URL}/{cfg['prefix']}_{idx}.tar.gz"))
+            continue
+        url = f"{BASE_URL}/{cfg['prefix']}_{idx}.tar.gz"
+        urls_to_download.append((idx, url))
+    return urls_to_download
+
+
 def phase1_download(args, needed_tables, all_indices):
     from tqdm import tqdm
 
@@ -166,15 +222,7 @@ def phase1_download(args, needed_tables, all_indices):
         os.makedirs(raw_dir, exist_ok=True)
 
         indices = all_indices[table]
-        urls_to_download = []
-        for idx in indices:
-            tar_path = os.path.join(raw_dir, f"{table}_{idx}.tar.gz")
-            csv_path = os.path.join(raw_dir, f"CallGraph_{idx}.csv")
-            csv_done = os.path.join(cfg["parquet_dir"], f"{table}_{idx}.csv_done")
-            if os.path.exists(csv_done) or os.path.exists(csv_path) or os.path.exists(tar_path):
-                continue
-            url = f"{BASE_URL}/{cfg['prefix']}_{idx}.tar.gz"
-            urls_to_download.append((idx, url))
+        urls_to_download = _collect_downloads(args, table, raw_dir, indices, include_corrupt=False)
 
         if not urls_to_download:
             print(f"  [{table}] All chunks already downloaded/extracted, skipping phase 1")
@@ -222,7 +270,42 @@ def phase2_extract(args, needed_tables, all_indices):
         cfg = DATASET_TABLES[table]
         raw_dir = cfg["raw_dir"]
 
+        if args.recheck:
+            print(f"  [{table}] Validating tars (recheck corrupt)...")
+            corrupt = _find_corrupt_tars(args, table, raw_dir, all_indices[table])
+            if corrupt:
+                print(f"  [{table}] Re-downloading {len(corrupt)} corrupt tars...")
+                with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, dir='/tmp') as f:
+                    input_file = f.name
+                    for idx, url in corrupt:
+                        f.write(f"{url}\n")
+                        f.write(f"  out={table}_{idx}.tar.gz\n")
+                        f.write(f"  dir={raw_dir}\n")
+                try:
+                    cmd = [
+                        "aria2c",
+                        "-i", input_file,
+                        "-j", str(args.aria_concurrent),
+                        "-x", str(args.aria_connections),
+                        "-s", str(args.aria_connections),
+                        "-k", "10M",
+                        "--max-tries=10",
+                        "--retry-wait=10",
+                        "--timeout=600",
+                        "--auto-file-renaming=false",
+                        "--console-log-level=warn",
+                        "--summary-interval=30",
+                    ]
+                    subprocess.run(cmd)
+                finally:
+                    try:
+                        os.remove(input_file)
+                    except OSError:
+                        pass
+                print(f"  [{table}] Done re-downloading. Re-validating...")
+
         tarballs = []
+        bad_tars = []
         for idx in all_indices[table]:
             csv_done = os.path.join(cfg["parquet_dir"], f"{table}_{idx}.csv_done")
             csv_path = os.path.join(raw_dir, f"CallGraph_{idx}.csv")
@@ -230,10 +313,15 @@ def phase2_extract(args, needed_tables, all_indices):
             if os.path.exists(csv_done):
                 continue
             if os.path.exists(tar_path):
+                if not args.recheck and not _tar_ok(tar_path):
+                    bad_tars.append(tar_path)
+                    continue
                 if os.path.exists(csv_path):
                     os.remove(csv_path)
                 tarballs.append((tar_path, raw_dir, idx, args.use_pigz))
 
+        if bad_tars:
+            print(f"  [{table}] {len(bad_tars)} tars still corrupt - run phase1 with --recheck or re-download:", file=sys.stderr)
         if not tarballs:
             print(f"  [{table}] No tarballs to extract, skipping phase 2")
             continue
@@ -323,6 +411,8 @@ def main():
     ap.add_argument("--extract_workers", type=int, default=8, help="Thread pool size for tar extraction")
     ap.add_argument("--ingest_workers", type=int, default=4, help="Process pool size for CSV->parquet")
     ap.add_argument("--use_pigz", action="store_true", default=True, help="Use pigz for parallel tar decompression")
+    ap.add_argument("--recheck", action="store_true", help="Validate existing tars with pigz -t and re-download corrupt ones before extraction")
+    ap.add_argument("--recheck_workers", type=int, default=16, help="Parallel workers for tar validation")
     ap.add_argument("--skip_download", action="store_true", help="Skip phase 1 (download)")
     ap.add_argument("--skip_extract", action="store_true", help="Skip phase 2 (extract)")
     ap.add_argument("--skip_ingest", action="store_true", help="Skip phase 3 (ingest)")
