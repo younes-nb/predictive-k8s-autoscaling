@@ -168,6 +168,15 @@ def _tar_ok(tar_path):
 def _find_corrupt_tars(args, table, raw_dir, indices):
     from tqdm import tqdm
     cfg = DATASET_TABLES[table]
+    cache = os.path.join(cfg["parquet_dir"], f"_{table}_validated.txt")
+    validated = set()
+    if os.path.exists(cache):
+        with open(cache) as f:
+            for line in f:
+                line = line.strip()
+                if line.isdigit():
+                    validated.add(int(line))
+
     to_val = []
     for idx in indices:
         tar_path = os.path.join(raw_dir, f"{table}_{idx}.tar.gz")
@@ -176,9 +185,12 @@ def _find_corrupt_tars(args, table, raw_dir, indices):
         if os.path.exists(csv_done) or os.path.exists(csv_path):
             continue
         if os.path.exists(tar_path):
+            if idx in validated:
+                continue
             to_val.append((idx, tar_path))
 
     if not to_val:
+        print(f"  [{table}] No new tars to validate")
         return []
 
     print(f"  [{table}] Validating {len(to_val)} tars in parallel...")
@@ -188,9 +200,16 @@ def _find_corrupt_tars(args, table, raw_dir, indices):
         with tqdm(total=len(futs), desc=f"  [{table}] Validate", unit="tar", ncols=80, dynamic_ncols=True) as pbar:
             for fut in as_completed(futs):
                 idx = futs[fut]
-                if not fut.result():
+                if fut.result():
+                    validated.add(idx)
+                else:
                     corrupt.append((idx, f"{BASE_URL}/{cfg['prefix']}_{idx}.tar.gz"))
                 pbar.update(1)
+
+    with open(cache, "w") as f:
+        for idx in sorted(validated):
+            f.write(f"{idx}\n")
+    print(f"  [{table}] Validated {len(validated)} OK, {len(corrupt)} corrupt")
     return corrupt
 
 
@@ -313,6 +332,13 @@ def phase2_extract(args, needed_tables, all_indices):
 
         tarballs = []
         bad_tars = []
+        cache = os.path.join(cfg["parquet_dir"], f"_{table}_validated.txt")
+        validated = set()
+        if os.path.exists(cache):
+            with open(cache) as f:
+                for line in f:
+                    if line.strip().isdigit():
+                        validated.add(int(line.strip()))
         for idx in all_indices[table]:
             csv_done = os.path.join(cfg["parquet_dir"], f"{table}_{idx}.csv_done")
             csv_path = os.path.join(raw_dir, f"CallGraph_{idx}.csv")
@@ -320,12 +346,22 @@ def phase2_extract(args, needed_tables, all_indices):
             if os.path.exists(csv_done):
                 continue
             if os.path.exists(tar_path):
-                if not args.recheck and not _tar_ok(tar_path):
+                if args.recheck and idx not in validated:
+                    if not _tar_ok(tar_path):
+                        bad_tars.append(tar_path)
+                        continue
+                    validated.add(idx)
+                elif not args.recheck and not _tar_ok(tar_path):
                     bad_tars.append(tar_path)
                     continue
                 if os.path.exists(csv_path):
                     os.remove(csv_path)
                 tarballs.append((tar_path, raw_dir, idx, args.use_pigz))
+
+        if len(validated) > 0:
+            with open(cache, "w") as f:
+                for idx in sorted(validated):
+                    f.write(f"{idx}\n")
 
         if bad_tars:
             print(f"  [{table}] {len(bad_tars)} tars still corrupt - run phase1 with --recheck or re-download:", file=sys.stderr)
