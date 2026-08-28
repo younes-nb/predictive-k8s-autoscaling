@@ -49,10 +49,75 @@ def get_all_indices(args):
     return needed_tables, result
 
 
+import ctypes
+_ALIGN = 4096
+_mmap = __import__("mmap")
+
+
+def _odirect_write_stream(proc, csv_path):
+    """Write proc.stdout (decompressed CSV stream) to csv_path using O_DIRECT
+    aligned writes. Returns bytes written or raises on error."""
+    BLK = 4 * 1024 * 1024
+    fd = os.open(csv_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_DIRECT, 0o644)
+    total = 0
+    try:
+        while True:
+            chunk = proc.stdout.read(BLK)
+            if not chunk:
+                break
+            n = ((len(chunk) + _ALIGN - 1) // _ALIGN) * _ALIGN
+            buf = _mmap.mmap(-1, n)
+            try:
+                buf[:len(chunk)] = chunk
+                view = memoryview(buf)
+                off = 0
+                while off < n:
+                    w = os.write(fd, view[off:off + 0x200000])
+                    off += w
+                del view
+            finally:
+                buf.close()
+            total += len(chunk)
+        os.fsync(fd)
+    finally:
+        if os.path.exists(csv_path) and os.path.getsize(csv_path) != total:
+            os.truncate(csv_path, total)
+        os.close(fd)
+    return total
+
+
 def _pool_extract_one(args):
-    tar_path, raw_dir, idx, use_pigz = args
+    tar_path, raw_dir, idx, use_pigz, odirect = args
     csv_path = os.path.join(raw_dir, f"CallGraph_{idx}.csv")
     try:
+        if odirect:
+            member = f"CallGraph_{idx}.csv"
+            cmd = ["tar", "-xOzf", tar_path, member] if not use_pigz else \
+                  ["tar", "-xO", "--use-compress-program=pigz", "-f", tar_path, member]
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            try:
+                _odirect_write_stream(proc, csv_path)
+            except Exception:
+                try:
+                    os.remove(csv_path)
+                except OSError:
+                    pass
+                proc.kill()
+                proc.wait()
+                raise
+            rc = proc.wait()
+            if rc != 0:
+                err = proc.stderr.read().decode()[:200] if proc.stderr else "unknown"
+                try:
+                    os.remove(csv_path)
+                except OSError:
+                    pass
+                return idx, None, f"tar failed: {err}"
+            try:
+                os.remove(tar_path)
+            except OSError:
+                pass
+            return idx, csv_path, None
         if use_pigz:
             cmd = ["tar", "-xf", tar_path, "-C", raw_dir,
                    "--use-compress-program=pigz"]
@@ -354,7 +419,7 @@ def phase2_extract(args, needed_tables, all_indices):
             if os.path.exists(csv_path):
                 continue
             if os.path.exists(tar_path):
-                tarballs.append((tar_path, raw_dir, idx, args.use_pigz))
+                tarballs.append((tar_path, raw_dir, idx, args.use_pigz, args.extract_odirect))
 
         if len(validated) > 0:
             with open(cache, "w") as f:
@@ -421,7 +486,7 @@ def phase2_extract(args, needed_tables, all_indices):
                 csv_path = os.path.join(raw_dir, f"CallGraph_{idx}.csv")
                 if os.path.exists(csv_path):
                     os.remove(csv_path)
-                retry.append((tar_path, raw_dir, idx, args.use_pigz))
+                retry.append((tar_path, raw_dir, idx, args.use_pigz, args.extract_odirect))
             if retry:
                 with ThreadPoolExecutor(max_workers=args.extract_workers) as pool:
                     futures = {pool.submit(_pool_extract_one, t): t for t in retry}
@@ -504,6 +569,7 @@ def main():
     ap.add_argument("--aria_concurrent", type=int, default=4, help="aria2c concurrent downloads (-j)")
     ap.add_argument("--aria_connections", type=int, default=4, help="aria2c connections per file (-x/-s)")
     ap.add_argument("--extract_workers", type=int, default=8, help="Thread pool size for tar extraction")
+    ap.add_argument("--extract_odirect", action="store_true", default=False, help="Write extracted CSVs with O_DIRECT (avoids page-cache/journal overload that triggers SAN read-only remounts)")
     ap.add_argument("--ingest_workers", type=int, default=4, help="Process pool size for CSV->parquet")
     ap.add_argument("--use_pigz", action="store_true", default=True, help="Use pigz for parallel tar decompression")
     ap.add_argument("--recheck", action="store_true", help="Validate existing tars with pigz -t and re-download corrupt ones before extraction")
