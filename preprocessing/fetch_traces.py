@@ -433,14 +433,81 @@ def phase2_extract(args, needed_tables, all_indices):
         print(f"  [{table}] Extracting {len(tarballs)} tarballs ({args.extract_workers} threads)...")
 
         failed = []
-        with ThreadPoolExecutor(max_workers=args.extract_workers) as pool:
-            futures = {pool.submit(_pool_extract_one, t): t for t in tarballs}
-            with tqdm(total=len(futures), desc=f"  [{table}] Extract", unit="tar", ncols=80) as pbar:
-                for future in as_completed(futures):
-                    idx, csv_path, err = future.result()
+        if args.live_ingest:
+            out_dir = cfg["parquet_dir"]
+            os.makedirs(out_dir, exist_ok=True)
+            existing_parts = glob.glob(os.path.join(out_dir, f"part-*_w*.parquet"))
+            part_counter = [len(existing_parts)]
+            pending_buf = []
+            ingest_futures = {}
+            ingest_paths = {}
+            ingest_pg = tqdm(total=0, desc=f"  [{table}] Live-ingest", unit="csv", ncols=80, position=1) if args.live_ingest else None
+
+            def drain_ingests():
+                for fut in list(ingest_futures):
+                    if not fut.done():
+                        continue
+                    done_indices, total_rows, err = ingest_futures.pop(fut).result()
                     if err:
-                        failed.append((idx, f"{BASE_URL}/{cfg['prefix']}_{idx}.tar.gz"))
-                    pbar.update(1)
+                        print(f"\n  Ingest error: {err}", file=sys.stderr)
+                    for idx in done_indices:
+                        dp = os.path.join(out_dir, f"{table}_{idx}.csv_done")
+                        try:
+                            with open(dp, 'w') as f:
+                                f.write("")
+                        except OSError:
+                            pass
+                    if args.ingest:
+                        for _, (csv_path, _) in ingest_paths.pop(fut, []):
+                            try:
+                                os.remove(csv_path)
+                            except OSError:
+                                pass
+                    ingest_pg.update(len(done_indices))
+
+            with ThreadPoolExecutor(max_workers=args.extract_workers) as pool:
+                futures = {pool.submit(_pool_extract_one, t): t for t in tarballs}
+                with ProcessPoolExecutor(max_workers=args.ingest_workers) as igpool:
+                    with tqdm(total=len(futures), desc=f"  [{table}] Extract", unit="tar", ncols=80) as pbar:
+                        for future in as_completed(futures):
+                            idx, csv_path, err = future.result()
+                            if err:
+                                failed.append((idx, f"{BASE_URL}/{cfg['prefix']}_{idx}.tar.gz"))
+                            else:
+                                pending_buf.append((csv_path, idx))
+                                if len(pending_buf) >= args.batch_size:
+                                    batch = pending_buf[:]
+                                    pending_buf = []
+                                    fut = igpool.submit(_pool_ingest_one,
+                                        (batch, out_dir, table, 0, part_counter[0]))
+                                    part_counter[0] += 1
+                                    ingest_futures[fut] = batch
+                                    ingest_paths[fut] = batch
+                                    ingest_pg.total += len(batch)
+                            pbar.update(1)
+                            drain_ingests()
+
+                # drain remaining buffer + any in-flight ingests
+                if pending_buf:
+                    batch = pending_buf[:]
+                    pending_buf = []
+                    fut = igpool.submit(_pool_ingest_one, (batch, out_dir, table, 0, part_counter[0]))
+                    part_counter[0] += 1
+                    ingest_futures[fut] = batch
+                    ingest_paths[fut] = batch
+                    ingest_pg.total += len(batch)
+                while ingest_futures:
+                    drain_ingests()
+                    time.sleep(0.5)
+        else:
+            with ThreadPoolExecutor(max_workers=args.extract_workers) as pool:
+                futures = {pool.submit(_pool_extract_one, t): t for t in tarballs}
+                with tqdm(total=len(futures), desc=f"  [{table}] Extract", unit="tar", ncols=80) as pbar:
+                    for future in as_completed(futures):
+                        idx, csv_path, err = future.result()
+                        if err:
+                            failed.append((idx, f"{BASE_URL}/{cfg['prefix']}_{idx}.tar.gz"))
+                        pbar.update(1)
 
         if failed:
             print(f"  [{table}] {len(failed)} tars failed extraction, re-downloading...")
@@ -570,6 +637,7 @@ def main():
     ap.add_argument("--aria_connections", type=int, default=4, help="aria2c connections per file (-x/-s)")
     ap.add_argument("--extract_workers", type=int, default=8, help="Thread pool size for tar extraction")
     ap.add_argument("--extract_odirect", action="store_true", default=False, help="Write extracted CSVs with O_DIRECT (avoids page-cache/journal overload that triggers SAN read-only remounts)")
+    ap.add_argument("--live_ingest", action="store_true", default=False, help="Ingest extracted CSVs to parquet in batches as they complete, instead of one big ingest pass after all extraction")
     ap.add_argument("--ingest_workers", type=int, default=4, help="Process pool size for CSV->parquet")
     ap.add_argument("--use_pigz", action="store_true", default=True, help="Use pigz for parallel tar decompression")
     ap.add_argument("--recheck", action="store_true", help="Validate existing tars with pigz -t and re-download corrupt ones before extraction")
