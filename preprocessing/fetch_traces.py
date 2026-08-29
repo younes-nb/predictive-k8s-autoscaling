@@ -666,6 +666,12 @@ def main():
         print(f"\n--- Phase 1: Download ---")
         phase1_download(args, needed_tables, all_indices)
 
+    # Ingest any already-extracted CSVs FIRST to free disk space, then the
+    # extract+live-ingest pass handles the rest (batched, deleting CSVs).
+    if not args.skip_ingest and not args.skip_extract:
+        print(f"\n--- Phase 0: Ingest existing CSVs first ---")
+        phase3_ingest(args, needed_tables, all_indices)
+
     if not args.skip_extract:
         print(f"\n--- Phase 2: Extract ---")
         phase2_extract(args, needed_tables, all_indices)
