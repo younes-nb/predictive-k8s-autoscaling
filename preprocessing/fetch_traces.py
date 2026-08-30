@@ -221,7 +221,7 @@ def _pool_ingest_one(args):
                 os.remove(tmp_path)
             except:
                 pass
-        return [idx for _, idx in csv_paths], 0, str(e)
+        return [], 0, str(e)
 
 
 def _tar_ok(tar_path):
@@ -460,12 +460,14 @@ def phase2_extract(args, needed_tables, all_indices):
                                 f.write("")
                         except OSError:
                             pass
-                    if args.ingest:
+                    if args.ingest and not err:
                         for _, (csv_path, _) in ingest_paths.pop(fut, []):
                             try:
                                 os.remove(csv_path)
                             except OSError:
                                 pass
+                    else:
+                        ingest_paths.pop(fut, None)
                     ingest_pg.update(len(done_indices))
 
             with ThreadPoolExecutor(max_workers=args.extract_workers) as pool:
@@ -618,7 +620,7 @@ def phase3_ingest(args, needed_tables, all_indices):
                         dp = os.path.join(out_dir, f"{table}_{idx}.csv_done")
                         with open(dp, 'w') as f:
                             f.write("")
-                    if args.ingest:
+                    if args.ingest and not err:
                         csv_paths_batch, _, _, _, _ = futures[future]
                         for csv_path, _ in csv_paths_batch:
                             try:
