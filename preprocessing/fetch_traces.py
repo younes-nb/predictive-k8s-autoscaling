@@ -1,5 +1,6 @@
 import argparse
 import glob
+import multiprocessing as mp
 import os
 import sys
 import subprocess
@@ -8,6 +9,8 @@ import tempfile
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 
 import polars as pl
+
+_INGEST_CTX = mp.get_context("spawn")
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, os.pardir))
@@ -149,8 +152,7 @@ def _pool_extract_one(args):
 
 def _pool_ingest_one(args):
     csv_paths, out_dir, table, worker_id, batch_idx = args
-    out_dir_abs = DATASET_TABLES[table]["parquet_dir"]
-    out_path = os.path.join(out_dir_abs, f"part-{batch_idx:05d}_w{worker_id}.parquet")
+    out_path = os.path.join(out_dir, f"part-{batch_idx:05d}_w{worker_id}.parquet")
     tmp_path = out_path + ".tmp"
 
     try:
@@ -447,7 +449,8 @@ def phase2_extract(args, needed_tables, all_indices):
                 for fut in list(ingest_futures):
                     if not fut.done():
                         continue
-                    done_indices, total_rows, err = ingest_futures.pop(fut).result()
+                    done_indices, total_rows, err = fut.result()
+                    ingest_futures.pop(fut)
                     if err:
                         print(f"\n  Ingest error: {err}", file=sys.stderr)
                     for idx in done_indices:
@@ -467,7 +470,7 @@ def phase2_extract(args, needed_tables, all_indices):
 
             with ThreadPoolExecutor(max_workers=args.extract_workers) as pool:
                 futures = {pool.submit(_pool_extract_one, t): t for t in tarballs}
-                with ProcessPoolExecutor(max_workers=args.ingest_workers) as igpool:
+                with ProcessPoolExecutor(max_workers=args.ingest_workers, mp_context=_INGEST_CTX) as igpool:
                     with tqdm(total=len(futures), desc=f"  [{table}] Extract", unit="tar", ncols=80) as pbar:
                         for future in as_completed(futures):
                             idx, csv_path, err = future.result()
@@ -599,7 +602,7 @@ def phase3_ingest(args, needed_tables, all_indices):
             batch = indices_to_ingest[i:i+batch_size]
             batches.append((batch, out_dir, table, 0, len(existing_parts) + len(batches)))
 
-        with ProcessPoolExecutor(max_workers=args.ingest_workers) as pool:
+        with ProcessPoolExecutor(max_workers=args.ingest_workers, mp_context=_INGEST_CTX) as pool:
             futures = {}
             for batch_args in batches:
                 csv_paths, od, tbl, wid, batch_idx = batch_args
