@@ -1,6 +1,7 @@
 import argparse
 import glob
 import multiprocessing as mp
+import concurrent.futures
 import os
 import sys
 import subprocess
@@ -97,7 +98,9 @@ def _pool_extract_one(args):
             member = f"CallGraph_{idx}.csv"
             cmd = ["tar", "-xOzf", tar_path, member] if not use_pigz else \
                   ["tar", "-xO", "--use-compress-program=pigz", "-f", tar_path, member]
-            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            stderr_path = csv_path + ".err"
+            err_fd = os.open(stderr_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=err_fd)
             try:
                 _odirect_write_stream(proc, csv_path)
             except Exception:
@@ -107,15 +110,35 @@ def _pool_extract_one(args):
                     pass
                 proc.kill()
                 proc.wait()
+                try:
+                    os.close(err_fd)
+                except OSError:
+                    pass
                 raise
             rc = proc.wait()
+            try:
+                os.close(err_fd)
+            except OSError:
+                pass
             if rc != 0:
-                err = proc.stderr.read().decode()[:200] if proc.stderr else "unknown"
+                try:
+                    with open(stderr_path, 'r', errors='replace') as f:
+                        err = f.read()[:200]
+                except OSError:
+                    err = "unknown"
                 try:
                     os.remove(csv_path)
                 except OSError:
                     pass
+                try:
+                    os.remove(stderr_path)
+                except OSError:
+                    pass
                 return idx, None, f"tar failed: {err}"
+            try:
+                os.remove(stderr_path)
+            except OSError:
+                pass
             try:
                 os.remove(tar_path)
             except OSError:
@@ -439,7 +462,13 @@ def phase2_extract(args, needed_tables, all_indices):
                 for fut in list(ingest_futures):
                     if not fut.done():
                         continue
-                    done_indices, total_rows, err = fut.result()
+                    try:
+                        done_indices, total_rows, err = fut.result(timeout=3600)
+                    except concurrent.futures.TimeoutError:
+                        print("\n  Ingest worker timed out (3600s); will retry on next run", file=sys.stderr)
+                        continue
+                    except Exception as e:
+                        done_indices, total_rows, err = [], 0, str(e)
                     ingest_futures.pop(fut)
                     if err:
                         print(f"\n  Ingest error: {err}", file=sys.stderr)
@@ -462,7 +491,8 @@ def phase2_extract(args, needed_tables, all_indices):
 
             with ThreadPoolExecutor(max_workers=args.extract_workers) as pool:
                 futures = {pool.submit(_pool_extract_one, t): t for t in tarballs}
-                with ProcessPoolExecutor(max_workers=args.ingest_workers, mp_context=_INGEST_CTX) as igpool:
+                igpool = ProcessPoolExecutor(max_workers=args.ingest_workers, mp_context=_INGEST_CTX)
+                try:
                     with tqdm(total=len(futures), desc=f"  [{table}] Extract", unit="tar", ncols=80) as pbar:
                         for future in as_completed(futures):
                             idx, csv_path, err = future.result()
@@ -482,18 +512,29 @@ def phase2_extract(args, needed_tables, all_indices):
                             pbar.update(1)
                             drain_ingests()
 
-                # drain remaining buffer + any in-flight ingests
-                if pending_buf:
-                    batch = pending_buf[:]
-                    pending_buf = []
-                    fut = igpool.submit(_pool_ingest_one, (batch, out_dir, table, 0, part_counter[0]))
-                    part_counter[0] += 1
-                    ingest_futures[fut] = batch
-                    ingest_paths[fut] = batch
-                    ingest_pg.total += len(batch)
-                while ingest_futures:
-                    drain_ingests()
-                    time.sleep(0.5)
+                    # drain remaining buffer + any in-flight ingests, bounded
+                    if pending_buf:
+                        batch = pending_buf[:]
+                        pending_buf = []
+                        fut = igpool.submit(_pool_ingest_one, (batch, out_dir, table, 0, part_counter[0]))
+                        part_counter[0] += 1
+                        ingest_futures[fut] = batch
+                        ingest_paths[fut] = batch
+                        ingest_pg.total += len(batch)
+                    drain_deadline = time.time() + max(args.ingest_stall_timeout, 60 * 60)
+                    while ingest_futures:
+                        drain_ingests()
+                        if not ingest_futures:
+                            break
+                        if time.time() > drain_deadline:
+                            stuck = [idx for lst in ingest_futures.values() for _, idx in lst]
+                            print(f"\n  Live-ingest drain timed out after {int(args.ingest_stall_timeout)}s; "
+                                  f"{len(stuck)} indices left queued (will retry next run): {sorted(stuck)[:20]}...",
+                                  file=sys.stderr)
+                            break
+                        time.sleep(0.5)
+                finally:
+                    igpool.shutdown(wait=False, cancel_futures=True)
         else:
             with ThreadPoolExecutor(max_workers=args.extract_workers) as pool:
                 futures = {pool.submit(_pool_extract_one, t): t for t in tarballs}
@@ -594,7 +635,8 @@ def phase3_ingest(args, needed_tables, all_indices):
             batch = indices_to_ingest[i:i+batch_size]
             batches.append((batch, out_dir, table, 0, len(existing_parts) + len(batches)))
 
-        with ProcessPoolExecutor(max_workers=args.ingest_workers, mp_context=_INGEST_CTX) as pool:
+        pool = ProcessPoolExecutor(max_workers=args.ingest_workers, mp_context=_INGEST_CTX)
+        try:
             futures = {}
             for batch_args in batches:
                 csv_paths, od, tbl, wid, batch_idx = batch_args
@@ -603,7 +645,13 @@ def phase3_ingest(args, needed_tables, all_indices):
 
             with tqdm(total=len(indices_to_ingest), desc=f"  [{table}] Ingest", unit="csv", ncols=80) as pbar:
                 for future in as_completed(futures):
-                    done_indices, total_rows, err = future.result()
+                    try:
+                        done_indices, total_rows, err = future.result(timeout=3600)
+                    except concurrent.futures.TimeoutError:
+                        print("\n  Ingest worker timed out (3600s); will retry on next run", file=sys.stderr)
+                        continue
+                    except Exception as e:
+                        done_indices, total_rows, err = [], 0, str(e)
                     if err:
                         print(f"\n  Ingest error: {err}", file=sys.stderr)
                     for idx in done_indices:
@@ -618,6 +666,8 @@ def phase3_ingest(args, needed_tables, all_indices):
                             except OSError:
                                 pass
                     pbar.update(len(done_indices))
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
 
 
 def main():
@@ -634,6 +684,7 @@ def main():
     ap.add_argument("--extract_odirect", action="store_true", default=False, help="Write extracted CSVs with O_DIRECT (avoids page-cache/journal overload that triggers SAN read-only remounts)")
     ap.add_argument("--live_ingest", action="store_true", default=False, help="Ingest extracted CSVs to parquet in batches as they complete, instead of one big ingest pass after all extraction")
     ap.add_argument("--ingest_workers", type=int, default=4, help="Process pool size for CSV->parquet")
+    ap.add_argument("--ingest_stall_timeout", type=int, default=3600, help="Seconds to keep draining in-flight live-ingest futures before abandoning stalled ones (avoids hang)")
     ap.add_argument("--use_pigz", action="store_true", default=True, help="Use pigz for parallel tar decompression")
     ap.add_argument("--recheck", action="store_true", help="Validate existing tars with pigz -t and re-download corrupt ones before extraction")
     ap.add_argument("--recheck_workers", type=int, default=16, help="Parallel workers for tar validation")
