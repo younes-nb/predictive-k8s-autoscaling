@@ -174,16 +174,6 @@ def _pool_ingest_one(args):
                     done_indices.append(idx)
                     continue
 
-                if table == "mscallgraph":
-                    S = {"MS_15135", "MS_58542", "MS_30441", "MS_7951", "MS_48031", "MS_60792"}
-                    df = df.filter(
-                        pl.col("dm").is_in(S) | pl.col("um").is_in(S)
-                    )
-
-                if df.height == 0:
-                    done_indices.append(idx)
-                    continue
-
                 df = df.with_columns(
                     pl.col("timestamp")
                     .str.strip_chars()
