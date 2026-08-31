@@ -226,6 +226,51 @@ def _pool_ingest_one(args):
     return done_indices, total_rows, None
 
 
+def _pool_ingest_one_one_csv(args):
+    csv_path, out_dir, table, worker_id, part_idx = args
+    part_path = os.path.join(out_dir, f"part-{part_idx:05d}_w{worker_id}.parquet")
+    tmp_path = part_path + ".tmp"
+    try:
+        df = pl.read_csv(
+            csv_path,
+            low_memory=True,
+            try_parse_dates=False,
+            infer_schema_length=0,
+            truncate_ragged_lines=True,
+            ignore_errors=True
+        )
+        if df.height == 0:
+            idx = int(os.path.basename(csv_path).split("_")[1].split(".")[0])
+            return idx, part_path, None
+        df = df.with_columns(
+            pl.col("timestamp").str.strip_chars().cast(pl.Int64).alias("ts_int")
+        )
+        df = df.with_columns(
+            pl.from_epoch(pl.col("ts_int") // 1000, time_unit="s").alias("timestamp_dt")
+        )
+        select_cols = ["timestamp", "timestamp_dt", "traceid", "rpc_id", "um", "dm", "rpctype", "rt", "service", "interface", "uminstanceid", "dminstanceid"]
+        available_cols = [c for c in select_cols if c in df.columns]
+        df = df.select(available_cols)
+        df = df.sort(["timestamp_dt", "traceid", "rpc_id"])
+        if df.height > 0:
+            df.write_parquet(tmp_path, compression="zstd")
+            os.rename(tmp_path, part_path)
+        del df
+        idx = int(os.path.basename(csv_path).split("_")[1].split(".")[0])
+        return idx, part_path, None
+    except Exception as e:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except:
+                pass
+        try:
+            idx = int(os.path.basename(csv_path).split("_")[1].split(".")[0])
+        except Exception:
+            idx = -1
+        return idx, None, str(e)
+
+
 def _pool_extract_and_ingest_one(args):
     tar_path, out_dir, table, idx, worker_id, part_idx, use_pigz = args
     import io
@@ -662,43 +707,43 @@ def phase3_ingest(args, needed_tables, all_indices):
         print(f"  [{table}] Ingesting {len(indices_to_ingest)} CSVs into parquet ({args.ingest_workers} workers)...")
 
         existing_parts = glob.glob(os.path.join(out_dir, f"part-*_w*.parquet"))
-        batch_size = args.batch_size
-        batches = []
-        for i in range(0, len(indices_to_ingest), batch_size):
-            batch = indices_to_ingest[i:i+batch_size]
-            batches.append((batch, out_dir, table, 0, len(existing_parts) + i))
+        work_items = []
+        for i, (csv_path, idx) in enumerate(indices_to_ingest):
+            work_items.append((csv_path, out_dir, table, 0, len(existing_parts) + i))
 
         pool = ProcessPoolExecutor(max_workers=args.ingest_workers, mp_context=_INGEST_CTX)
         try:
             futures = {}
-            for batch_args in batches:
-                csv_paths, od, tbl, wid, batch_idx = batch_args
-                future = pool.submit(_pool_ingest_one, (csv_paths, od, tbl, wid, batch_idx))
-                futures[future] = batch_args
+            for item in work_items:
+                future = pool.submit(_pool_ingest_one_one_csv, item)
+                futures[future] = item
 
             with tqdm(total=len(indices_to_ingest), desc=f"  [{table}] Ingest", unit="csv", ncols=80) as pbar:
                 for future in as_completed(futures):
                     try:
-                        done_indices, total_rows, err = future.result(timeout=3600)
+                        idx, part_path, err = future.result(timeout=3600)
                     except concurrent.futures.TimeoutError:
                         print("\n  Ingest worker timed out (3600s); will retry on next run", file=sys.stderr)
+                        pbar.update(1)
                         continue
                     except Exception as e:
-                        done_indices, total_rows, err = [], 0, str(e)
+                        idx, part_path, err = None, None, str(e)
                     if err:
-                        print(f"\n  Ingest error: {err}", file=sys.stderr)
-                    for idx in done_indices:
+                        print(f"\n  Ingest error idx={idx}: {err}", file=sys.stderr)
+                    else:
                         dp = os.path.join(out_dir, f"{table}_{idx}.csv_done")
-                        with open(dp, 'w') as f:
-                            f.write("")
-                    if args.ingest and not err:
-                        csv_paths_batch, _, _, _, _ = futures[future]
-                        for csv_path, _ in csv_paths_batch:
+                        try:
+                            with open(dp, 'w') as f:
+                                f.write("")
+                        except OSError:
+                            pass
+                        if args.ingest:
+                            csv_path = futures[future][0]
                             try:
                                 os.remove(csv_path)
                             except OSError:
                                 pass
-                    pbar.update(len(done_indices))
+                    pbar.update(1)
         finally:
             pool.shutdown(wait=False, cancel_futures=True)
 
