@@ -226,6 +226,93 @@ def _pool_ingest_one(args):
     return done_indices, total_rows, None
 
 
+def _pool_extract_and_ingest_one(args):
+    tar_path, out_dir, table, idx, worker_id, part_idx, use_pigz = args
+    import io
+    member = f"CallGraph_{idx}.csv"
+    cmd = (["tar", "-xO", "--use-compress-program=pigz", "-f", tar_path, member]
+           if use_pigz else
+           ["tar", "-xOzf", tar_path, member])
+    stderr_path = tar_path + ".err"
+    err_fd = os.open(stderr_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=err_fd)
+        csv_bytes = proc.stdout.read()
+        rc = proc.wait()
+        try:
+            os.close(err_fd)
+        except OSError:
+            pass
+        if rc != 0:
+            try:
+                with open(stderr_path, "r", errors="replace") as f:
+                    err_msg = f.read()[:200]
+            except OSError:
+                err_msg = f"tar rc={rc}"
+            try:
+                os.remove(stderr_path)
+            except OSError:
+                pass
+            return idx, None, f"tar failed: {err_msg}"
+        try:
+            os.remove(stderr_path)
+        except OSError:
+            pass
+        df = pl.read_csv(io.BytesIO(csv_bytes), low_memory=True,
+                         try_parse_dates=False, infer_schema_length=0,
+                         truncate_ragged_lines=True, ignore_errors=True)
+        del csv_bytes
+        if df.height == 0:
+            try:
+                os.remove(tar_path)
+            except OSError:
+                pass
+            return idx, None, "empty CSV"
+        df = df.with_columns(
+            pl.col("timestamp").str.strip_chars().cast(pl.Int64).alias("ts_int")
+        )
+        df = df.with_columns(
+            pl.from_epoch(pl.col("ts_int") // 1000, time_unit="s").alias("timestamp_dt")
+        )
+        select_cols = ["timestamp", "timestamp_dt", "traceid", "rpc_id", "um",
+                       "dm", "rpctype", "rt", "service", "interface",
+                       "uminstanceid", "dminstanceid"]
+        available = [c for c in select_cols if c in df.columns]
+        df = df.select(available)
+        df = df.sort(["timestamp_dt", "traceid", "rpc_id"])
+        part_path = None
+        if df.height > 0:
+            part_path = os.path.join(out_dir, f"part-{part_idx:05d}_w{worker_id}.parquet")
+            tmp_path = part_path + ".tmp"
+            df.write_parquet(tmp_path, compression="zstd")
+            os.rename(tmp_path, part_path)
+        del df
+        try:
+            os.remove(tar_path)
+        except OSError:
+            pass
+        csv_path = os.path.join(os.path.dirname(tar_path), f"CallGraph_{idx}.csv")
+        try:
+            os.remove(csv_path)
+        except OSError:
+            pass
+        return idx, part_path, None
+    except Exception as e:
+        try:
+            os.close(err_fd)
+        except OSError:
+            pass
+        try:
+            os.remove(stderr_path)
+        except OSError:
+            pass
+        try:
+            os.remove(tar_path + ".tmp")
+        except OSError:
+            pass
+        return idx, None, str(e)
+
+
 def _tar_ok(tar_path):
     try:
         r = subprocess.run(["pigz", "-t", tar_path], capture_output=True)
@@ -441,89 +528,46 @@ def phase2_extract(args, needed_tables, all_indices):
             out_dir = cfg["parquet_dir"]
             os.makedirs(out_dir, exist_ok=True)
             existing_parts = glob.glob(os.path.join(out_dir, f"part-*_w*.parquet"))
-            part_counter = [len(existing_parts)]
-            pending_buf = []
-            ingest_futures = {}
-            ingest_paths = {}
-            ingest_pg = tqdm(total=0, desc=f"  [{table}] Live-ingest", unit="csv", ncols=80, position=1) if args.live_ingest else None
+            part_counter = len(existing_parts)
 
-            def drain_ingests():
-                for fut in list(ingest_futures):
-                    if not fut.done():
-                        continue
-                    try:
-                        done_indices, total_rows, err = fut.result(timeout=3600)
-                    except concurrent.futures.TimeoutError:
-                        print("\n  Ingest worker timed out (3600s); will retry on next run", file=sys.stderr)
-                        continue
-                    except Exception as e:
-                        done_indices, total_rows, err = [], 0, str(e)
-                    ingest_futures.pop(fut)
-                    if err:
-                        print(f"\n  Ingest error: {err}", file=sys.stderr)
-                    for idx in done_indices:
-                        dp = os.path.join(out_dir, f"{table}_{idx}.csv_done")
+            work_items = []
+            for tar_path, raw_dir, idx, use_pigz, _odirect in tarballs:
+                work_items.append((tar_path, out_dir, table, idx, 0, part_counter, use_pigz))
+                part_counter += 1
+
+            pool = ProcessPoolExecutor(max_workers=args.ingest_workers, mp_context=_INGEST_CTX)
+            try:
+                futures = {}
+                for item in work_items:
+                    future = pool.submit(_pool_extract_and_ingest_one, item)
+                    futures[future] = item
+
+                with tqdm(total=len(futures), desc=f"  [{table}] Extract+Ingest", unit="tar", ncols=80) as pbar:
+                    for future in as_completed(futures):
                         try:
-                            with open(dp, 'w') as f:
-                                f.write("")
-                        except OSError:
-                            pass
-                    if args.ingest and not err:
-                        for _, (csv_path, _) in ingest_paths.pop(fut, []):
+                            idx, part_path, err = future.result(timeout=7200)
+                        except concurrent.futures.TimeoutError:
+                            item = futures[future]
+                            failed.append((item[0], f"{BASE_URL}/{cfg['prefix']}_{item[3]}.tar.gz"))
+                            pbar.update(1)
+                            continue
+                        except Exception as e:
+                            item = futures[future]
+                            failed.append((item[0], f"{BASE_URL}/{cfg['prefix']}_{item[3]}.tar.gz"))
+                            pbar.update(1)
+                            continue
+                        if err:
+                            failed.append((idx, f"{BASE_URL}/{cfg['prefix']}_{idx}.tar.gz"))
+                        else:
+                            dp = os.path.join(out_dir, f"{table}_{idx}.csv_done")
                             try:
-                                os.remove(csv_path)
+                                with open(dp, "w") as f:
+                                    f.write("")
                             except OSError:
                                 pass
-                    else:
-                        ingest_paths.pop(fut, None)
-                    ingest_pg.update(len(done_indices))
-
-            with ThreadPoolExecutor(max_workers=args.extract_workers) as pool:
-                futures = {pool.submit(_pool_extract_one, t): t for t in tarballs}
-                igpool = ProcessPoolExecutor(max_workers=args.ingest_workers, mp_context=_INGEST_CTX)
-                try:
-                    with tqdm(total=len(futures), desc=f"  [{table}] Extract", unit="tar", ncols=80) as pbar:
-                        for future in as_completed(futures):
-                            idx, csv_path, err = future.result()
-                            if err:
-                                failed.append((idx, f"{BASE_URL}/{cfg['prefix']}_{idx}.tar.gz"))
-                            else:
-                                pending_buf.append((csv_path, idx))
-                                if len(pending_buf) >= args.batch_size:
-                                    batch = pending_buf[:]
-                                    pending_buf = []
-                                    fut = igpool.submit(_pool_ingest_one,
-                                        (batch, out_dir, table, 0, part_counter[0]))
-                                    part_counter[0] += len(batch)
-                                    ingest_futures[fut] = batch
-                                    ingest_paths[fut] = batch
-                                    ingest_pg.total += len(batch)
-                            pbar.update(1)
-                            drain_ingests()
-
-                    # drain remaining buffer + any in-flight ingests, bounded
-                    if pending_buf:
-                        batch = pending_buf[:]
-                        pending_buf = []
-                        fut = igpool.submit(_pool_ingest_one, (batch, out_dir, table, 0, part_counter[0]))
-                        part_counter[0] += len(batch)
-                        ingest_futures[fut] = batch
-                        ingest_paths[fut] = batch
-                        ingest_pg.total += len(batch)
-                    drain_deadline = time.time() + max(args.ingest_stall_timeout, 60 * 60)
-                    while ingest_futures:
-                        drain_ingests()
-                        if not ingest_futures:
-                            break
-                        if time.time() > drain_deadline:
-                            stuck = [idx for lst in ingest_futures.values() for _, idx in lst]
-                            print(f"\n  Live-ingest drain timed out after {int(args.ingest_stall_timeout)}s; "
-                                  f"{len(stuck)} indices left queued (will retry next run): {sorted(stuck)[:20]}...",
-                                  file=sys.stderr)
-                            break
-                        time.sleep(0.5)
-                finally:
-                    igpool.shutdown(wait=False, cancel_futures=True)
+                        pbar.update(1)
+            finally:
+                pool.shutdown(wait=False, cancel_futures=True)
         else:
             with ThreadPoolExecutor(max_workers=args.extract_workers) as pool:
                 futures = {pool.submit(_pool_extract_one, t): t for t in tarballs}
