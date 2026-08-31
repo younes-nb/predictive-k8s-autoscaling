@@ -175,66 +175,55 @@ def _pool_extract_one(args):
 
 def _pool_ingest_one(args):
     csv_paths, out_dir, table, worker_id, batch_idx = args
-    out_path = os.path.join(out_dir, f"part-{batch_idx:05d}_w{worker_id}.parquet")
-    tmp_path = out_path + ".tmp"
+    done_indices = []
+    total_rows = 0
 
-    try:
-        all_dfs = []
-        total_rows = 0
-        done_indices = []
-
-        for csv_path, idx in csv_paths:
-            try:
-                df = pl.read_csv(
-                    csv_path,
-                    low_memory=True,
-                    try_parse_dates=False,
-                    infer_schema_length=0,
-                    truncate_ragged_lines=True,
-                    ignore_errors=True
-                )
-                if df.height == 0:
-                    done_indices.append(idx)
-                    continue
-
-                df = df.with_columns(
-                    pl.col("timestamp")
-                    .str.strip_chars()
-                    .cast(pl.Int64)
-                    .alias("ts_int")
-                )
-                df = df.with_columns(
-                    pl.from_epoch(pl.col("ts_int") // 1000, time_unit="s")
-                    .alias("timestamp_dt")
-                )
-
-                select_cols = ["timestamp", "timestamp_dt", "traceid", "rpc_id", "um", "dm", "rpctype", "rt", "service", "interface", "uminstanceid", "dminstanceid"]
-                available_cols = [c for c in select_cols if c in df.columns]
-                df = df.select(available_cols)
-                df = df.sort(["timestamp_dt", "traceid", "rpc_id"])
-
-                if df.height > 0:
-                    all_dfs.append(df)
-                    total_rows += df.height
+    for local_idx, (csv_path, idx) in enumerate(csv_paths):
+        part_path = os.path.join(out_dir, f"part-{batch_idx + local_idx:05d}_w{worker_id}.parquet")
+        tmp_path = part_path + ".tmp"
+        try:
+            df = pl.read_csv(
+                csv_path,
+                low_memory=True,
+                try_parse_dates=False,
+                infer_schema_length=0,
+                truncate_ragged_lines=True,
+                ignore_errors=True
+            )
+            if df.height == 0:
                 done_indices.append(idx)
-            except Exception as e:
-                done_indices.append(idx)
+                continue
 
-        if all_dfs:
-            combined = pl.concat(all_dfs) if len(all_dfs) > 1 else all_dfs[0]
-            if combined.height > 0:
-                combined.write_parquet(tmp_path, compression="zstd")
-                os.rename(tmp_path, out_path)
+            df = df.with_columns(
+                pl.col("timestamp")
+                .str.strip_chars()
+                .cast(pl.Int64)
+                .alias("ts_int")
+            )
+            df = df.with_columns(
+                pl.from_epoch(pl.col("ts_int") // 1000, time_unit="s")
+                .alias("timestamp_dt")
+            )
 
-        return done_indices, total_rows, None
+            select_cols = ["timestamp", "timestamp_dt", "traceid", "rpc_id", "um", "dm", "rpctype", "rt", "service", "interface", "uminstanceid", "dminstanceid"]
+            available_cols = [c for c in select_cols if c in df.columns]
+            df = df.select(available_cols)
+            df = df.sort(["timestamp_dt", "traceid", "rpc_id"])
 
-    except Exception as e:
-        if os.path.exists(tmp_path):
-            try:
-                os.remove(tmp_path)
-            except:
-                pass
-        return [], 0, str(e)
+            if df.height > 0:
+                df.write_parquet(tmp_path, compression="zstd")
+                os.rename(tmp_path, part_path)
+                total_rows += df.height
+            del df
+            done_indices.append(idx)
+        except Exception as e:
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except:
+                    pass
+
+    return done_indices, total_rows, None
 
 
 def _tar_ok(tar_path):
@@ -505,7 +494,7 @@ def phase2_extract(args, needed_tables, all_indices):
                                     pending_buf = []
                                     fut = igpool.submit(_pool_ingest_one,
                                         (batch, out_dir, table, 0, part_counter[0]))
-                                    part_counter[0] += 1
+                                    part_counter[0] += len(batch)
                                     ingest_futures[fut] = batch
                                     ingest_paths[fut] = batch
                                     ingest_pg.total += len(batch)
@@ -517,7 +506,7 @@ def phase2_extract(args, needed_tables, all_indices):
                         batch = pending_buf[:]
                         pending_buf = []
                         fut = igpool.submit(_pool_ingest_one, (batch, out_dir, table, 0, part_counter[0]))
-                        part_counter[0] += 1
+                        part_counter[0] += len(batch)
                         ingest_futures[fut] = batch
                         ingest_paths[fut] = batch
                         ingest_pg.total += len(batch)
@@ -633,7 +622,7 @@ def phase3_ingest(args, needed_tables, all_indices):
         batches = []
         for i in range(0, len(indices_to_ingest), batch_size):
             batch = indices_to_ingest[i:i+batch_size]
-            batches.append((batch, out_dir, table, 0, len(existing_parts) + len(batches)))
+            batches.append((batch, out_dir, table, 0, len(existing_parts) + i))
 
         pool = ProcessPoolExecutor(max_workers=args.ingest_workers, mp_context=_INGEST_CTX)
         try:
