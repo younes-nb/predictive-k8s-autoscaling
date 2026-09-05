@@ -92,10 +92,19 @@ def _odirect_write_stream(proc, csv_path):
 
 def _pool_extract_one(args):
     tar_path, raw_dir, idx, use_pigz, odirect = args
-    csv_path = os.path.join(raw_dir, f"CallGraph_{idx}.csv")
+    # Derive expected CSV name from table prefix (supports Node/MSMetrics/CallGraph)
+    table = os.path.basename(raw_dir.rstrip("/"))
+    try:
+        from config.defaults import DATASET_TABLES as _DT
+        _prefix = _DT.get(table, {}).get("prefix", "CallGraph/CallGraph")
+    except Exception:
+        _prefix = "CallGraph/CallGraph"
+    _base = _prefix.split("/")[-1]
+    csv_path = os.path.join(raw_dir, f"{_base}_{idx}.csv")
+    member = f"{_base}_{idx}.csv"
     try:
         if odirect:
-            member = f"CallGraph_{idx}.csv"
+            # member already set from _base above
             cmd = ["tar", "-xOzf", tar_path, member] if not use_pigz else \
                   ["tar", "-xO", "--use-compress-program=pigz", "-f", tar_path, member]
             stderr_path = csv_path + ".err"

@@ -38,11 +38,11 @@ DATASET_TABLES: Dict[str, Dict[str, Any]] = {
         "ratio_min": 30,
         "raw_dir": PATHS.RAW_MSRESOURCE,
         "parquet_dir": PATHS.PARQUET_MSRESOURCE,
-        "key_cols": ["msname", "msinstanceid"],
+        "key_cols": ["msname", "msinstanceid", "nodeid"],
     },
     "node": {
         "prefix": "NodeMetricsUpdate/NodeMetricsUpdate",
-        "ratio_min": 30,
+        "ratio_min": 720,
         "raw_dir": PATHS.RAW_NODE,
         "parquet_dir": PATHS.PARQUET_NODE,
         "key_cols": ["nodeid"],
@@ -56,7 +56,7 @@ DATASET_TABLES: Dict[str, Dict[str, Any]] = {
     },
     "mscallgraph": {
         "prefix": "CallGraph/CallGraph",
-        "ratio_min": 30,
+        "ratio_min": 3,
         "raw_dir": PATHS.RAW_MSCALLGRAPH,
         "parquet_dir": PATHS.PARQUET_MSCALLGRAPH,
         "key_cols": ["traceid", "rpc_id"],

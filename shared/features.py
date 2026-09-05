@@ -18,6 +18,16 @@ FEATURES: Dict[str, Dict[str, str]] = {
     "readmc_mcr": {"table": "msrtmcre", "column": "readmc_mcr"},
     "writedb_mcr": {"table": "msrtmcre", "column": "writedb_mcr"},
     "readdb_mcr": {"table": "msrtmcre", "column": "readdb_mcr"},
+    "um": {"table": "mscallgraph", "column": "um"},
+    "dm": {"table": "mscallgraph", "column": "dm"},
+    "rpctype": {"table": "mscallgraph", "column": "rpctype"},
+    "rt": {"table": "mscallgraph", "column": "rt"},
+    "traceid": {"table": "mscallgraph", "column": "traceid"},
+    "rpc_id": {"table": "mscallgraph", "column": "rpc_id"},
+    "service": {"table": "mscallgraph", "column": "service"},
+    "interface": {"table": "mscallgraph", "column": "interface"},
+    "uminstanceid": {"table": "mscallgraph", "column": "uminstanceid"},
+    "dminstanceid": {"table": "mscallgraph", "column": "dminstanceid"},
 }
 
 
@@ -95,6 +105,10 @@ FEATURE_SETS: Dict[str, Dict[str, Any]] = {
         ],
         "targets": ["cpu_utilization", "memory_utilization"],
         "base_table": "msresource",
+        "join_keys": {
+            "msresource": ["msname"],
+            "msrtmcre": ["msname"],
+        },
     },
     "mcr_http": {
         "features": ["http_mcr"],
@@ -111,6 +125,22 @@ FEATURE_SETS: Dict[str, Dict[str, Any]] = {
         ],
         "targets": ["cpu_utilization", "memory_utilization"],
         "base_table": "msresource",
+    },
+    "callgraph": {
+        "features": [
+            "um",
+            "dm",
+            "rpctype",
+            "rt",
+            "traceid",
+            "rpc_id",
+            "service",
+            "interface",
+            "uminstanceid",
+            "dminstanceid",
+        ],
+        "target": "um",
+        "base_table": "mscallgraph",
     },
 }
 
