@@ -661,6 +661,9 @@ def main():
     p.add_argument("--polars_threads", type=int, default=48,
                     help="Polars thread pool size for aggregation/sort; aggregation is CPU-bound and scales "
                          "~linearly with threads (peak RAM barely changes), default: %(default)s")
+    p.add_argument("--normalize_mcr", action="store_true",
+                    help="Normalize MCR features (providerrpc_mcr, http_mcr, etc.) per-service "
+                         "to [0,1] using each service's full timeline min/max")
     p.add_argument("--recompute", action="store_true",
                     help="Delete cached done markers and shards, forcing a full rebuild")
     p.add_argument("--no_service_cache", action="store_true",
@@ -801,6 +804,7 @@ def main():
         "service_col": args.service_col,
         "feature_set": args.feature_set,
         "resource_indices": resource_indices,
+        "normalize_mcr": getattr(args, "normalize_mcr", False),
     }
     args_dict.update(_split_params(args))
 
@@ -934,10 +938,28 @@ def _phase_windows(args, args_dict, target_indices, all_services_list,
                    arrays_path, index_path):
     with open(index_path, "r") as f:
         data = json.load(f)
-    big = np.load(arrays_path, mmap_mode="r")
+    big = np.load(arrays_path, mmap_mode="r").copy()
     index = data["index"]
     print(f"Loaded service arrays (mmap): {big.shape[0]} rows x {big.shape[1]} ch, "
           f"{len(index)} services", flush=True)
+
+    if args_dict.get("normalize_mcr"):
+        feature_names = list(get_feature_set(args_dict["feature_set"])["features"])
+        mcr_cols = [i for i, f in enumerate(feature_names)
+                    if "mcr" in f.lower() or "rpc" in f.lower() or "http" in f.lower()]
+        if mcr_cols:
+            print(f"Normalizing MCR columns {mcr_cols} ({[feature_names[i] for i in mcr_cols]}) "
+                  f"per-service to [0,1]...", flush=True)
+            for svc_name, pos in index.items():
+                start, length = pos[0], pos[1]
+                for col in mcr_cols:
+                    col_slice = big[start:start + length, col]
+                    lo, hi = col_slice.min(), col_slice.max()
+                    if hi - lo > 1e-12:
+                        big[start:start + length, col] = (col_slice - lo) / (hi - lo)
+                    else:
+                        big[start:start + length, col] = 0.0
+            print(f"MCR normalization complete", flush=True)
 
     global _WORKER_CTX
     _WORKER_CTX = {

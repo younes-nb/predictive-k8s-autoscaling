@@ -83,6 +83,8 @@ def main():
     ap.add_argument("--test_hours", type=float, default=None,
                     help="Test split size in hours when splitting by hours; rows beyond "
                          "train+val+test also fall to test when unset (default).")
+    ap.add_argument("--normalize_mcr", action="store_true",
+                     help="Normalize MCR features per-service to [0,1] in build_windows")
     ap.add_argument("--recompute_preprocessing", action="store_true",
                      help="Recompute the preprocessing approach output, ignoring cached shards")
 
@@ -156,6 +158,8 @@ def main():
             cmd.append("--recompute")
         if args.msname is not None:
             cmd.extend(["--msname", args.msname])
+        if args.normalize_mcr:
+            cmd.append("--normalize_mcr")
         if args.csv_path:
             cmd.extend(["--csv_path", args.csv_path,
                         "--csv_time_col", args.csv_time_col,

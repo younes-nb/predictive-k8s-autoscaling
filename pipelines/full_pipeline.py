@@ -104,15 +104,15 @@ def main():
                     help="Disable drift prediction for memory branch (ablation; default on for constant memory)")
     ap.add_argument(
         "--preprocess_approach",
-        default="swt",
+        default="none",
         choices=["none", "smoothing", "swt", "cskv"],
         help="Post-processing: none (raw windows), smoothing (moving avg), swt (SWT), cskv (CEEMDAN+SE+K-means+VMD)",
     )
     ap.add_argument(
         "--model_type",
         default="lstm",
-        choices=["lstm", "gru", "bilstm", "bigrue", "cnn_bilstm", "dlinear", "dpam"],
-        help="Model architecture: lstm/gru (unidirectional), bilstm/bigrue (bidirectional), cnn_bilstm, dlinear (linear decomposition baseline), dpam (DualPathAnchorMixer)",
+        choices=["lstm", "gru", "bilstm", "bigrue", "cnn_bilstm", "dlinear", "dpam", "linearreg"],
+        help="Model architecture: lstm/gru (unidirectional), bilstm/bigrue (bidirectional), cnn_bilstm, dlinear (linear decomposition baseline), dpam (DualPathAnchorMixer), linearreg (linear regression)",
     )
     ap.add_argument(
         "--msname",
@@ -124,12 +124,14 @@ def main():
                     help="Residual/change injection for the LAST target only "
                          "(memory): keeps a level formulation for the other targets")
     ap.add_argument("--smooth_window", type=int, default=5, help="Moving average window size for 'smoothing' approach (default: %(default)s)")
+    ap.add_argument("--normalize_mcr", action="store_true",
+                    help="Normalize MCR features per-service to [0,1] in build_windows")
     ap.add_argument("--dataset_workers", type=int, default=0, help="Dataloader workers for swt/cskv datasets (default: %(default)s)")
     ap.add_argument("--swt_level", type=int, default=None, help="SWT level for CPU (swt only, default: config)")
     ap.add_argument("--mem_swt_level", type=int, default=None, help="SWT level for memory (swt only, default: config)")
     ap.add_argument(
         "--loss_mode",
-        default="per_target_mse",
+        default="joint_mse",
         choices=["joint_mse", "per_target_mse", "per_target_mae", "per_target_huber", "asymmetric_huber"],
         help="joint_mse: MSE over all targets. per_target_mae: equal-weight per target with L1 memory loss. "
              "per_target_huber: per-target weighted Huber loss with independent betas (winning loss). "
@@ -200,6 +202,9 @@ def main():
     )
     train_script = os.path.join(REPO_ROOT, "training", "train.py")
     test_script = os.path.join(REPO_ROOT, "training", "evaluate.py")
+    simulate_script = os.path.join(
+        REPO_ROOT, "analytics", "simulate_alibaba_predictive_hpa.py"
+    )
 
     total_times = {}
 
@@ -236,6 +241,8 @@ def main():
             cmd_pre.append("--recompute_windows")
         if args.msname is not None:
             cmd_pre.extend(["--msname", args.msname])
+        if args.normalize_mcr:
+            cmd_pre.append("--normalize_mcr")
         if args.skip_preprocessing_approach:
             cmd_pre.append("--skip_preprocessing_approach")
         if args.recompute_preprocessing:
@@ -297,6 +304,7 @@ def main():
         if args.preprocess_approach in ("swt", "cskv", "smoothing"):
             cmd_train.extend(["--preprocess_dir", os.path.join(args.windows_dir, args.preprocess_approach)])
             cmd_train.extend(["--dataset_workers", str(args.dataset_workers)])
+        cmd_train.extend(["--model_type", args.model_type])
         cmd_train.extend(["--preprocess_approach", args.preprocess_approach])
         cmd_train.extend(["--hyperparam_optimizer", args.hyperparam_optimizer])
         cmd_train.extend(["--loss_mode", args.loss_mode])
@@ -382,6 +390,20 @@ def main():
             cmd_test.extend(["--msname", args.msname])
 
         total_times["testing"] = run(cmd_test, "Step 3: Evaluation & Diagnostics", env=env_test)
+
+    if not args.skip_testing:
+        cmd_sim = [sys.executable, simulate_script,
+                   "--checkpoint", current_checkpoint,
+                   "--windows_dir", args.windows_dir]
+        env_sim = {
+            "PARQUET_ROOT": "/dataset/parquet",
+            "PLOTS_DIR": args.logs_dir,
+        }
+        if args.msname is not None:
+            cmd_sim.extend(["--msname", args.msname])
+        if args.cpu:
+            cmd_sim.extend(["--device", "cpu"])
+        total_times["simulation"] = run(cmd_sim, "Step 4: HPA Simulation & Plots", env=env_sim)
 
     print("\n========== PIPELINE COMPLETE ==========")
     for stage, t in total_times.items():

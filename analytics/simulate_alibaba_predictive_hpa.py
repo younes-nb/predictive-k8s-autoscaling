@@ -47,7 +47,7 @@ from preprocessing.swt.decomposition import decompose_window
 from preprocessing.swt.config import CFG as SWT_CFG
 
 RNN_TYPES = ("lstm", "gru", "bilstm", "bigrue")
-BUILDER_TYPES = ("cnn_bilstm", "dpam", "tcn", "tcn_dual", "quantile_ensemble")
+BUILDER_TYPES = ("cnn_bilstm", "dpam", "tcn", "tcn_dual", "quantile_ensemble", "linearreg", "dlinear")
 
 DEFAULT_PLOTS_DIR = "/proj/k8sautoscaledl-PG0/analytics_out"
 DEFAULT_PARQUET_ROOT = "/dataset/parquet"
@@ -64,6 +64,8 @@ def parse_args():
     )
     ap.add_argument("--checkpoint", default=DEFAULT_CHECKPOINT)
     ap.add_argument("--parquet_root", default=DEFAULT_PARQUET_ROOT)
+    ap.add_argument("--windows_dir", default=None,
+                    help="Path to windows directory (contains _service_arrays.npy)")
     ap.add_argument("--msname", default=None,
                     help="Specific msname (default: auto-select best)")
     ap.add_argument("--hours", type=float, default=6.0)
@@ -90,7 +92,7 @@ def parse_args():
 DEFAULT_SERVICE_ARRAYS = "/dataset/windows/_service_arrays.npy"
 DEFAULT_SERVICE_INDEX = "/dataset/windows/_service_index.json"
 DEFAULT_REPLICA_COUNTS = "/dataset/windows/_service_replica_counts.npy"
-CACHE_FEATURES = ["cpu_utilization", "memory_utilization"]
+CACHE_FEATURES = ["cpu_utilization", "memory_utilization", "providerrpc_mcr"]
 
 
 def load_service_arrays_cache(arrays_path, index_path, feature_set,
@@ -136,11 +138,12 @@ def load_service_arrays_cache(arrays_path, index_path, feature_set,
 
 
 def load_alibaba_parquet(parquet_root, feature_set, service_arrays_path=None,
-                         service_index_path=None, replica_counts_path=None):
+                         service_index_path=None, replica_counts_path=None,
+                         windows_dir=None):
     """Load Alibaba data per msname per minute.
 
     Tries the pre-aggregated service_arrays cache first (fast, handles cpu_mem_both).
-    Falls back to parquet aggregation for other feature sets.
+    Falls back to reading parquet directly for other feature sets.
     """
     if service_arrays_path is None:
         service_arrays_path = DEFAULT_SERVICE_ARRAYS
@@ -160,11 +163,93 @@ def load_alibaba_parquet(parquet_root, feature_set, service_arrays_path=None,
         except (FileNotFoundError, KeyError) as e:
             print(f"[WARN] Cache unavailable: {e}. Falling back to parquet.")
 
-    raise SystemExit(
-        "Parquet loading for non-cached feature sets is not yet supported "
-        "due to dataset size (112GB msresource). Use cpu_mem_both feature set "
-        "to use the pre-aggregated cache."
-    )
+    return _load_from_parquet(parquet_root, feature_set)
+
+
+def _load_from_parquet(parquet_root, feature_set):
+    """Load per-service feature arrays by reading parquet files directly."""
+    import pyarrow.dataset as ds
+    import pyarrow.compute as pc
+
+    spec = get_feature_set(feature_set)
+    feature_names = spec["features"]
+    service_col = "msname"
+
+    tables_needed = {}
+    for feat_name in feature_names:
+        meta = FEATURES[feat_name]
+        t = meta["table"]
+        c = meta["column"]
+        tables_needed.setdefault(t, []).append((feat_name, c))
+
+    service_data = {}
+
+    for table_name, col_pairs in tables_needed.items():
+        table_dir = os.path.join(parquet_root, table_name)
+        if not os.path.isdir(table_dir):
+            print(f"[WARN] Table dir not found: {table_dir}")
+            continue
+
+        print(f"Reading table '{table_name}' from {table_dir}...")
+        try:
+            dataset = ds.dataset(table_dir, format="parquet")
+        except Exception as e:
+            print(f"[WARN] Could not read {table_dir}: {e}")
+            continue
+
+        feat_names = [fp[0] for fp in col_pairs]
+        raw_cols = [fp[1] for fp in col_pairs]
+        columns_needed = list(set([service_col, "timestamp"] + raw_cols))
+
+        try:
+            table = dataset.to_table(columns=columns_needed).to_pandas()
+        except Exception as e:
+            print(f"[WARN] Could not read columns from {table_name}: {e}")
+            continue
+
+        print(f"  Rows: {len(table)}")
+        table["ts_min"] = (table["timestamp"] / 60000).astype(int)
+
+        for svc_name, group in table.groupby(service_col):
+            if svc_name not in service_data:
+                service_data[svc_name] = {}
+            grouped = group.groupby("ts_min").agg({c: "mean" for _, c in col_pairs})
+            for feat_name, raw_col in col_pairs:
+                if feat_name not in service_data[svc_name]:
+                    service_data[svc_name][feat_name] = {}
+                for m, row in grouped.iterrows():
+                    service_data[svc_name][feat_name][int(m)] = float(row[raw_col])
+
+    N = max(max(d.values(), key=max).keys() if d.values() else [0]
+            for s in service_data.values() for d in s.values()) + 1
+
+    out_dict = {}
+    out_feats = feature_names
+    for svc_name, feat_dict in service_data.items():
+        arr = np.zeros((N, len(feature_names)), dtype=np.float32)
+        for fi, fname in enumerate(feature_names):
+            if fname in feat_dict:
+                for m, v in feat_dict[fname].items():
+                    if m < N:
+                        arr[m, fi] = v
+            else:
+                arr[:, fi] = np.nan
+        mask = ~np.isnan(arr).all(axis=1)
+        if mask.sum() == 0:
+            continue
+        good = np.where(mask)[0]
+        for fi in range(arr.shape[1]):
+            if np.isnan(arr[:, fi]).any():
+                arr[:, fi] = np.interp(
+                    np.arange(N), good, arr[good, fi],
+                    left=float(arr[good[0], fi]) if len(good) > 0 else 0.0,
+                    right=float(arr[good[-1], fi]) if len(good) > 0 else 0.0,
+                )
+        out_dict[svc_name] = arr
+
+    baseline_replicas = {}
+    print(f"Loaded {len(out_dict)} services from parquet (features: {out_feats})")
+    return out_dict, out_feats, baseline_replicas
 
 
 # ================================================================
@@ -405,9 +490,13 @@ def _run_calibration(raw_feat, model_feat, model, meta, device,
         if preds.dim() == 4:
             q10 = preds[0, -1, :, 0].cpu().numpy()
             q95 = preds[0, -1, :, 2].cpu().numpy()
-        else:
+        elif preds.dim() == 3:
             p = torch.round(preds[0, -1] * 100) / 100
             q10 = p.cpu().numpy()
+            q95 = q10.copy()
+        else:
+            p = torch.round(preds[0] * 100) / 100
+            q10 = p.cpu().numpy().ravel()
             q95 = q10.copy()
 
         cpu_actual = float(raw_feat[idx, 0])
@@ -479,9 +568,13 @@ def simulate_trace(raw_feat, model_feat, model, meta, device,
             q10 = preds[0, -1, :, 0].cpu().numpy()
             q50 = preds[0, -1, :, 1].cpu().numpy()
             q95 = preds[0, -1, :, 2].cpu().numpy()
-        else:
+        elif preds.dim() == 3:
             p = torch.round(preds[0, -1] * 100) / 100
             q50 = p.cpu().numpy()
+            q10, q95 = q50.copy(), q50.copy()
+        else:
+            p = torch.round(preds[0] * 100) / 100
+            q50 = p.cpu().numpy().ravel()
             q10, q95 = q50.copy(), q50.copy()
 
         pred_cpu = float(np.round(q50[0] * 100) / 100)
@@ -764,84 +857,127 @@ def compute_metrics(results, pred_horizon, threshold, use_conformal=False):
 # ================================================================
 
 def plot_results(results, msname, plots_dir, pred_horizon, use_conformal, threshold,
-                  num_targets=2):
+                  num_targets=2, raw_feat=None, feature_names=None):
     df = pd.DataFrame(results)
     has_ts = df["timestamp"].notna().all()
-    x = df["timestamp"] if has_ts else df.index
+    x = df["timestamp"] if has_ts else np.arange(len(df))
 
     os.makedirs(plots_dir, exist_ok=True)
     stamp = time.strftime("%Y%m%d_%H%M%S")
 
-    targets = [
-        ("cpu", "blue", "orange", "orange", "Actual CPU", "Predicted CPU",
-         "cpu", "lower_cpu", "upper_cpu", "pred_cpu"),
-    ]
-    if num_targets > 1:
-        targets.append(
-            ("memory", "blue", "orange", "orange", "Actual Memory", "Predicted Memory",
-             "memory", "lower_mem", "upper_mem", "pred_mem"),
-        )
+    actual_cpu = df["cpu"].values.astype(float)
+    pred_cpu = df["pred_cpu"].values.astype(float)
+    actual_mem = df["memory"].values.astype(float) if "memory" in df.columns else None
+    pred_mem = df["pred_mem"].values.astype(float) if "pred_mem" in df.columns else None
 
-    for (target, color_actual, color_pred, color_pred_fill,
-         label_actual, label_pred,
-         actual_col, lo_col, hi_col, pred_col) in targets:
+    zoom_window = 60
 
-        fig, axes = plt.subplots(2, 1, figsize=(18, 12), sharex=True)
+    def _find_zoom_center(actual):
+        best_std = -1
+        best_center = zoom_window
+        for i in range(zoom_window, len(actual) - zoom_window):
+            s = np.std(actual[i - zoom_window:i + zoom_window])
+            if s > best_std:
+                best_std = s
+                best_center = i
+        return best_center
 
-        # Shift predictions forward by pred_horizon so each predicted point
-        # aligns with the actual value it is forecasting
-        pred_shifted = df[pred_col].shift(pred_horizon)
-        lo_shifted = df[lo_col].shift(pred_horizon) if lo_col in df.columns else None
-        hi_shifted = df[hi_col].shift(pred_horizon) if hi_col in df.columns else None
+    def _plot_4panel(x_vals, actual_c, pred_c, actual_m, pred_m, title_suffix,
+                     zoom_start=None, zoom_end=None, filename=None):
+        if zoom_start is not None:
+            mask = np.arange(len(x_vals)) >= zoom_start
+            if zoom_end is not None:
+                mask &= np.arange(len(x_vals)) < zoom_end
+            x_vals = x_vals[mask]
+            actual_c = actual_c[mask]
+            pred_c = pred_c[mask]
+            if actual_m is not None:
+                actual_m = actual_m[mask]
+            if pred_m is not None:
+                pred_m = pred_m[mask]
 
-        # --- Panel 1: Raw + predicted utilization ---
+        fig, axes = plt.subplots(4, 1, figsize=(22, 16), sharex=True)
+        fig.suptitle(f"{msname} — {title_suffix}\n"
+                     f"MSE={np.mean((pred_c - actual_c)**2):.6f}, "
+                     f"MAE={np.mean(np.abs(pred_c - actual_c)):.6f}",
+                     fontsize=13, fontweight="bold", y=0.99)
+
         ax = axes[0]
-        ax.plot(x, df[actual_col], label=label_actual, color=color_actual, alpha=0.7)
-        ax.plot(x, pred_shifted, label=f"{label_pred} (+{pred_horizon}m ahead)",
-                color=color_pred, alpha=0.7)
-        if use_conformal and lo_shifted is not None:
-            ax.fill_between(x, lo_shifted, hi_shifted,
-                            color=color_pred_fill, alpha=0.15,
-                            label=f"{target.upper()} Conformal (+{pred_horizon}m)")
-        ax.axhline(y=threshold, color="black", linestyle="--", alpha=0.5,
-                   label=f"Threshold={threshold}")
-        ax.set_ylabel("Utilization")
-        ax.set_title(f"{msname} -- {target.upper()} Utilization", fontweight="bold")
-        ax.legend(loc="upper left", fontsize=8, bbox_to_anchor=(1.01, 1),
-                  borderaxespad=0, frameon=True)
-        ax.grid(True, alpha=0.3)
+        ax.plot(x_vals, actual_c, color='#1976D2', linewidth=1.5, label='Actual CPU')
+        ax.plot(x_vals, pred_c, color='#FF5722', linewidth=1.5, alpha=0.8, label='Predicted CPU')
+        ax.set_ylim(0, 1); ax.set_ylabel('CPU')
+        ax.set_title('Predicted vs Actual CPU (unshifted)')
+        ax.legend(); ax.grid(True, alpha=0.2)
 
-        # --- Panel 2: Prediction error (horizon-aligned) ---
         ax = axes[1]
-        err = pred_shifted.values.astype(float) - df[actual_col].values.astype(float)
-        ax.plot(x, err, label=f"{target.upper()} Pred Error (h={pred_horizon})",
-                color=color_pred, alpha=0.7, linewidth=1.2)
-        ax.axhline(y=0, color="black", linestyle="--", alpha=0.5)
-        ax.axhline(y=threshold, color="red", linestyle=":", alpha=0.3)
-        ax.axhline(y=-threshold, color="red", linestyle=":", alpha=0.3)
-        ax.set_ylabel("Error (Predicted - Actual)")
-        ax.set_title(f"{target.upper()} Prediction Error (h={pred_horizon}m)",
-                     fontweight="bold")
-        ax.set_xlabel("Time")
-        ax.legend(loc="upper left", fontsize=8, bbox_to_anchor=(1.01, 1),
-                  borderaxespad=0, frameon=True)
-        ax.grid(True, alpha=0.3)
+        x_shifted = x_vals[:-1] if hasattr(x_vals, '__len__') else x_vals[:-1]
+        ax.plot(x_vals[:-1], actual_c[1:], color='#1976D2', linewidth=1.5, label='Actual CPU(t+1)')
+        ax.plot(x_vals[:-1], pred_c[:-1], color='#FF5722', linewidth=1.5, alpha=0.8,
+                label='Pred(t) vs Actual(t+1)')
+        ax.set_ylim(0, 1); ax.set_ylabel('CPU')
+        ax.set_title('Predicted vs Actual CPU (shifted +1: pred[t] vs actual[t+1])')
+        ax.legend(); ax.grid(True, alpha=0.2)
 
-        if has_ts:
-            span = (df["timestamp"].iloc[-1] - df["timestamp"].iloc[0]).total_seconds() / 3600
-            loc = mdates.HourLocator(interval=2) if span > 18 else mdates.MinuteLocator(interval=5)
-            for a in axes:
-                a.xaxis.set_major_locator(loc)
-                a.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %H:%M"))
-            plt.setp(axes[-1].get_xticklabels(), rotation=30, ha="right")
+        ax = axes[2]
+        if actual_m is not None:
+            ax.plot(x_vals, actual_m, color='#4CAF50', linewidth=1.5, label='Memory')
+        else:
+            ax.plot(x_vals, np.zeros(len(x_vals)), color='#4CAF50', linewidth=1.5, label='Memory (N/A)')
+        ax.set_ylim(0, 1); ax.set_ylabel('Memory')
+        ax.set_title('Memory')
+        ax.legend(); ax.grid(True, alpha=0.2)
 
-        fig.suptitle(f"HPA Simulation -- {msname} ({target.upper()})", fontsize=14, fontweight="bold")
-        fig.tight_layout(rect=[0, 0, 0.88, 0.96])
+        ax = axes[3]
+        if raw_feat is not None and feature_names is not None:
+            rpc_idx = None
+            for fi, fn in enumerate(feature_names):
+                if 'rpc' in fn.lower() and 'mcr' in fn.lower():
+                    rpc_idx = fi
+                    break
+            if rpc_idx is not None and zoom_start is not None:
+                rpc_vals = raw_feat[zoom_start:zoom_end, rpc_idx] if zoom_end else raw_feat[zoom_start:, rpc_idx]
+                ax.plot(x_vals, rpc_vals, color='#9C27B0', linewidth=1.5, label='RPC MCR')
+            elif rpc_idx is not None:
+                ax.plot(x_vals, raw_feat[:len(x_vals), rpc_idx], color='#9C27B0', linewidth=1.5, label='RPC MCR')
+            else:
+                ax.plot(x_vals, np.zeros(len(x_vals)), color='#9C27B0', linewidth=1.5, label='RPC MCR (N/A)')
+        else:
+            ax.plot(x_vals, np.zeros(len(x_vals)), color='#9C27B0', linewidth=1.5, label='RPC MCR (N/A)')
+        ax.set_ylim(0, 1); ax.set_ylabel('RPC MCR')
+        ax.set_title('RPC MCR (normalized)')
+        ax.set_xlabel('Minute'); ax.legend(); ax.grid(True, alpha=0.2)
 
-        png = os.path.join(plots_dir, f"hpa_sim_{msname}_{target}_{stamp}.png")
-        fig.savefig(png, dpi=300, bbox_inches="tight")
+        plt.tight_layout(rect=[0, 0, 1, 0.96])
+        filepath = os.path.join(plots_dir, filename)
+        fig.savefig(filepath, dpi=150, bbox_inches="tight")
         plt.close(fig)
-        print(f"Plot saved: {png}")
+        print(f"Plot saved: {filepath}")
+        return filepath
+
+    x_range = np.arange(len(df))
+
+    full_path = _plot_4panel(
+        x_range, actual_cpu, pred_cpu,
+        actual_mem, pred_mem,
+        "Full Test Set (unshifted + shifted, h={})".format(pred_horizon),
+        filename=f"hpa_sim_{msname}_full_{stamp}.png",
+    )
+
+    zoom_center = _find_zoom_center(actual_cpu)
+    zoom_start = max(0, zoom_center - zoom_window)
+    zoom_end = min(len(df), zoom_center + zoom_window)
+
+    zoom_path = _plot_4panel(
+        x_range, actual_cpu, pred_cpu,
+        actual_mem, pred_mem,
+        f"Zoomed (min {zoom_start}-{zoom_end}, highest-std window)",
+        zoom_start=zoom_start, zoom_end=zoom_end,
+        filename=f"hpa_sim_{msname}_zoom_{stamp}.png",
+    )
+
+    print(f"\nFull path: {full_path}")
+    print(f"Zoom path: {zoom_path}")
+    return full_path, zoom_path
 
 
 # ================================================================
@@ -859,7 +995,8 @@ def main():
 
     print("Loading Alibaba parquet...")
     service_data, cache_feats, _ = load_alibaba_parquet(
-        args.parquet_root, meta["feature_set"]
+        args.parquet_root, meta["feature_set"],
+        windows_dir=args.windows_dir,
     )
 
     if args.msname:
@@ -975,9 +1112,11 @@ def main():
     print(f"\nCSV: {csv_path}")
     print(f"JSON: {json_path}")
 
+    feature_names = feature_names_for_feature_set(meta["feature_set"])
     plot_results(results, msname, args.plots_dir, meta["pred_horizon"],
                  args.adaptive_conformal, args.threshold,
-                 num_targets=meta["num_targets"])
+                 num_targets=meta["num_targets"],
+                 raw_feat=raw_feat, feature_names=feature_names)
 
 
 if __name__ == "__main__":

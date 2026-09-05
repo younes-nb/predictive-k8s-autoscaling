@@ -190,16 +190,50 @@ def load_cqr_calibrators(checkpoint) -> dict:
     return {}
 
 
+def build_linearreg(checkpoint, model_type):
+    from core.architectures.linearreg import LinearRegression
+
+    ckpt_args = checkpoint.get("args", {}) or {}
+    hyperparams = checkpoint.get("hyperparams", {}) or {}
+    num_targets = ckpt_args.get("num_targets", config.NUM_TARGETS)
+
+    return LinearRegression(
+        input_size=_input_size(checkpoint, ckpt_args, hyperparams),
+        input_len=_get(ckpt_args, hyperparams, "input_len", config.WINDOW_SIZE),
+        pred_horizon=_get(ckpt_args, hyperparams, "pred_horizon", config.HORIZON),
+        num_targets=num_targets,
+    )
+
+
+def build_dlinear(checkpoint, model_type):
+    from core.architectures.dlinear import DLinear
+
+    ckpt_args = checkpoint.get("args", {}) or {}
+    hyperparams = checkpoint.get("hyperparams", {}) or {}
+    num_targets = ckpt_args.get("num_targets", config.NUM_TARGETS)
+
+    return DLinear(
+        in_channels=_input_size(checkpoint, ckpt_args, hyperparams),
+        input_len=_get(ckpt_args, hyperparams, "input_len", config.WINDOW_SIZE),
+        pred_horizon=_get(ckpt_args, hyperparams, "pred_horizon", config.HORIZON),
+        kernel_size=_get(ckpt_args, hyperparams, "kernel_size", 25),
+        individual=_get(ckpt_args, hyperparams, "individual", False),
+        num_targets=num_targets,
+    )
+
+
 BUILDERS = {
     "lstm": build_rnn,
     "gru": build_rnn,
     "bilstm": build_rnn,
     "bigrue": build_rnn,
     "cnn_bilstm": build_cnn_bilstm,
+    "dlinear": build_dlinear,
     "dpam": build_dpam,
     "tcn": build_tcn,
     "tcn_dual": build_tcn_dual,
     "quantile_ensemble": build_quantile_ensemble,
+    "linearreg": build_linearreg,
 }
 
 

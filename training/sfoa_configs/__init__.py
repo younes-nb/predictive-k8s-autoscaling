@@ -4,6 +4,7 @@ from .bilstm import SEARCH_SPACE as BILSTM_SEARCH_SPACE, DEFAULTS as BILSTM_DEFA
 from .cnn_bilstm import SEARCH_SPACE as CNN_SEARCH_SPACE, DEFAULTS as CNN_DEFAULTS, build_model as cnn_build_model
 from .dlinear import SEARCH_SPACE as DLIN_SEARCH_SPACE, DEFAULTS as DLIN_DEFAULTS, build_model as dlin_build_model
 from .waveanchor_dualmixer import SEARCH_SPACE as DPAM_SEARCH_SPACE, DEFAULTS as DPAM_DEFAULTS, build_model as dpam_build_model
+from .linearreg import SEARCH_SPACE as LR_SEARCH_SPACE, DEFAULTS as LR_DEFAULTS, build_model as lr_build_model
 
 _REGISTRY = {
     "lstm":       ("rnn", RNN_SEARCH_SPACE, RNN_DEFAULTS, rnn_build_model),
@@ -14,6 +15,7 @@ _REGISTRY = {
     "dlinear": ("dlinear", DLIN_SEARCH_SPACE, DLIN_DEFAULTS, dlin_build_model),
     "dpam": ("dpam", DPAM_SEARCH_SPACE, DPAM_DEFAULTS, dpam_build_model),
     "freq_mixer_dualpath": ("dpam", DPAM_SEARCH_SPACE, DPAM_DEFAULTS, dpam_build_model),
+    "linearreg": ("linearreg", LR_SEARCH_SPACE, LR_DEFAULTS, lr_build_model),
 }
 
 
