@@ -394,11 +394,10 @@ def main():
     if not args.skip_testing:
         cmd_sim = [sys.executable, simulate_script,
                    "--checkpoint", current_checkpoint,
-                   "--windows_dir", args.windows_dir]
-        env_sim = {
-            "PARQUET_ROOT": "/dataset/parquet",
-            "PLOTS_DIR": args.logs_dir,
-        }
+                   "--windows_dir", args.windows_dir,
+                   "--parquet_root", PATHS.PARQUET_ROOT,
+                   "--plots_dir", args.logs_dir]
+        env_sim = {}
         if args.msname is not None:
             cmd_sim.extend(["--msname", args.msname])
         if args.cpu:

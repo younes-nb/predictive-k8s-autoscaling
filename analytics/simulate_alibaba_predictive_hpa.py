@@ -134,7 +134,40 @@ def load_service_arrays_cache(arrays_path, index_path, feature_set,
     else:
         print("[WARN] No replica counts cache; using baseline_replicas=1 for all services")
 
-    return service_data, CACHE_FEATURES[:len(feat_indices)], baseline_replicas
+    return service_data, [CACHE_FEATURES[i] for i in feat_indices], baseline_replicas
+
+
+def resolve_msname(requested, available):
+    """Resolve a user-passed --msname against cached service ids.
+
+    Alibaba ids are stored with an 'MS_' prefix (e.g. 'MS_15819'), but users
+    often pass the bare number ('15819'). Accept both directions.
+    Returns the matched id, or None if no match.
+    """
+    if requested in available:
+        return requested
+    # Bare number -> prefixed
+    prefixed = f"MS_{requested}"
+    if prefixed in available:
+        print(f"[INFO] Resolved msname '{requested}' -> '{prefixed}'")
+        return prefixed
+    # Case-insensitive prefixed match (e.g. 'ms_15819' -> 'MS_15819')
+    upper_prefixed = prefixed.upper()
+    for svc in available:
+        if svc.upper() == upper_prefixed:
+            print(f"[INFO] Resolved msname '{requested}' -> '{svc}'")
+            return svc
+    # Prefixed -> bare (cache built without prefix)
+    if requested.upper().startswith("MS_"):
+        bare = requested[len("MS_"):]
+        if bare in available:
+            print(f"[INFO] Resolved msname '{requested}' -> '{bare}'")
+            return bare
+        for svc in available:
+            if svc.upper() == bare.upper():
+                print(f"[INFO] Resolved msname '{requested}' -> '{svc}'")
+                return svc
+    return None
 
 
 def load_alibaba_parquet(parquet_root, feature_set, service_arrays_path=None,
@@ -145,6 +178,13 @@ def load_alibaba_parquet(parquet_root, feature_set, service_arrays_path=None,
     Tries the pre-aggregated service_arrays cache first (fast, handles cpu_mem_both).
     Falls back to reading parquet directly for other feature sets.
     """
+    if windows_dir:
+        if service_arrays_path is None:
+            service_arrays_path = os.path.join(windows_dir, "_service_arrays.npy")
+        if service_index_path is None:
+            service_index_path = os.path.join(windows_dir, "_service_index.json")
+        if replica_counts_path is None:
+            replica_counts_path = os.path.join(windows_dir, "_service_replica_counts.npy")
     if service_arrays_path is None:
         service_arrays_path = DEFAULT_SERVICE_ARRAYS
     if service_index_path is None:
@@ -500,7 +540,7 @@ def _run_calibration(raw_feat, model_feat, model, meta, device,
             q95 = q10.copy()
 
         cpu_actual = float(raw_feat[idx, 0])
-        mem_actual = float(raw_feat[idx, 1]) if num_targets > 1 else 0.0
+        mem_actual = float(raw_feat[idx, 1]) if raw_feat.shape[1] > 1 else 0.0
 
         # Direct online calibration using current observation
         cal.states["cpu"].update(cpu_actual, float(q10[0]), float(q95[0]))
@@ -514,7 +554,7 @@ def _run_calibration(raw_feat, model_feat, model, meta, device,
             aidx = int(p["idx"] + pred_horizon)
             if aidx < n:
                 ac = float(raw_feat[aidx, 0])
-                am = float(raw_feat[aidx, 1]) if num_targets > 1 else 0.0
+                am = float(raw_feat[aidx, 1]) if raw_feat.shape[1] > 1 else 0.0
                 cal.states["cpu"].update(ac, p["q10"][0], p["q95"][0])
                 if num_targets > 1:
                     cal.states["memory"].update(am, p["q10"][1], p["q95"][1])
@@ -589,7 +629,9 @@ def simulate_trace(raw_feat, model_feat, model, meta, device,
                 lower_mem, upper_mem = float(la[1]), float(ua[1])
 
         cpu_actual = float(raw_feat[idx, 0])
-        mem_actual = float(raw_feat[idx, 1]) if num_targets > 1 else 0.0
+        # Actual memory is recorded whenever the trace has the channel, even for
+        # single-target (CPU-only) models where only the prediction is gated.
+        mem_actual = float(raw_feat[idx, 1]) if raw_feat.shape[1] > 1 else 0.0
 
         # Online conformal feedback with delayed horizon alignment
         if adaptive_cal is not None:
@@ -599,7 +641,7 @@ def simulate_trace(raw_feat, model_feat, model, meta, device,
                 aidx = int(p["idx"] + pred_horizon)
                 if aidx < n:
                     ac = float(raw_feat[aidx, 0])
-                    am = float(raw_feat[aidx, 1]) if num_targets > 1 else 0.0
+                    am = float(raw_feat[aidx, 1]) if raw_feat.shape[1] > 1 else 0.0
                     adaptive_cal.states["cpu"].update(ac, p["q10"][0], p["q95"][0])
                     if num_targets > 1:
                         adaptive_cal.states["memory"].update(am, p["q10"][1], p["q95"][1])
@@ -716,10 +758,39 @@ def _delta_pct(model_val, naive_val, is_pct_metric=False):
     return f"{pct:+.1f}"
 
 
-def compute_metrics(results, pred_horizon, threshold, use_conformal=False):
+def _report_entries(target_features=None):
+    """Map model target features to (display, act, pred, lo, hi) result columns.
+
+    Only actual forecast targets are reported (e.g. cpu_mem_rpc reports CPU
+    only, not memory). Unknown/non-cpu-mem targets fall back to the slot the
+    simulator stored them in (first target -> cpu columns, second -> memory).
+    """
+    cpu_entry = ("cpu", "cpu", "pred_cpu", "lower_cpu", "upper_cpu")
+    mem_entry = ("memory", "memory", "pred_mem", "lower_mem", "upper_mem")
+    if not target_features:
+        return [cpu_entry, mem_entry]
+    entries = []
+    if "cpu_utilization" in target_features:
+        entries.append(cpu_entry)
+    if "memory_utilization" in target_features:
+        entries.append(mem_entry)
+    if entries:
+        return entries
+    # Generic fallback for feature sets with neither cpu nor memory targets
+    # (e.g. mcr_http): label with the feature name, read from the used slot.
+    for i, tf in enumerate(target_features):
+        slot = cpu_entry if i == 0 else mem_entry
+        entries.append((str(tf), slot[1], slot[2], slot[3], slot[4]))
+    return entries
+
+
+def compute_metrics(results, pred_horizon, threshold, use_conformal=False,
+                    target_features=None):
     """Compute all metrics from training/metrics.py plus persistence diagnostics.
 
-    For each target (cpu, memory):
+    Only the actual forecast targets are evaluated/reported (derived from the
+    checkpoint's feature set); non-target inputs (e.g. memory when the target
+    is CPU-only) are skipped.
       - Model metrics: last-step and naive forecaster side-by-side
       - Naive forecaster: persistence (current load = prediction for future)
       - Persistence diagnostics: Pearson correlations, R², beat-rate, MAE ratio
@@ -733,10 +804,7 @@ def compute_metrics(results, pred_horizon, threshold, use_conformal=False):
     m = {}
     header_printed = False
 
-    for target_name, col_act, col_pred, col_lo, col_hi in [
-        ("cpu", "cpu", "pred_cpu", "lower_cpu", "upper_cpu"),
-        ("memory", "memory", "pred_mem", "lower_mem", "upper_mem"),
-    ]:
+    for target_name, col_act, col_pred, col_lo, col_hi in _report_entries(target_features):
         actual_all = df[col_act].values.astype(float)
 
         # Model prediction (horizon-aligned)
@@ -835,8 +903,7 @@ def compute_metrics(results, pred_horizon, threshold, use_conformal=False):
     if use_conformal and "upper_cpu" in df.columns:
         print(f"\n--- Conformal Interval Quality ---")
         for tname, col_act, col_lo, col_hi in [
-            ("cpu", "cpu", "lower_cpu", "upper_cpu"),
-            ("memory", "memory", "lower_mem", "upper_mem"),
+            (e[0], e[1], e[3], e[4]) for e in _report_entries(target_features)
         ]:
             a = df[col_act].values.astype(float)
             lo = df[col_lo].values.astype(float)
@@ -857,7 +924,7 @@ def compute_metrics(results, pred_horizon, threshold, use_conformal=False):
 # ================================================================
 
 def plot_results(results, msname, plots_dir, pred_horizon, use_conformal, threshold,
-                  num_targets=2, raw_feat=None, feature_names=None):
+                  num_targets=2, raw_feat=None, feature_names=None, start_idx=0):
     df = pd.DataFrame(results)
     has_ts = df["timestamp"].notna().all()
     x = df["timestamp"] if has_ts else np.arange(len(df))
@@ -869,6 +936,22 @@ def plot_results(results, msname, plots_dir, pred_horizon, use_conformal, thresh
     pred_cpu = df["pred_cpu"].values.astype(float)
     actual_mem = df["memory"].values.astype(float) if "memory" in df.columns else None
     pred_mem = df["pred_mem"].values.astype(float) if "pred_mem" in df.columns else None
+
+    # Results cover the eval window [start_idx, start_idx+len(df)) of the full
+    # trace. Older runs stored zeros in df["memory"] for single-target models;
+    # fall back to the raw memory channel so the panel is never flat-zero when
+    # the data exists.
+    if (actual_mem is None or not np.any(actual_mem)) and raw_feat is not None \
+            and raw_feat.shape[1] > 1:
+        actual_mem = raw_feat[start_idx:start_idx + len(df), 1].astype(float)
+
+    # RPC context feature aligned to the eval window (not the trace head).
+    rpc_full = None
+    if raw_feat is not None and feature_names is not None:
+        for fi, fn in enumerate(feature_names):
+            if 'rpc' in fn.lower() and 'mcr' in fn.lower():
+                rpc_full = raw_feat[start_idx:start_idx + len(df), fi].astype(float)
+                break
 
     zoom_window = 60
 
@@ -883,7 +966,8 @@ def plot_results(results, msname, plots_dir, pred_horizon, use_conformal, thresh
         return best_center
 
     def _plot_4panel(x_vals, actual_c, pred_c, actual_m, pred_m, title_suffix,
-                     zoom_start=None, zoom_end=None, filename=None):
+                     zoom_start=None, zoom_end=None, filename=None,
+                     rpc_vals=None):
         if zoom_start is not None:
             mask = np.arange(len(x_vals)) >= zoom_start
             if zoom_end is not None:
@@ -895,6 +979,8 @@ def plot_results(results, msname, plots_dir, pred_horizon, use_conformal, thresh
                 actual_m = actual_m[mask]
             if pred_m is not None:
                 pred_m = pred_m[mask]
+            if rpc_vals is not None:
+                rpc_vals = rpc_vals[mask]
 
         fig, axes = plt.subplots(4, 1, figsize=(22, 16), sharex=True)
         fig.suptitle(f"{msname} — {title_suffix}\n"
@@ -919,8 +1005,11 @@ def plot_results(results, msname, plots_dir, pred_horizon, use_conformal, thresh
         ax.legend(); ax.grid(True, alpha=0.2)
 
         ax = axes[2]
-        if actual_m is not None:
-            ax.plot(x_vals, actual_m, color='#4CAF50', linewidth=1.5, label='Memory')
+        if actual_m is not None and np.any(actual_m):
+            ax.plot(x_vals, actual_m, color='#4CAF50', linewidth=1.5, label='Actual Memory')
+            if pred_m is not None and np.any(pred_m):
+                ax.plot(x_vals, pred_m, color='#FF9800', linewidth=1.5, alpha=0.8,
+                        label='Predicted Memory')
         else:
             ax.plot(x_vals, np.zeros(len(x_vals)), color='#4CAF50', linewidth=1.5, label='Memory (N/A)')
         ax.set_ylim(0, 1); ax.set_ylabel('Memory')
@@ -928,23 +1017,23 @@ def plot_results(results, msname, plots_dir, pred_horizon, use_conformal, thresh
         ax.legend(); ax.grid(True, alpha=0.2)
 
         ax = axes[3]
-        if raw_feat is not None and feature_names is not None:
-            rpc_idx = None
-            for fi, fn in enumerate(feature_names):
-                if 'rpc' in fn.lower() and 'mcr' in fn.lower():
-                    rpc_idx = fi
-                    break
-            if rpc_idx is not None and zoom_start is not None:
-                rpc_vals = raw_feat[zoom_start:zoom_end, rpc_idx] if zoom_end else raw_feat[zoom_start:, rpc_idx]
-                ax.plot(x_vals, rpc_vals, color='#9C27B0', linewidth=1.5, label='RPC MCR')
-            elif rpc_idx is not None:
-                ax.plot(x_vals, raw_feat[:len(x_vals), rpc_idx], color='#9C27B0', linewidth=1.5, label='RPC MCR')
+        if rpc_vals is not None and len(rpc_vals) == len(x_vals):
+            ax.plot(x_vals, rpc_vals, color='#9C27B0', linewidth=1.5, label='RPC MCR')
+            rmax = float(np.max(rpc_vals))
+            rmin = float(np.min(rpc_vals))
+            if rmin >= 0.0 and rmax <= 1.0 and (rmax - rmin) > 1e-3:
+                ax.set_ylim(0, 1)
             else:
-                ax.plot(x_vals, np.zeros(len(x_vals)), color='#9C27B0', linewidth=1.5, label='RPC MCR (N/A)')
+                # RPC is an unbounded sum (often ~0 or >>1): autoscale so the
+                # signal is visible instead of a flat line at the plot edge.
+                span = rmax - rmin
+                pad = span * 0.15 if span > 1e-12 else (abs(rmax) * 0.15 or 1.0)
+                ax.set_ylim(min(0.0, rmin) - pad * 0.1, rmax + pad)
         else:
             ax.plot(x_vals, np.zeros(len(x_vals)), color='#9C27B0', linewidth=1.5, label='RPC MCR (N/A)')
-        ax.set_ylim(0, 1); ax.set_ylabel('RPC MCR')
-        ax.set_title('RPC MCR (normalized)')
+            ax.set_ylim(0, 1)
+        ax.set_ylabel('RPC MCR')
+        ax.set_title('RPC MCR')
         ax.set_xlabel('Minute'); ax.legend(); ax.grid(True, alpha=0.2)
 
         plt.tight_layout(rect=[0, 0, 1, 0.96])
@@ -961,6 +1050,7 @@ def plot_results(results, msname, plots_dir, pred_horizon, use_conformal, thresh
         actual_mem, pred_mem,
         "Full Test Set (unshifted + shifted, h={})".format(pred_horizon),
         filename=f"hpa_sim_{msname}_full_{stamp}.png",
+        rpc_vals=rpc_full,
     )
 
     zoom_center = _find_zoom_center(actual_cpu)
@@ -973,10 +1063,9 @@ def plot_results(results, msname, plots_dir, pred_horizon, use_conformal, thresh
         f"Zoomed (min {zoom_start}-{zoom_end}, highest-std window)",
         zoom_start=zoom_start, zoom_end=zoom_end,
         filename=f"hpa_sim_{msname}_zoom_{stamp}.png",
+        rpc_vals=rpc_full,
     )
 
-    print(f"\nFull path: {full_path}")
-    print(f"Zoom path: {zoom_path}")
     return full_path, zoom_path
 
 
@@ -1002,7 +1091,23 @@ def main():
     if args.msname:
         msname = args.msname
         if msname not in service_data:
-            raise SystemExit(f"msname '{msname}' not found in data")
+            resolved = resolve_msname(msname, service_data)
+            if resolved is not None:
+                msname = resolved
+            else:
+                available = sorted(service_data.keys())
+                preview = ", ".join(available[:20])
+                hint = ""
+                if f"MS_{msname}" in service_data:
+                    hint = f" Did you mean 'MS_{msname}'?"
+                raise SystemExit(
+                    f"msname '{msname}' not found in data.{hint} "
+                    f"Available ({len(available)}): {preview}"
+                    f"{'...' if len(available) > 20 else ''} "
+                    f"(cache index: {args.windows_dir or DEFAULT_SERVICE_INDEX}; "
+                    f"if you changed --msname with --skip_preprocessing, rebuild "
+                    f"with --recompute_windows)"
+                )
         arr = service_data[msname]
         n = arr.shape[0]
         test_start = int(n * (args.train_frac + args.val_frac))
@@ -1067,8 +1172,10 @@ def main():
     if not results:
         raise SystemExit("No simulation results. Check --hours and test split size.")
 
+    report_targets = target_features_for_feature_set(meta["feature_set"])
     metrics = compute_metrics(results, meta["pred_horizon"], args.threshold,
-                              use_conformal=args.adaptive_conformal)
+                              use_conformal=args.adaptive_conformal,
+                              target_features=report_targets)
 
     print("\n" + "=" * 72)
     print("HPA SIMULATION RESULTS")
@@ -1084,16 +1191,18 @@ def main():
     print("=" * 72)
 
     # Metrics are printed by compute_metrics; now print summary JSON keys
-    for tgt in ["cpu", "memory"]:
+    # (only actual forecast targets, not fixed CPU+Memory).
+    for tgt, _, _, _, _ in _report_entries(report_targets):
         print(f"\n{tgt.upper()} Summary:")
         print(f"  R² (model):          {metrics.get(f'{tgt}_R²_last_step', 0):>10.4f}")
         print(f"  R² (naive):          {metrics.get(f'{tgt}_R²_naive', 0):>10.4f}")
         print(f"  Beat-persistence:    {metrics.get(f'{tgt}_beat_persistence', 0):>10.2f}%")
         print(f"  ρ(pred, truth):      {metrics.get(f'{tgt}_corr_pred_true', 0):>10.4f}")
-    if args.adaptive_conformal and metrics.get("cpu_picp") is not None:
-        for tgt in ["cpu", "memory"]:
-            print(f"  {tgt.upper()} PICP: {metrics.get(f'{tgt}_picp', 0):.1%}   "
-                  f"MPIW: {metrics.get(f'{tgt}_mpiw', 0):.6f}")
+    if args.adaptive_conformal:
+        for tgt, _, _, _, _ in _report_entries(report_targets):
+            if metrics.get(f"{tgt}_picp") is not None:
+                print(f"  {tgt.upper()} PICP: {metrics.get(f'{tgt}_picp', 0):.1%}   "
+                      f"MPIW: {metrics.get(f'{tgt}_mpiw', 0):.6f}")
     print("=" * 72)
 
     os.makedirs(args.plots_dir, exist_ok=True)
@@ -1116,7 +1225,8 @@ def main():
     plot_results(results, msname, args.plots_dir, meta["pred_horizon"],
                  args.adaptive_conformal, args.threshold,
                  num_targets=meta["num_targets"],
-                 raw_feat=raw_feat, feature_names=feature_names)
+                 raw_feat=raw_feat, feature_names=feature_names,
+                 start_idx=test_start)
 
 
 if __name__ == "__main__":
