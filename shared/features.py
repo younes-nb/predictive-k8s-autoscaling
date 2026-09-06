@@ -20,6 +20,13 @@ FEATURES: Dict[str, Dict[str, str]] = {
     "readmc_mcr": {"table": "msrtmcre", "column": "readmc_mcr"},
     "writedb_mcr": {"table": "msrtmcre", "column": "writedb_mcr"},
     "readdb_mcr": {"table": "msrtmcre", "column": "readdb_mcr"},
+    # Calendar features derived from the (relative) trace timestamp, not from
+    # any parquet column. minute/hour wrap on wall clock (t=0 is 00:00);
+    # day is the day-index since trace start (timestamps are relative, so
+    # no calendar date exists). Values are exact integers (no normalization).
+    "minute": {"table": "time", "column": "minute", "derived": True},
+    "hour": {"table": "time", "column": "hour", "derived": True},
+    "day": {"table": "time", "column": "day", "derived": True},
     "um": {"table": "mscallgraph", "column": "um"},
     "dm": {"table": "mscallgraph", "column": "dm"},
     "rpctype": {"table": "mscallgraph", "column": "rpctype"},
@@ -143,6 +150,20 @@ FEATURE_SETS: Dict[str, Dict[str, Any]] = {
             "msrtmcre": ["msname"],
         },
     },
+    "http_time": {
+        "features": [
+            "http_mcr",
+            "minute",
+            "hour",
+            "day",
+        ],
+        "target": "cpu_utilization",
+        "base_table": "msrtmcre",
+        "join_keys": {
+            "msresource": ["msname"],
+            "msrtmcre": ["msname"],
+        },
+    },
     "cpu_mem_http_rpc_replicas": {
         "features": [
             "cpu_utilization",
@@ -193,10 +214,15 @@ def get_feature_set(name: str) -> Dict[str, Any]:
         )
 
     for tf in target_feats:
-        if tf not in feats:
-            raise ValueError(
-                f"feature_set='{name}': target='{tf}' must be included in features={feats}"
+        if tf not in FEATURES:
+            raise KeyError(
+                f"feature_set='{name}': unknown target '{tf}' "
+                f"(must be defined in FEATURES)"
             )
+        # NOTE: a target may live outside the input features (e.g. http_time
+        # predicts cpu_utilization from http+time inputs). Consumers that need
+        # target data (build_windows aggregation, simulator actuals) source
+        # such target-only columns explicitly; model inputs stay as listed.
     for f in feats:
         if f not in FEATURES:
             raise KeyError(
@@ -217,15 +243,46 @@ def target_features_for_feature_set(feature_set: str) -> List[str]:
     return list(get_feature_set(feature_set)["targets"])
 
 
+def is_derived_feature(feature_name: str) -> bool:
+    """Whether a feature is synthesized from the timestamp (minute/hour/day)
+    rather than read from a parquet column."""
+    return bool(FEATURES.get(feature_name, {}).get("derived", False))
+
+
+def derived_time_value(feature_name: str, minute_index: int) -> int:
+    """Exact calendar component for a relative minute index (t=0 is 00:00 of
+    day 0): minute-of-hour (0-59), hour-of-day (0-23), day-index (0-N)."""
+    if feature_name == "minute":
+        return minute_index % 60
+    if feature_name == "hour":
+        return (minute_index // 60) % 24
+    if feature_name == "day":
+        return minute_index // 1440
+    raise KeyError(f"Unknown derived time feature '{feature_name}'")
+
+
+def _sourced_names(spec: Dict[str, Any]) -> List[str]:
+    """Input features plus target-only extras (targets outside the inputs,
+    e.g. cpu_utilization for http_time) that still need table sourcing."""
+    names = list(spec["features"])
+    for tf in spec.get("targets", []):
+        if tf not in names:
+            names.append(tf)
+    return names
+
+
 def tables_for_feature_set(feature_set: str) -> Set[str]:
-    feats = feature_names_for_feature_set(feature_set)
-    return {FEATURES[f]["table"] for f in feats}
+    spec = get_feature_set(feature_set)
+    return {FEATURES[f]["table"]
+            for f in _sourced_names(spec) if not is_derived_feature(f)}
 
 
 def table_to_raw_columns(feature_set: str) -> Dict[str, List[str]]:
     spec = get_feature_set(feature_set)
     out: Dict[str, List[str]] = {}
-    for feat_name in spec["features"]:
+    for feat_name in _sourced_names(spec):
+        if is_derived_feature(feat_name):
+            continue
         meta = FEATURES[feat_name]
         t = meta["table"]
         c = meta["column"]
@@ -238,7 +295,9 @@ def table_to_raw_columns(feature_set: str) -> Dict[str, List[str]]:
 def table_to_feature_exprs(feature_set: str) -> Dict[str, List[tuple]]:
     spec = get_feature_set(feature_set)
     out: Dict[str, List[tuple]] = {}
-    for feat_name in spec["features"]:
+    for feat_name in _sourced_names(spec):
+        if is_derived_feature(feat_name):
+            continue
         meta = FEATURES[feat_name]
         t = meta["table"]
         c = meta["column"]

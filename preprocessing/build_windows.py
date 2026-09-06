@@ -66,6 +66,7 @@ from shared.config_paths import PATHS, DATASET_TABLES
 from shared.config_preprocessing_defaults import PREPROCESSING
 from shared.features import FEATURE_SETS, get_feature_set, tables_for_feature_set, table_to_feature_exprs, FEATURES
 from shared.features import mcr_column_indices as _mcr_cols_of, normalize_mcr_array as _norm_mcr
+from shared.features import is_derived_feature
 
 from preprocessing.parquet_utils import (
     list_parquet_parts,
@@ -91,6 +92,9 @@ def _scale_csv_column(values, col, col_stats):
 
 def save_chunk(out_dir, shard_idx, chunk_idx, shard_data, sync=False,
                quantize_cols=None):
+    # shard_data: {split: (Xs, Ys, Ss, Ls)} lists; Ls holds the last observed
+    # target value(s) per window (exact for any stride/split, used by
+    # evaluate for targets outside the model inputs).
     base_name = f"part-{shard_idx:04d}_chunk-{chunk_idx:04d}"
     saved_any = False
 
@@ -100,7 +104,7 @@ def save_chunk(out_dir, shard_idx, chunk_idx, shard_data, sync=False,
         with tempfile.TemporaryDirectory(dir=out_dir) as tmp_dir:
             tmp_base = os.path.join(tmp_dir, base_name)
 
-            for split, (Xs, Ys, Ss) in shard_data.items():
+            for split, (Xs, Ys, Ss, Ls) in shard_data.items():
                 if Xs:
                     x_arr = np.concatenate(Xs)
                     y_arr = np.concatenate(Ys)
@@ -115,6 +119,9 @@ def save_chunk(out_dir, shard_idx, chunk_idx, shard_data, sync=False,
                     np.save(f"{tmp_base}_X_{split}.npy", x_arr)
                     np.save(f"{tmp_base}_y_{split}.npy", y_arr)
                     np.save(f"{tmp_base}_sid_{split}.npy", np.concatenate(Ss))
+                    if Ls:
+                        np.save(f"{tmp_base}_ylast_{split}.npy",
+                                np.concatenate(Ls).astype(np.float32))
                     saved_any = True
 
             if saved_any:
@@ -203,7 +210,8 @@ def _process_service_group(group_idx, service_ids, args_dict, big, index, target
     # arrays = ctx.get("service_arrays")  # not used anymore
     # big and index are passed as parameters
 
-    shard_data = {"train": ([], [], []), "val": ([], [], []), "test": ([], [], [])}
+    shard_data = {"train": ([], [], [], []), "val": ([], [], [], []),
+                  "test": ([], [], [], [])}
     n_processed = 0
 
     for ms_id in service_ids:
@@ -238,6 +246,10 @@ def _process_service_group(group_idx, service_ids, args_dict, big, index, target
                 ("test", idx_val, n),
             ]
 
+        # Model inputs are the leading input_channels columns; any trailing
+        # target-only channels feed y only and never enter X.
+        n_input = args_dict.get("input_channels") or feat_raw.shape[1]
+
         for split_name, start, end in split_configs:
             sub_feat = feat_raw[start:end]
             if len(sub_feat) < args_dict["input_len"] + args_dict["pred_horizon"]:
@@ -248,14 +260,27 @@ def _process_service_group(group_idx, service_ids, args_dict, big, index, target
                 y_target = y_target[:, 0]
 
             Xs, Ys, Ss = windowize_multivariate(
-                sub_feat, y_target,
+                sub_feat[:, :n_input], y_target,
                 args_dict["input_len"], args_dict["pred_horizon"], args_dict["stride"],
             )
 
             if Xs.size > 0:
+                # Last observed target per window (exact for any stride): window
+                # j starts at starts[j], so its last input minute holds the
+                # persistence reference. Mirrors windowize_multivariate's loop.
+                starts = list(range(0, len(sub_feat) - args_dict["input_len"]
+                                    - args_dict["pred_horizon"] + 1,
+                                    args_dict["stride"]))
+                if len(starts) != Xs.shape[0]:
+                    raise RuntimeError(
+                        f"Window/position mismatch for '{ms_id}'/{split_name}: "
+                        f"{len(starts)} starts vs {Xs.shape[0]} windows."
+                    )
+                yl = sub_feat[[s + args_dict["input_len"] - 1 for s in starts]][:, target_indices]
                 shard_data[split_name][0].append(Xs)
                 shard_data[split_name][1].append(Ys)
                 shard_data[split_name][2].append(Ss)
+                shard_data[split_name][3].append(np.asarray(yl, dtype=np.float32))
                 n_processed += 1
 
     save_chunk(out_dir, group_idx, 0, shard_data, sync=sync,
@@ -346,6 +371,12 @@ def _arrays_signature(args, base_table):
         # --msname must re-aggregate instead of silently reusing stale arrays.
         "msname": getattr(args, "msname", None),
         "features": list(get_feature_set(args.feature_set)["features"]),
+        # A set redefinition with the same name but different targets must
+        # not reuse stale arrays (e.g. http_time retargeted at cpu).
+        "targets": list(get_feature_set(args.feature_set)["targets"]),
+        # Row-order fix: pre-ORDER_V caches hold block-scrambled series from
+        # the streaming join; force one rebuild so windows are time-ordered.
+        "order_v": 2,
         "base_parts": fp,
     }
     return hashlib.md5(json.dumps(blob, sort_keys=True).encode()).hexdigest()
@@ -722,7 +753,11 @@ def main():
     spec = get_feature_set(args.feature_set)
     feature_names = list(spec["features"])
     target_features = list(spec["targets"])
-    target_indices = [feature_names.index(f) for f in target_features]
+    # Service-array channel order: model inputs first, then any target-only
+    # extras (targets outside the inputs, e.g. cpu for http_time). Windows X
+    # is sliced to the input channels; y comes from target_indices.
+    array_features = feature_names + [t for t in target_features if t not in feature_names]
+    target_indices = [array_features.index(f) for f in target_features]
     resource_indices = [
         i for i, f in enumerate(feature_names)
         if "cpu" in f.lower() or "mem" in f.lower()
@@ -822,6 +857,10 @@ def main():
         "feature_set": args.feature_set,
         "resource_indices": resource_indices,
         "normalize_mcr": getattr(args, "normalize_mcr", False),
+        # Model-input width: service arrays may carry extra trailing
+        # target-only channels (targets outside the inputs); X windows use
+        # only these leading input channels. Equals full width normally.
+        "input_channels": len(feature_names),
     }
     args_dict.update(_split_params(args))
 
@@ -833,7 +872,11 @@ def main():
                        groups_to_run, group_size, num_workers,
                        arrays_path, index_path)
     else:
-        _phase_aggregate(args, args_dict, target_indices, feature_names,
+        # NOTE: array_features (inputs + target-only extras) is passed as the
+        # channel list so target columns are aggregated, stacked, null-dropped
+        # and recorded; X windows are still sliced to the input width inside
+        # _process_service_group via args_dict["input_channels"].
+        _phase_aggregate(args, args_dict, target_indices, array_features,
                          table_parts, needed_tables, table_exprs, base_table,
                          effective_id_cols, all_services_list,
                          arrays_path, index_path, signature)
@@ -904,9 +947,36 @@ def _phase_aggregate(args, args_dict, target_indices, feature_names,
         join_on = ["_t"] + join_keys.get(t, [])
         joined = joined.join(t_frame.lazy(), on=join_on, how="left")
 
-    # No re-sort here: _merge_part_frames already orders by (_t, id_cols), so rows
-    # within each service are in _t order; group_by below preserves it.
+    # Derived calendar features (minute/hour/day) come from the truncated
+    # timestamp _t, not from any parquet column. _t is epoch-relative
+    # (t=0 is 00:00 of day 0), so components are exact integer arithmetic.
+    derived = [f for f in feature_names if is_derived_feature(f)]
+    if derived:
+        epoch_ms = pl.col("_t").dt.epoch(time_unit="ms")
+        derived_exprs = []
+        for feat_name in derived:
+            if feat_name == "minute":
+                derived_exprs.append(((epoch_ms // 60000) % 60).alias(feat_name))
+            elif feat_name == "hour":
+                derived_exprs.append(((epoch_ms // 3600000) % 24).alias(feat_name))
+            elif feat_name == "day":
+                derived_exprs.append((epoch_ms // 86400000).alias(feat_name))
+            else:
+                raise SystemExit(
+                    f"Derived feature '{feat_name}' has no timestamp rule; "
+                    f"extend the derived-feature block in _phase_aggregate."
+                )
+        joined = joined.with_columns(derived_exprs)
+
     joined_df = joined.drop_nulls(feature_names).collect(engine="streaming")
+    # The streaming-engine left join above does NOT preserve row order (each
+    # input table is sorted, but the join output is block-scrambled).
+    # Windows/splits are positional, so re-sort by (service, time) here;
+    # group_by(maintain_order=True) below then yields time-ordered series.
+    # NOTE: this changes every window built from joined tables; ORDER_V in
+    # the signature forces a rebuild of pre-fix caches.
+    group_cols = [c for c in effective_id_cols if c in joined_df.columns]
+    joined_df = joined_df.sort(group_cols + ["_t"])
     print(f"Joined/clean table: {joined_df.height} rows "
           f"in {time.time() - t_join:.1f}s", flush=True)
 
@@ -914,7 +984,6 @@ def _phase_aggregate(args, args_dict, target_indices, feature_names,
         print("No valid rows after join/filtering; nothing to do.")
         return
 
-    group_cols = [c for c in effective_id_cols if c in joined_df.columns]
     service_arrays = {}
     pbar_arr = tqdm(desc="Building service arrays", unit="svc",
                     bar_format=("{desc}: {elapsed} [{rate_fmt}]"))

@@ -2,12 +2,15 @@ import os
 import sys
 import random
 import argparse
+import glob
 import logging
+import re
 import time
 import math
 import warnings
 from datetime import timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, os.pardir))
@@ -162,6 +165,31 @@ def _build_model_from_checkpoint(checkpoint, input_size, device):
     return model
 
 
+def _natural_key(p):
+    return [int(s) if s.isdigit() else s.lower()
+            for s in re.split(r"(\d+)", Path(p).name)]
+
+
+def _load_ylast_for_split(windows_dir, split):
+    """Per-window last-observed-target values, exact for any stride/split.
+
+    build_windows writes part-*_ylast_<split>.npy next to the X shards, in
+    identical row order. Returns (N, T) float32 or None when absent
+    (pre-fix caches) so callers can fall back to the previous-window
+    approximation (exact only for stride 1).
+    """
+    files = sorted(glob.glob(os.path.join(windows_dir, f"part-*_ylast_{split}.npy")),
+                   key=_natural_key)
+    if not files:
+        return None
+    try:
+        arr = np.concatenate([np.load(f, mmap_mode="r") for f in files], axis=0)
+    except Exception as e:
+        logging.warning(f"Could not load ylast shards for split={split}: {e}")
+        return None
+    return np.asarray(arr, dtype=np.float32)
+
+
 def _near_constant_valid_indices(ds, target_idxs):
     return list(range(len(ds)))
 
@@ -180,7 +208,10 @@ def _load_test_dataset(args, ckpt_args, device, log_info, feature_set_name="cpu"
 
     target_features = target_features_for_feature_set(feature_set_name)
     feature_names = feature_names_for_feature_set(feature_set_name)
-    target_idxs_in_features = [feature_names.index(f) for f in target_features]
+    # None when a target lives outside the model inputs (only consumed by
+    # no-op near-constant filters here).
+    target_idxs_in_features = [feature_names.index(f) if f in feature_names else None
+                               for f in target_features]
 
     if preprocess_approach == "none":
         test_ds = ShardedWindowsDataset(
@@ -388,7 +419,11 @@ def evaluate(args):
     target_features = target_features_for_feature_set(feature_set_name)
     feature_names = feature_names_for_feature_set(feature_set_name)
     num_targets = len(target_features)
-    target_idxs_in_features = [feature_names.index(f) for f in target_features]
+    # None when a target lives outside the model inputs (e.g. cpu for
+    # http_time); the per-target loop below sources its reference values
+    # from previous windows instead of X.
+    target_idxs_in_features = [feature_names.index(f) if f in feature_names else None
+                               for f in target_features]
 
     log_info(f"Model Type:         {model_type}")
     log_info(f"Preprocess Approach:{preprocess_approach}")
@@ -513,6 +548,31 @@ def evaluate(args):
 
     total_samples = y_pred.shape[0]
 
+    # Exact per-window last-observed targets for targets outside the model
+    # inputs (recorded at build time, valid for any stride/split). Only
+    # meaningful when y_true is raw-space (approach "none"); the files live
+    # next to the raw shards and share their row order, and the evaluated
+    # rows are its head slice (same prefix rule as head_slice_dataset_by_pct).
+    ylast_exact = None
+    needs_exact = (preprocess_approach == "none"
+                   and any(t is None for t in target_idxs_in_features))
+    if needs_exact:
+        ylast_exact = _load_ylast_for_split(args.windows_dir, args.split)
+        if ylast_exact is not None:
+            if ylast_exact.ndim == 1:
+                ylast_exact = ylast_exact[:, None]
+            if len(ylast_exact) < total_samples:
+                log_info(f"[WARN] ylast shards hold {len(ylast_exact)} rows, "
+                         f"need {total_samples}; using previous-window approximation.")
+                ylast_exact = None
+            else:
+                ylast_exact = ylast_exact[:total_samples]
+                log_info(f"Using recorded per-window last targets "
+                         f"({ylast_exact.shape}) as persistence reference.")
+        else:
+            log_info("[WARN] No ylast shards found; persistence reference uses "
+                     "the previous-window approximation (exact only for stride 1).")
+
     input_len = ckpt_args.get("input_len", PREPROCESSING.INPUT_LEN)
     horizon = ckpt_args.get("pred_horizon", PREPROCESSING.PRED_HORIZON)
     split = args.split
@@ -557,17 +617,53 @@ def evaluate(args):
     log_info(f"Model: {model_type}")
 
     for t_idx, t_name in zip(target_idxs_in_features, target_features):
-        y_last_t = y_last_all[:, t_idx]
-        if num_targets > 1:
-            y_pred_t = y_pred[:, :, t_idx]
-            y_true_t = y_true[:, :, t_idx]
+        if t_idx is None:
+            # Target outside the model inputs: the last observed target is
+            # not in X. Prefer the recorded per-window values (exact for any
+            # stride); otherwise approximate with the previous window's last
+            # target (exact only for stride 1) and drop sample 0.
+            if y_true.ndim not in (2, 3):
+                raise RuntimeError(
+                    f"Cannot derive reference values for out-of-input target "
+                    f"'{t_name}': unexpected y_true dims {y_true.ndim}."
+                )
+            t_pos = target_features.index(t_name)
+            yt_full = (y_true[:, :, t_pos] if y_true.ndim == 3 else y_true)
+            yt_full = np.asarray(yt_full, dtype=float)
+            if yt_full.ndim == 1:
+                yt_full = yt_full[:, None]
+            if y_pred.ndim == 3 and num_targets > 1:
+                yp_full = np.asarray(y_pred[:, :, t_pos], dtype=float)
+            else:
+                yp_full = np.asarray(y_pred, dtype=float)
+                if yp_full.ndim == 1:
+                    yp_full = yp_full[:, None]
+            if yp_full.shape != yt_full.shape:
+                raise RuntimeError(
+                    f"Prediction/truth shape mismatch for '{t_name}': "
+                    f"{yp_full.shape} vs {yt_full.shape}."
+                )
+            if ylast_exact is not None and t_pos < ylast_exact.shape[1]:
+                y_pred_t, y_true_t = yp_full, yt_full
+                y_last_t = ylast_exact[:, t_pos]
+                y_second_last_t = np.concatenate([y_last_t[:1], y_last_t[:-1]])
+            else:
+                y_last_full = np.concatenate([yt_full[:1, -1:], yt_full[:-1, -1:]], axis=0)
+                y_pred_t, y_true_t = yp_full[1:], yt_full[1:]
+                y_last_t = y_last_full[1:].ravel()
+                y_second_last_t = None
         else:
-            y_pred_t = y_pred
-            y_true_t = y_true
-        if preprocess_approach in ("swt", "cskv"):
-            y_second_last_t = None
-        else:
-            y_second_last_t = y_second_last_all[:, t_idx]
+            y_last_t = y_last_all[:, t_idx]
+            if num_targets > 1:
+                y_pred_t = y_pred[:, :, t_idx]
+                y_true_t = y_true[:, :, t_idx]
+            else:
+                y_pred_t = y_pred
+                y_true_t = y_true
+            if preprocess_approach in ("swt", "cskv"):
+                y_second_last_t = None
+            else:
+                y_second_last_t = y_second_last_all[:, t_idx]
         compute_metrics(
             y_pred_t, y_true_t, y_last_t, horizon, total_samples, log_info,
             target_name=t_name, y_second_last=y_second_last_t,

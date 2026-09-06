@@ -44,6 +44,8 @@ from shared.features import (
     get_feature_set,
     mcr_column_indices,
     normalize_mcr_array,
+    is_derived_feature,
+    derived_time_value,
 )
 from preprocessing.swt.decomposition import decompose_window
 from preprocessing.swt.config import CFG as SWT_CFG
@@ -103,11 +105,16 @@ def load_service_arrays_cache(arrays_path, index_path, feature_set,
                               replica_counts_path=None):
     """Load pre-aggregated service arrays from the build_windows cache.
 
-    Returns dict: msname -> numpy array (N, num_features) and
-    dict: msname -> float baseline replica count.
+    Returns (service_data, target_data, cache_feats, baseline_replicas):
+    service_data maps msname -> numpy array (N, num_features); target_data
+    maps msname -> numpy array (N, num_extra_targets) for targets outside the
+    input features (None when every target is an input channel).
+    baseline maps msname -> float baseline replica count.
     """
     spec = get_feature_set(feature_set)
     feature_names = spec["features"]
+    target_names = spec["targets"]
+    target_only = [t for t in target_names if t not in feature_names]
 
     with open(index_path) as f:
         data = json.load(f)
@@ -115,13 +122,14 @@ def load_service_arrays_cache(arrays_path, index_path, feature_set,
     # Channel order == the feature list stored at build time; fall back to the
     # legacy fixed order for old caches.
     cached_features = data.get("features") or CACHE_FEATURES
-    missing = [f for f in feature_names if f not in cached_features]
+    missing = [f for f in feature_names + target_only if f not in cached_features]
     if missing:
         raise FileNotFoundError(
             f"Cache missing features {missing}; cache only has {cached_features}"
         )
 
     feat_indices = [cached_features.index(f) for f in feature_names]
+    extra_indices = [cached_features.index(t) for t in target_only]
 
     big = np.load(arrays_path, mmap_mode="r")
     if big.shape[1] < max(feat_indices) + 1:
@@ -133,9 +141,14 @@ def load_service_arrays_cache(arrays_path, index_path, feature_set,
           f"{len(index)} services")
 
     service_data = {}
+    target_data = {}
     for svc_name, pos in index.items():
         arr = big[pos[0]:pos[0] + pos[1]][:, feat_indices].copy()
         service_data[svc_name] = arr
+        if extra_indices:
+            target_data[svc_name] = big[pos[0]:pos[0] + pos[1]][:, extra_indices].copy()
+    if not extra_indices:
+        target_data = None
 
     # Mirror build_windows MCR scaling: the cache file always holds raw values
     # while train windows were built from [0,1]-normalized MCR channels. The
@@ -173,7 +186,7 @@ def load_service_arrays_cache(arrays_path, index_path, feature_set,
     else:
         print("[WARN] No replica counts cache; using baseline_replicas=1 for all services")
 
-    return service_data, [cached_features[i] for i in feat_indices], baseline_replicas
+    return service_data, target_data, [cached_features[i] for i in feat_indices], baseline_replicas
 
 
 def resolve_msname(requested, available):
@@ -233,12 +246,12 @@ def load_alibaba_parquet(parquet_root, feature_set, service_arrays_path=None,
 
     if os.path.exists(service_arrays_path) and os.path.exists(service_index_path):
         try:
-            raw_dict, cache_feats, baseline_replicas = load_service_arrays_cache(
+            raw_dict, target_dict, cache_feats, baseline_replicas = load_service_arrays_cache(
                 service_arrays_path, service_index_path, feature_set,
                 replica_counts_path=replica_counts_path,
             )
             print(f"Loaded {len(raw_dict)} services from cache (features: {cache_feats})")
-            return raw_dict, cache_feats, baseline_replicas
+            return raw_dict, target_dict, cache_feats, baseline_replicas
         except (FileNotFoundError, KeyError) as e:
             print(f"[WARN] Cache unavailable: {e}. Falling back to parquet.")
 
@@ -252,10 +265,13 @@ def _load_from_parquet(parquet_root, feature_set):
 
     spec = get_feature_set(feature_set)
     feature_names = spec["features"]
+    target_only = [t for t in spec["targets"] if t not in feature_names]
     service_col = "msname"
 
     tables_needed = {}
-    for feat_name in feature_names:
+    for feat_name in feature_names + target_only:
+        if is_derived_feature(feat_name):
+            continue  # synthesized from the minute index below, no table read
         meta = FEATURES[feat_name]
         t = meta["table"]
         c = meta["column"]
@@ -311,11 +327,24 @@ def _load_from_parquet(parquet_root, feature_set):
             for s in service_data.values() for d in s.values()) + 1
 
     out_dict = {}
+    target_dict = {}
     out_feats = feature_names
+    all_names = feature_names + target_only
     for svc_name, feat_dict in service_data.items():
-        arr = np.zeros((N, len(feature_names)), dtype=np.float32)
-        for fi, fname in enumerate(feature_names):
-            if fname in feat_dict:
+        arr = np.zeros((N, len(all_names)), dtype=np.float32)
+        # Minutes actually observed for this service (union over real
+        # features); derived calendar features are synthesized exactly for
+        # these, mirroring build_windows' drop_nulls on real columns.
+        real_minutes = set()
+        for fname in all_names:
+            if not is_derived_feature(fname) and fname in feat_dict:
+                real_minutes.update(feat_dict[fname].keys())
+        for fi, fname in enumerate(all_names):
+            if is_derived_feature(fname):
+                for m in real_minutes:
+                    if m < N:
+                        arr[m, fi] = derived_time_value(fname, int(m))
+            elif fname in feat_dict:
                 for m, v in feat_dict[fname].items():
                     if m < N:
                         arr[m, fi] = v
@@ -332,11 +361,15 @@ def _load_from_parquet(parquet_root, feature_set):
                     left=float(arr[good[0], fi]) if len(good) > 0 else 0.0,
                     right=float(arr[good[-1], fi]) if len(good) > 0 else 0.0,
                 )
-        out_dict[svc_name] = arr
+        out_dict[svc_name] = arr[:, :len(feature_names)]
+        if target_only:
+            target_dict[svc_name] = arr[:, len(feature_names):]
+    if not target_only:
+        target_dict = None
 
     baseline_replicas = {}
     print(f"Loaded {len(out_dict)} services from parquet (features: {out_feats})")
-    return out_dict, out_feats, baseline_replicas
+    return out_dict, target_dict, out_feats, baseline_replicas
 
 
 # ================================================================
@@ -534,17 +567,42 @@ def apply_swt(raw_feat, feature_set, input_len):
 # HPA Simulation
 # ================================================================
 
+def _target_actual_lookup(meta, tgt_actual):
+    """Resolve (tgt_chan, tgt_vec, mem_chan) for ground-truth actuals.
+
+    The primary target's actuals come from the explicit tgt_actual vector when
+    the target is not a model input; otherwise from its input channel
+    (channel 0 for all current sets). Memory actuals come from the memory
+    input channel when the feature set has one, else 0.0 (N/A panel).
+    """
+    feat_names = feature_names_for_feature_set(meta["feature_set"])
+    tgt_names = target_features_for_feature_set(meta["feature_set"])
+    if tgt_actual is not None:
+        tgt_chan, tgt_vec = 0, tgt_actual
+    elif tgt_names and tgt_names[0] in feat_names:
+        tgt_chan, tgt_vec = feat_names.index(tgt_names[0]), None
+    else:
+        tgt_chan, tgt_vec = 0, None
+    mem_chan = (feat_names.index("memory_utilization")
+                if "memory_utilization" in feat_names else None)
+    return tgt_chan, tgt_vec, mem_chan
+
+
 def _run_calibration(raw_feat, model_feat, model, meta, device,
                      calibration_start, calibration_minutes,
-                     num_targets, adaptive_window, adaptive_eta):
+                     num_targets, adaptive_window, adaptive_eta,
+                     tgt_actual=None):
     """Run online conformal calibration before the evaluation window.
 
     Iterates over the calibration segment, runs inference, and feeds the
     q10/q95 predictions and actual values into an AdaptiveUpperConformalPerTarget
     calibrator.  Returns the fully calibrated calibrator for use in simulate_trace.
+    tgt_actual optionally carries the primary target's full-trace actuals when
+    the target is not a model input channel.
     """
     input_len = meta["input_len"]
     pred_horizon = meta["pred_horizon"]
+    tgt_chan, tgt_vec, mem_chan = _target_actual_lookup(meta, tgt_actual)
 
     if model_feat.ndim == 2:
         n_samp = model_feat.shape[0]
@@ -586,8 +644,8 @@ def _run_calibration(raw_feat, model_feat, model, meta, device,
             q10 = p.cpu().numpy().ravel()
             q95 = q10.copy()
 
-        cpu_actual = float(raw_feat[idx, 0])
-        mem_actual = float(raw_feat[idx, 1]) if raw_feat.shape[1] > 1 else 0.0
+        cpu_actual = float(tgt_vec[idx]) if tgt_vec is not None else float(raw_feat[idx, tgt_chan])
+        mem_actual = float(raw_feat[idx, mem_chan]) if mem_chan is not None else 0.0
 
         # Direct online calibration using current observation
         cal.states["cpu"].update(cpu_actual, float(q10[0]), float(q95[0]))
@@ -600,8 +658,8 @@ def _run_calibration(raw_feat, model_feat, model, meta, device,
         for p in matured:
             aidx = int(p["idx"] + pred_horizon)
             if aidx < n:
-                ac = float(raw_feat[aidx, 0])
-                am = float(raw_feat[aidx, 1]) if raw_feat.shape[1] > 1 else 0.0
+                ac = float(tgt_vec[aidx]) if tgt_vec is not None else float(raw_feat[aidx, tgt_chan])
+                am = float(raw_feat[aidx, mem_chan]) if mem_chan is not None else 0.0
                 cal.states["cpu"].update(ac, p["q10"][0], p["q95"][0])
                 if num_targets > 1:
                     cal.states["memory"].update(am, p["q10"][1], p["q95"][1])
@@ -617,9 +675,12 @@ def simulate_trace(raw_feat, model_feat, model, meta, device,
                    num_targets=2,
                    adaptive_cal=None,
                    adaptive_window=500, adaptive_eta=0.01,
-                   timestamps=None):
+                   timestamps=None, tgt_actual=None):
+    """tgt_actual optionally carries the primary target's full-trace actuals
+    when the target is not a model input channel (e.g. cpu for http_time)."""
     input_len = meta["input_len"]
     pred_horizon = meta["pred_horizon"]
+    tgt_chan, tgt_vec, mem_chan = _target_actual_lookup(meta, tgt_actual)
 
     if model_feat.ndim == 2:
         n_samp = model_feat.shape[0]
@@ -675,10 +736,11 @@ def simulate_trace(raw_feat, model_feat, model, meta, device,
             if num_targets > 1:
                 lower_mem, upper_mem = float(la[1]), float(ua[1])
 
-        cpu_actual = float(raw_feat[idx, 0])
-        # Actual memory is recorded whenever the trace has the channel, even for
-        # single-target (CPU-only) models where only the prediction is gated.
-        mem_actual = float(raw_feat[idx, 1]) if raw_feat.shape[1] > 1 else 0.0
+        # Primary-target actuals (explicit vector when the target is not a
+        # model input; else its input channel). Memory only when the feature
+        # set has a memory input; single-target models still record 0 pred.
+        cpu_actual = float(tgt_vec[idx]) if tgt_vec is not None else float(raw_feat[idx, tgt_chan])
+        mem_actual = float(raw_feat[idx, mem_chan]) if mem_chan is not None else 0.0
 
         # Online conformal feedback with delayed horizon alignment
         if adaptive_cal is not None:
@@ -687,8 +749,8 @@ def simulate_trace(raw_feat, model_feat, model, meta, device,
             for p in matured:
                 aidx = int(p["idx"] + pred_horizon)
                 if aidx < n:
-                    ac = float(raw_feat[aidx, 0])
-                    am = float(raw_feat[aidx, 1]) if raw_feat.shape[1] > 1 else 0.0
+                    ac = float(tgt_vec[aidx]) if tgt_vec is not None else float(raw_feat[aidx, tgt_chan])
+                    am = float(raw_feat[aidx, mem_chan]) if mem_chan is not None else 0.0
                     adaptive_cal.states["cpu"].update(ac, p["q10"][0], p["q95"][0])
                     if num_targets > 1:
                         adaptive_cal.states["memory"].update(am, p["q10"][1], p["q95"][1])
@@ -986,14 +1048,39 @@ def _mcr_display_name(feature_name):
     return feature_name.replace("_", " ").upper()
 
 
+def _target_display_name(feature_name):
+    """Human-readable label for the forecast target (cpu_utilization -> CPU)."""
+    low = feature_name.lower()
+    if low == "cpu_utilization":
+        return "CPU"
+    if low == "memory_utilization":
+        return "Memory"
+    if "mcr" in low or "rpc" in low or "http" in low:
+        return _mcr_display_name(feature_name)
+    return feature_name.replace("_", " ").upper()
+
+
 def plot_results(results, msname, plots_dir, pred_horizon, use_conformal, threshold,
-                  num_targets=2, raw_feat=None, feature_names=None, start_idx=0):
+                  num_targets=2, raw_feat=None, feature_names=None, start_idx=0,
+                  target_features=None):
+    """Panels are dynamic: the primary-target pair (unshifted + shifted) is
+    always drawn; the memory panel only when the set has a memory input; the
+    MCR panel only for the first MCR input. Anything absent from the set is
+    not plotted, and derived time features (minute/hour/day) never are.
+    """
     df = pd.DataFrame(results)
     has_ts = df["timestamp"].notna().all()
     x = df["timestamp"] if has_ts else np.arange(len(df))
 
     os.makedirs(plots_dir, exist_ok=True)
     stamp = time.strftime("%Y%m%d_%H%M%S")
+
+    feats = list(feature_names) if feature_names else []
+    primary = (target_features[0] if target_features
+               else "cpu_utilization")
+    tlabel = _target_display_name(primary)
+    has_mem = "memory_utilization" in feats
+    mem_idx = feats.index("memory_utilization") if has_mem else None
 
     actual_cpu = df["cpu"].values.astype(float)
     pred_cpu = df["pred_cpu"].values.astype(float)
@@ -1003,20 +1090,24 @@ def plot_results(results, msname, plots_dir, pred_horizon, use_conformal, thresh
     # Results cover the eval window [start_idx, start_idx+len(df)) of the full
     # trace. Older runs stored zeros in df["memory"] for single-target models;
     # fall back to the raw memory channel so the panel is never flat-zero when
-    # the data exists.
+    # the data exists. Only when the set actually has a memory input (else no
+    # memory panel is drawn at all).
     if (actual_mem is None or not np.any(actual_mem)) and raw_feat is not None \
-            and raw_feat.shape[1] > 1:
-        actual_mem = raw_feat[start_idx:start_idx + len(df), 1].astype(float)
+            and has_mem and mem_idx is not None \
+            and mem_idx < raw_feat.shape[1]:
+        actual_mem = raw_feat[start_idx:start_idx + len(df), mem_idx].astype(float)
+    if not has_mem:
+        actual_mem, pred_mem = None, None
 
-    # MCR context feature aligned to the eval window (not the trace head).
-    # Matches any MCR column (http_mcr, providerrpc_mcr, ...) so feature sets
-    # like cpu_mem_http are covered, not just *rpc*_mcr ones.
+    # MCR context feature aligned to the eval window (not the trace head):
+    # first MCR input in the set (derived time features never qualify).
     mcr_full, mcr_label = None, "MCR"
-    if raw_feat is not None and feature_names is not None:
-        for fi, fn in enumerate(feature_names):
-            if 'mcr' in fn.lower():
-                mcr_full = raw_feat[start_idx:start_idx + len(df), fi].astype(float)
-                mcr_label = _mcr_display_name(fn)
+    if raw_feat is not None and feats:
+        for fi, fn in enumerate(feats):
+            if 'mcr' in fn.lower() and not is_derived_feature(fn):
+                if fi < raw_feat.shape[1]:
+                    mcr_full = raw_feat[start_idx:start_idx + len(df), fi].astype(float)
+                    mcr_label = _mcr_display_name(fn)
                 break
 
     zoom_window = 60
@@ -1031,7 +1122,7 @@ def plot_results(results, msname, plots_dir, pred_horizon, use_conformal, thresh
                 best_center = i
         return best_center
 
-    def _plot_4panel(x_vals, actual_c, pred_c, actual_m, pred_m, title_suffix,
+    def _plot_panels(x_vals, actual_c, pred_c, actual_m, pred_m, title_suffix,
                      zoom_start=None, zoom_end=None, filename=None,
                      mcr_vals=None, mark_spikes=False,
                      spike_threshold=threshold):
@@ -1049,7 +1140,7 @@ def plot_results(results, msname, plots_dir, pred_horizon, use_conformal, thresh
             if mcr_vals is not None:
                 mcr_vals = mcr_vals[mask]
 
-        # Minutes where actual CPU exceeds the spike threshold: dashed
+        # Minutes where the actual target exceeds the spike threshold: dashed
         # vertical guides drawn through every subplot (zoom view only).
         spike_idx = (np.where(np.asarray(actual_c, dtype=float) > spike_threshold)[0]
                      if mark_spikes else np.zeros(0, dtype=int))
@@ -1061,7 +1152,7 @@ def plot_results(results, msname, plots_dir, pred_horizon, use_conformal, thresh
             for k, si in enumerate(spike_idx):
                 ax.axvline(xv[si], color="red", linestyle="--",
                            linewidth=1.0, alpha=0.5,
-                           label=f"CPU > {spike_threshold:g}" if k == 0 else None)
+                           label=f"{tlabel} > {spike_threshold:g}" if k == 0 else None)
 
         # Horizon alignment: a prediction made at minute t targets t+h, so the
         # prediction shifts RIGHT by h while actual load stays at its own
@@ -1072,59 +1163,63 @@ def plot_results(results, msname, plots_dir, pred_horizon, use_conformal, thresh
         if 0 < h < len(a_al):
             a_al, p_al = a_al[h:], p_al[:-h]
 
-        fig, axes = plt.subplots(4, 1, figsize=(22, 16), sharex=True)
+        # Panel set is data-driven: target pair always; memory/MCR only when
+        # the feature set has them (time features never get a panel).
+        show_mem = has_mem and actual_m is not None and np.any(actual_m)
+        show_mcr = mcr_vals is not None and len(mcr_vals) == len(x_vals)
+        n_panels = 2 + (1 if show_mem else 0) + (1 if show_mcr else 0)
+
+        fig, axes = plt.subplots(n_panels, 1, figsize=(22, 4 * n_panels), sharex=True)
         fig.suptitle(f"{msname} — {title_suffix}\n"
                      f"MSE={np.mean((p_al - a_al)**2):.6f}, "
                      f"MAE={np.mean(np.abs(p_al - a_al)):.6f}",
                      fontsize=13, fontweight="bold", y=0.99)
 
-        ax = axes[0]
-        ax.plot(x_vals, actual_c, color='#1976D2', linewidth=1.5, label='Actual CPU')
-        ax.plot(x_vals, pred_c, color='#FF5722', linewidth=1.5, alpha=0.8, label='Predicted CPU')
+        ai = 0
+        ax = axes[ai]; ai += 1
+        ax.plot(x_vals, actual_c, color='#1976D2', linewidth=1.5, label=f'Actual {tlabel}')
+        ax.plot(x_vals, pred_c, color='#FF5722', linewidth=1.5, alpha=0.8, label=f'Predicted {tlabel}')
         _spike_lines(ax)
-        ax.set_ylim(0, 1); ax.set_ylabel('CPU')
-        ax.set_title('Predicted vs Actual CPU (unshifted)')
+        ax.set_ylim(0, 1); ax.set_ylabel(tlabel)
+        ax.set_title(f'Predicted vs Actual {tlabel} (unshifted)')
         ax.legend(); ax.grid(True, alpha=0.2)
 
-        ax = axes[1]
-        ax.plot(x_vals, actual_c, color='#1976D2', linewidth=1.5, label='Actual CPU')
+        ax = axes[ai]; ai += 1
+        ax.plot(x_vals, actual_c, color='#1976D2', linewidth=1.5, label=f'Actual {tlabel}')
         if 0 < h < len(x_vals):
             ax.plot(np.asarray(x_vals)[h:], np.asarray(pred_c, dtype=float)[:-h],
                     color='#FF5722', linewidth=1.5, alpha=0.8,
-                    label=f'Predicted CPU (shifted +{h})')
+                    label=f'Predicted {tlabel} (shifted +{h})')
         else:
             ax.plot(x_vals, pred_c, color='#FF5722', linewidth=1.5, alpha=0.8,
-                    label='Predicted CPU')
+                    label=f'Predicted {tlabel}')
         _spike_lines(ax)
-        ax.set_ylim(0, 1); ax.set_ylabel('CPU')
-        ax.set_title(f'Predicted vs Actual CPU (prediction shifted +{h}: '
+        ax.set_ylim(0, 1); ax.set_ylabel(tlabel)
+        ax.set_title(f'Predicted vs Actual {tlabel} (prediction shifted +{h}: '
                      f'pred[t] at actual[t+{h}])')
         ax.legend(); ax.grid(True, alpha=0.2)
 
-        ax = axes[2]
-        if actual_m is not None and np.any(actual_m):
+        if show_mem:
+            ax = axes[ai]; ai += 1
             ax.plot(x_vals, actual_m, color='#4CAF50', linewidth=1.5, label='Actual Memory')
             if pred_m is not None and np.any(pred_m):
                 ax.plot(x_vals, pred_m, color='#FF9800', linewidth=1.5, alpha=0.8,
                         label='Predicted Memory')
-        else:
-            ax.plot(x_vals, np.zeros(len(x_vals)), color='#4CAF50', linewidth=1.5, label='Memory (N/A)')
-        _spike_lines(ax)
-        ax.set_ylim(0, 1); ax.set_ylabel('Memory')
-        ax.set_title('Memory')
-        ax.legend(); ax.grid(True, alpha=0.2)
+            _spike_lines(ax)
+            ax.set_ylim(0, 1); ax.set_ylabel('Memory')
+            ax.set_title('Memory')
+            ax.legend(); ax.grid(True, alpha=0.2)
 
-        ax = axes[3]
-        if mcr_vals is not None and len(mcr_vals) == len(x_vals):
+        if show_mcr:
+            ax = axes[ai]; ai += 1
             ax.plot(x_vals, mcr_vals, color='#9C27B0', linewidth=1.5, label=mcr_label)
+            _spike_lines(ax)
+            ax.set_ylim(0, 1)
+            ax.set_ylabel(mcr_label)
+            ax.set_title(mcr_label)
+            ax.set_xlabel('Minute'); ax.legend(); ax.grid(True, alpha=0.2)
         else:
-            ax.plot(x_vals, np.zeros(len(x_vals)), color='#9C27B0', linewidth=1.5,
-                    label=f'{mcr_label} (N/A)')
-        _spike_lines(ax)
-        ax.set_ylim(0, 1)
-        ax.set_ylabel(mcr_label)
-        ax.set_title(mcr_label)
-        ax.set_xlabel('Minute'); ax.legend(); ax.grid(True, alpha=0.2)
+            axes[ai - 1].set_xlabel('Minute')
 
         plt.tight_layout(rect=[0, 0, 1, 0.96])
         filepath = os.path.join(plots_dir, filename)
@@ -1135,7 +1230,7 @@ def plot_results(results, msname, plots_dir, pred_horizon, use_conformal, thresh
 
     x_range = np.arange(len(df))
 
-    full_path = _plot_4panel(
+    full_path = _plot_panels(
         x_range, actual_cpu, pred_cpu,
         actual_mem, pred_mem,
         "Full Test Set (unshifted + shifted, h={})".format(pred_horizon),
@@ -1147,7 +1242,7 @@ def plot_results(results, msname, plots_dir, pred_horizon, use_conformal, thresh
     zoom_start = max(0, zoom_center - zoom_window)
     zoom_end = min(len(df), zoom_center + zoom_window)
 
-    zoom_path = _plot_4panel(
+    zoom_path = _plot_panels(
         x_range, actual_cpu, pred_cpu,
         actual_mem, pred_mem,
         f"Zoomed (min {zoom_start}-{zoom_end}, highest-std window)",
@@ -1173,7 +1268,7 @@ def main():
         meta["input_len"] = args.input_len
 
     print("Loading Alibaba parquet...")
-    service_data, cache_feats, _ = load_alibaba_parquet(
+    service_data, target_data, cache_feats, _ = load_alibaba_parquet(
         args.parquet_root, meta["feature_set"],
         windows_dir=args.windows_dir,
     )
@@ -1213,6 +1308,24 @@ def main():
     raw_feat = arr.astype(np.float32)
     print(f"Raw feature array: {raw_feat.shape}")
 
+    # Primary-target actuals. When the target is not a model input channel
+    # (e.g. cpu for http_time), they come from the separately loaded target
+    # data; otherwise the trace functions read the target's input channel.
+    spec = get_feature_set(meta["feature_set"])
+    primary_target = spec["targets"][0]
+    if primary_target in spec["features"]:
+        tgt_actual = None
+    else:
+        extras = [t for t in spec["targets"] if t not in spec["features"]]
+        if target_data is None or msname not in target_data:
+            raise SystemExit(
+                f"Target '{primary_target}' is not a model input and no target "
+                f"data was loaded for '{msname}'. Rebuild windows for "
+                f"feature_set='{meta['feature_set']}'."
+            )
+        tgt_actual = target_data[msname][:, extras.index(primary_target)].astype(np.float32)
+        print(f"Target actuals '{primary_target}': {tgt_actual.shape}")
+
     ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
     ckpt_args = ckpt.get("args", {}) or {}
     preprocess = ckpt_args.get("preprocess_approach", "none")
@@ -1242,6 +1355,7 @@ def main():
             num_targets=meta["num_targets"],
             adaptive_window=args.adaptive_window,
             adaptive_eta=args.adaptive_eta,
+            tgt_actual=tgt_actual,
         )
     else:
         adaptive_cal = None
@@ -1257,6 +1371,7 @@ def main():
         adaptive_window=args.adaptive_window,
         adaptive_eta=args.adaptive_eta,
         timestamps=timestamps,
+        tgt_actual=tgt_actual,
     )
 
     if not results:
@@ -1316,7 +1431,7 @@ def main():
                  args.adaptive_conformal, args.threshold,
                  num_targets=meta["num_targets"],
                  raw_feat=raw_feat, feature_names=feature_names,
-                 start_idx=test_start)
+                 start_idx=test_start, target_features=report_targets)
 
 
 if __name__ == "__main__":
