@@ -1,4 +1,6 @@
-from typing import Dict, Any, List, Set
+from typing import Dict, Any, List, Set, Optional
+
+import numpy as np
 
 FEATURES: Dict[str, Dict[str, str]] = {
     "cpu_utilization": {"table": "msresource", "column": "cpu_utilization"},
@@ -128,6 +130,19 @@ FEATURE_SETS: Dict[str, Dict[str, Any]] = {
             "msrtmcre": ["msname"],
         },
     },
+    "cpu_mem_http": {
+        "features": [
+            "cpu_utilization",
+            "memory_utilization",
+            "http_mcr",
+        ],
+        "target": "cpu_utilization",
+        "base_table": "msresource",
+        "join_keys": {
+            "msresource": ["msname"],
+            "msrtmcre": ["msname"],
+        },
+    },
     "cpu_mem_http_rpc_replicas": {
         "features": [
             "cpu_utilization",
@@ -229,4 +244,40 @@ def table_to_feature_exprs(feature_set: str) -> Dict[str, List[tuple]]:
         c = meta["column"]
         out.setdefault(t, [])
         out[t].append((feat_name, c))
+    return out
+
+
+def is_mcr_feature(feature_name: str) -> bool:
+    """Whether a feature is an MCR-family column (rpc/http/mcr rate columns
+    from msrtmcre). Single source of truth for the --normalize_mcr column rule
+    shared by build_windows and the simulator."""
+    n = feature_name.lower()
+    return "mcr" in n or "rpc" in n or "http" in n
+
+
+def mcr_column_indices(feature_names: List[str]) -> List[int]:
+    """Channel positions of MCR-family features within an ordered feature list."""
+    return [i for i, f in enumerate(feature_names) if is_mcr_feature(f)]
+
+
+def normalize_mcr_array(arr: np.ndarray, cols: List[int],
+                        lo_hi: Optional[Dict[int, tuple]] = None) -> Dict[int, tuple]:
+    """In-place per-column [0,1] min-max normalization of MCR channels.
+
+    With lo_hi=None the bounds are computed over arr (per-service scope when
+    arr holds one service's full timeline); otherwise the given global bounds
+    are applied. Zero-range columns become 0.0. Returns {col: (lo, hi)}.
+    """
+    out: Dict[int, tuple] = {}
+    for j in cols:
+        if lo_hi is not None:
+            lo, hi = lo_hi[j]
+        else:
+            col = arr[:, j]
+            lo, hi = float(col.min()), float(col.max())
+        if hi - lo > 1e-12:
+            arr[:, j] = (arr[:, j] - lo) / (hi - lo)
+        else:
+            arr[:, j] = 0.0
+        out[j] = (lo, hi)
     return out

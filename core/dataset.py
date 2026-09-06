@@ -27,6 +27,7 @@ class ShardedWindowsDataset(Dataset):
 
         if not x_files:
             print(f"[WARN] No shards found for split={split} in {windows_dir}")
+            self.total_len = 0
             return
 
         print(f"[{split}] Loading shards...")

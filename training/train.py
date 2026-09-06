@@ -226,7 +226,12 @@ def train(args):
         input_size = first_x.shape[-1]
         log_info(f"Inferred Input Size: {input_size}")
     else:
-        raise RuntimeError("Train dataset is empty.")
+        raise RuntimeError(
+            "Train dataset is empty. Check that windows were built for the "
+            "requested service/feature set (see build_windows warnings about "
+            "stale service-array cache after --msname changes) and that "
+            f"{args.windows_dir} holds part-*_X_train.npy shards."
+        )
 
     if preprocess_approach == "swt":
         from preprocessing.swt.config import CFG as SWT_CFG
@@ -387,9 +392,23 @@ def train(args):
         log_info("AMP (FP16 mixed precision) enabled via Accelerate")
 
     def _compute_loss(model, preds, y):
+        # Contract: (B, H, T). Single-target linear models (linearreg,
+        # dlinear) return 2D (B, H); without promotion the [..., -1:, :]
+        # slice below would silently select the last BATCH row instead of
+        # the last horizon step (broadcasting then hides it completely).
+        if preds.dim() == 2:
+            preds = preds.unsqueeze(-1)
+        if y.dim() == 2:
+            y = y.unsqueeze(-1)
         if args.last_step_only:
             preds = preds[..., -1:, :]
             y = y[..., -1:, :]
+        if preds.shape != y.shape:
+            raise RuntimeError(
+                f"Prediction/target shape mismatch: {tuple(preds.shape)} vs "
+                f"{tuple(y.shape)}. Check model output dims for "
+                f"feature_set={getattr(args, 'feature_set', '?')}."
+            )
         if args.loss_mode == "joint_mse":
             loss = nn.functional.mse_loss(preds, y)
         elif args.loss_mode == "per_target_huber":

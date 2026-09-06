@@ -65,6 +65,7 @@ from core.utils import windowize_multivariate
 from shared.config_paths import PATHS, DATASET_TABLES
 from shared.config_preprocessing_defaults import PREPROCESSING
 from shared.features import FEATURE_SETS, get_feature_set, tables_for_feature_set, table_to_feature_exprs, FEATURES
+from shared.features import mcr_column_indices as _mcr_cols_of, normalize_mcr_array as _norm_mcr
 
 from preprocessing.parquet_utils import (
     list_parquet_parts,
@@ -341,6 +342,10 @@ def _arrays_signature(args, base_table):
         "pred_horizon": args.pred_horizon,
         "max_services": args.max_services,
         "subset_seed": args.subset_seed,
+        # A single-service cache is useless for another service: changing
+        # --msname must re-aggregate instead of silently reusing stale arrays.
+        "msname": getattr(args, "msname", None),
+        "features": list(get_feature_set(args.feature_set)["features"]),
         "base_parts": fp,
     }
     return hashlib.md5(json.dumps(blob, sort_keys=True).encode()).hexdigest()
@@ -357,7 +362,8 @@ def _arrays_cache_valid(arrays_path, index_path, signature):
         return False
 
 
-def _save_service_arrays(service_arrays, arrays_path, index_path, signature):
+def _save_service_arrays(service_arrays, arrays_path, index_path, signature,
+                         feature_names=None, normalize_mcr=False):
     total = sum(len(a) for a in service_arrays.values())
     channels = next(iter(service_arrays.values())).shape[1]
     big = np.empty((total, channels), dtype="float32")
@@ -370,7 +376,15 @@ def _save_service_arrays(service_arrays, arrays_path, index_path, signature):
         off += len(a)
     np.save(arrays_path, big)
     with open(index_path, "w") as f:
-        json.dump({"signature": signature, "index": index}, f)
+        # Channel order == feature_names order; the simulator maps its
+        # requested features by name instead of assuming a fixed layout.
+        # normalize_mcr records whether train windows were built from
+        # per-service [0,1]-normalized MCR channels (the file itself always
+        # holds raw values); the simulator mirrors the transform so it feeds
+        # the model the same scale it was trained on.
+        json.dump({"signature": signature, "index": index,
+                   "features": list(feature_names) if feature_names else None,
+                   "normalize_mcr": bool(normalize_mcr)}, f)
     del big
     gc.collect()
     print(f"Service arrays cached: {os.path.basename(arrays_path)} "
@@ -558,7 +572,10 @@ def _run_csv_source(args, spec, feature_names, target_indices,
             print("No services with enough data in CSV; nothing to do.")
             return
         all_services_list = sorted(service_arrays.keys())
-        _save_service_arrays(service_arrays, arrays_path, index_path, signature)
+        # CSV path: _phase_windows never applies --normalize_mcr here (its
+        # args_dict omits the key; CSV MCR columns are pre-scaled at load).
+        _save_service_arrays(service_arrays, arrays_path, index_path, signature,
+                             feature_names=feature_names, normalize_mcr=False)
 
     if args.batch_size and args.batch_size > 0:
         group_size = args.batch_size
@@ -930,7 +947,9 @@ def _phase_aggregate(args, args_dict, target_indices, feature_names,
     del joined
     gc.collect()
 
-    _save_service_arrays(service_arrays, arrays_path, index_path, signature)
+    _save_service_arrays(service_arrays, arrays_path, index_path, signature,
+                         feature_names=feature_names,
+                         normalize_mcr=bool(args_dict.get("normalize_mcr")))
 
 
 def _phase_windows(args, args_dict, target_indices, all_services_list,
@@ -943,23 +962,48 @@ def _phase_windows(args, args_dict, target_indices, all_services_list,
     print(f"Loaded service arrays (mmap): {big.shape[0]} rows x {big.shape[1]} ch, "
           f"{len(index)} services", flush=True)
 
-    if args_dict.get("normalize_mcr"):
-        feature_names = list(get_feature_set(args_dict["feature_set"])["features"])
-        mcr_cols = [i for i, f in enumerate(feature_names)
-                    if "mcr" in f.lower() or "rpc" in f.lower() or "http" in f.lower()]
-        if mcr_cols:
-            print(f"Normalizing MCR columns {mcr_cols} ({[feature_names[i] for i in mcr_cols]}) "
-                  f"per-service to [0,1]...", flush=True)
-            for svc_name, pos in index.items():
-                start, length = pos[0], pos[1]
-                for col in mcr_cols:
-                    col_slice = big[start:start + length, col]
-                    lo, hi = col_slice.min(), col_slice.max()
-                    if hi - lo > 1e-12:
-                        big[start:start + length, col] = (col_slice - lo) / (hi - lo)
-                    else:
-                        big[start:start + length, col] = 0.0
-            print(f"MCR normalization complete", flush=True)
+    # Fail fast instead of silently writing zero shards: the cache holds a
+    # different service set than requested (e.g. --msname changed without
+    # cache invalidation). Remove the _service_arrays files to re-aggregate.
+    missing = [s for s in all_services_list if s not in index]
+    if missing:
+        have = sorted(index.keys())
+        raise SystemExit(
+            f"{len(missing)} requested services not in the service-array cache "
+            f"(e.g. {missing[:5]}). Cache holds {len(have)} services "
+            f"(e.g. {have[:5]}). Delete {arrays_path} and {index_path} "
+            f"(or change a signature input like --msname) to force re-aggregation."
+        )
+
+    feature_names = list(get_feature_set(args_dict["feature_set"])["features"])
+    mcr_cols = _mcr_cols_of(feature_names)
+    # Effective scope for the shards built below. CSV input never applies
+    # windows-phase normalization (its MCR columns are pre-scaled at load).
+    if getattr(args, "csv_path", None):
+        effective_scope = "none"
+    elif args_dict.get("normalize_mcr"):
+        effective_scope = "per_service"
+    else:
+        effective_scope = "global"
+    # The scope describes how the shards were scaled; the simulator reads it
+    # back so inference sees the training scale. Persist it whenever shards
+    # are (re)built.
+    if mcr_cols and data.get("mcr_norm_scope") != effective_scope:
+        data["mcr_norm_scope"] = effective_scope
+        with open(index_path, "w") as f:
+            json.dump(data, f)
+    if mcr_cols and effective_scope == "per_service":
+        print(f"Normalizing MCR columns {mcr_cols} ({[feature_names[i] for i in mcr_cols]}) "
+              f"per-service to [0,1]...", flush=True)
+        for svc_name, pos in index.items():
+            start, length = pos[0], pos[1]
+            _norm_mcr(big[start:start + length], mcr_cols)
+        print(f"MCR normalization complete", flush=True)
+    elif mcr_cols and effective_scope == "global":
+        print(f"Normalizing MCR columns {mcr_cols} ({[feature_names[i] for i in mcr_cols]}) "
+              f"across the entire dataset to [0,1]...", flush=True)
+        _norm_mcr(big, mcr_cols)
+        print(f"MCR normalization complete", flush=True)
 
     global _WORKER_CTX
     _WORKER_CTX = {

@@ -42,6 +42,8 @@ from shared.features import (
     feature_names_for_feature_set,
     target_features_for_feature_set,
     get_feature_set,
+    mcr_column_indices,
+    normalize_mcr_array,
 )
 from preprocessing.swt.decomposition import decompose_window
 from preprocessing.swt.config import CFG as SWT_CFG
@@ -92,7 +94,9 @@ def parse_args():
 DEFAULT_SERVICE_ARRAYS = "/dataset/windows/_service_arrays.npy"
 DEFAULT_SERVICE_INDEX = "/dataset/windows/_service_index.json"
 DEFAULT_REPLICA_COUNTS = "/dataset/windows/_service_replica_counts.npy"
-CACHE_FEATURES = ["cpu_utilization", "memory_utilization", "providerrpc_mcr"]
+# Legacy fallback for caches written before build_windows stored channel names
+# in _service_index.json (those caches always held cpu/mem/rpc in this order).
+CACHE_FEATURES = ["cpu_utilization", "memory_utilization", "providerrpc_mcr", "http_mcr"]
 
 
 def load_service_arrays_cache(arrays_path, index_path, feature_set,
@@ -104,19 +108,27 @@ def load_service_arrays_cache(arrays_path, index_path, feature_set,
     """
     spec = get_feature_set(feature_set)
     feature_names = spec["features"]
-    missing = [f for f in feature_names if f not in CACHE_FEATURES]
-    if missing:
-        raise FileNotFoundError(
-            f"Cache missing features {missing}; cache only has {CACHE_FEATURES}"
-        )
-
-    feat_indices = [CACHE_FEATURES.index(f) for f in feature_names]
 
     with open(index_path) as f:
         data = json.load(f)
     index = data["index"]
+    # Channel order == the feature list stored at build time; fall back to the
+    # legacy fixed order for old caches.
+    cached_features = data.get("features") or CACHE_FEATURES
+    missing = [f for f in feature_names if f not in cached_features]
+    if missing:
+        raise FileNotFoundError(
+            f"Cache missing features {missing}; cache only has {cached_features}"
+        )
+
+    feat_indices = [cached_features.index(f) for f in feature_names]
 
     big = np.load(arrays_path, mmap_mode="r")
+    if big.shape[1] < max(feat_indices) + 1:
+        raise FileNotFoundError(
+            f"Cache width {big.shape[1]} incompatible with channels "
+            f"{cached_features}; rebuild windows with --recompute_windows"
+        )
     print(f"Service arrays cache: {big.shape[0]} rows x {big.shape[1]} ch, "
           f"{len(index)} services")
 
@@ -124,6 +136,33 @@ def load_service_arrays_cache(arrays_path, index_path, feature_set,
     for svc_name, pos in index.items():
         arr = big[pos[0]:pos[0] + pos[1]][:, feat_indices].copy()
         service_data[svc_name] = arr
+
+    # Mirror build_windows MCR scaling: the cache file always holds raw values
+    # while train windows were built from [0,1]-normalized MCR channels. The
+    # recorded scope selects the identical transform so the model sees the
+    # scale it was trained on: per-service min/max ("per_service",
+    # --normalize_mcr) or dataset-wide min/max ("global", the default).
+    # Legacy caches without a scope key fall back to the old boolean
+    # (true -> per_service, absent -> none/raw).
+    scope = data.get("mcr_norm_scope")
+    if scope is None:
+        scope = "per_service" if data.get("normalize_mcr") else "none"
+    mcr_cols = mcr_column_indices(feature_names)
+    if mcr_cols and scope == "per_service":
+        print(f"[INFO] Applying recorded per-service MCR normalization "
+              f"to {[feature_names[j] for j in mcr_cols]}")
+        for arr in service_data.values():
+            normalize_mcr_array(arr, mcr_cols)
+    elif mcr_cols and scope == "global":
+        print(f"[INFO] Applying recorded dataset-wide MCR normalization "
+              f"to {[feature_names[j] for j in mcr_cols]}")
+        glo = {}
+        for j in mcr_cols:
+            los = [float(arr[:, j].min()) for arr in service_data.values()]
+            his = [float(arr[:, j].max()) for arr in service_data.values()]
+            glo[j] = (min(los), max(his))
+        for arr in service_data.values():
+            normalize_mcr_array(arr, mcr_cols, lo_hi=glo)
 
     baseline_replicas = {}
     if replica_counts_path and os.path.exists(replica_counts_path):
@@ -134,7 +173,7 @@ def load_service_arrays_cache(arrays_path, index_path, feature_set,
     else:
         print("[WARN] No replica counts cache; using baseline_replicas=1 for all services")
 
-    return service_data, [CACHE_FEATURES[i] for i in feat_indices], baseline_replicas
+    return service_data, [cached_features[i] for i in feat_indices], baseline_replicas
 
 
 def resolve_msname(requested, available):
@@ -230,9 +269,17 @@ def _load_from_parquet(parquet_root, feature_set):
             print(f"[WARN] Table dir not found: {table_dir}")
             continue
 
-        print(f"Reading table '{table_name}' from {table_dir}...")
+        # Only real parquet parts: the dirs also contain marker files
+        # (e.g. msr_*.done) that are not parquet and break dataset discovery.
+        part_files = sorted(glob.glob(os.path.join(table_dir, "part-*.parquet")))
+        if not part_files:
+            print(f"[WARN] No part-*.parquet files in {table_dir}")
+            continue
+
+        print(f"Reading table '{table_name}' from {table_dir} "
+              f"({len(part_files)} parts)...")
         try:
-            dataset = ds.dataset(table_dir, format="parquet")
+            dataset = ds.dataset(part_files, format="parquet")
         except Exception as e:
             print(f"[WARN] Could not read {table_dir}: {e}")
             continue
@@ -923,6 +970,22 @@ def compute_metrics(results, pred_horizon, threshold, use_conformal=False,
 # Plotting
 # ================================================================
 
+def _mcr_display_name(feature_name):
+    """Human-readable panel label for an MCR feature (http_mcr -> HTTP MCR)."""
+    low = feature_name.lower()
+    if "http" in low:
+        return "HTTP MCR"
+    if "providerrpc" in low:
+        return "Provider RPC MCR"
+    if "consumerrpc" in low:
+        return "Consumer RPC MCR"
+    if "providermq" in low:
+        return "Provider MQ MCR"
+    if "consumermq" in low:
+        return "Consumer MQ MCR"
+    return feature_name.replace("_", " ").upper()
+
+
 def plot_results(results, msname, plots_dir, pred_horizon, use_conformal, threshold,
                   num_targets=2, raw_feat=None, feature_names=None, start_idx=0):
     df = pd.DataFrame(results)
@@ -945,12 +1008,15 @@ def plot_results(results, msname, plots_dir, pred_horizon, use_conformal, thresh
             and raw_feat.shape[1] > 1:
         actual_mem = raw_feat[start_idx:start_idx + len(df), 1].astype(float)
 
-    # RPC context feature aligned to the eval window (not the trace head).
-    rpc_full = None
+    # MCR context feature aligned to the eval window (not the trace head).
+    # Matches any MCR column (http_mcr, providerrpc_mcr, ...) so feature sets
+    # like cpu_mem_http are covered, not just *rpc*_mcr ones.
+    mcr_full, mcr_label = None, "MCR"
     if raw_feat is not None and feature_names is not None:
         for fi, fn in enumerate(feature_names):
-            if 'rpc' in fn.lower() and 'mcr' in fn.lower():
-                rpc_full = raw_feat[start_idx:start_idx + len(df), fi].astype(float)
+            if 'mcr' in fn.lower():
+                mcr_full = raw_feat[start_idx:start_idx + len(df), fi].astype(float)
+                mcr_label = _mcr_display_name(fn)
                 break
 
     zoom_window = 60
@@ -967,7 +1033,8 @@ def plot_results(results, msname, plots_dir, pred_horizon, use_conformal, thresh
 
     def _plot_4panel(x_vals, actual_c, pred_c, actual_m, pred_m, title_suffix,
                      zoom_start=None, zoom_end=None, filename=None,
-                     rpc_vals=None):
+                     mcr_vals=None, mark_spikes=False,
+                     spike_threshold=threshold):
         if zoom_start is not None:
             mask = np.arange(len(x_vals)) >= zoom_start
             if zoom_end is not None:
@@ -979,29 +1046,59 @@ def plot_results(results, msname, plots_dir, pred_horizon, use_conformal, thresh
                 actual_m = actual_m[mask]
             if pred_m is not None:
                 pred_m = pred_m[mask]
-            if rpc_vals is not None:
-                rpc_vals = rpc_vals[mask]
+            if mcr_vals is not None:
+                mcr_vals = mcr_vals[mask]
+
+        # Minutes where actual CPU exceeds the spike threshold: dashed
+        # vertical guides drawn through every subplot (zoom view only).
+        spike_idx = (np.where(np.asarray(actual_c, dtype=float) > spike_threshold)[0]
+                     if mark_spikes else np.zeros(0, dtype=int))
+
+        def _spike_lines(ax):
+            if len(spike_idx) == 0:
+                return
+            xv = np.asarray(x_vals)
+            for k, si in enumerate(spike_idx):
+                ax.axvline(xv[si], color="red", linestyle="--",
+                           linewidth=1.0, alpha=0.5,
+                           label=f"CPU > {spike_threshold:g}" if k == 0 else None)
+
+        # Horizon alignment: a prediction made at minute t targets t+h, so the
+        # prediction shifts RIGHT by h while actual load stays at its own
+        # timestamps. Title stats use the same aligned pairing.
+        h = max(int(pred_horizon), 0)
+        a_al = np.asarray(actual_c, dtype=float)
+        p_al = np.asarray(pred_c, dtype=float)
+        if 0 < h < len(a_al):
+            a_al, p_al = a_al[h:], p_al[:-h]
 
         fig, axes = plt.subplots(4, 1, figsize=(22, 16), sharex=True)
         fig.suptitle(f"{msname} — {title_suffix}\n"
-                     f"MSE={np.mean((pred_c - actual_c)**2):.6f}, "
-                     f"MAE={np.mean(np.abs(pred_c - actual_c)):.6f}",
+                     f"MSE={np.mean((p_al - a_al)**2):.6f}, "
+                     f"MAE={np.mean(np.abs(p_al - a_al)):.6f}",
                      fontsize=13, fontweight="bold", y=0.99)
 
         ax = axes[0]
         ax.plot(x_vals, actual_c, color='#1976D2', linewidth=1.5, label='Actual CPU')
         ax.plot(x_vals, pred_c, color='#FF5722', linewidth=1.5, alpha=0.8, label='Predicted CPU')
+        _spike_lines(ax)
         ax.set_ylim(0, 1); ax.set_ylabel('CPU')
         ax.set_title('Predicted vs Actual CPU (unshifted)')
         ax.legend(); ax.grid(True, alpha=0.2)
 
         ax = axes[1]
-        x_shifted = x_vals[:-1] if hasattr(x_vals, '__len__') else x_vals[:-1]
-        ax.plot(x_vals[:-1], actual_c[1:], color='#1976D2', linewidth=1.5, label='Actual CPU(t+1)')
-        ax.plot(x_vals[:-1], pred_c[:-1], color='#FF5722', linewidth=1.5, alpha=0.8,
-                label='Pred(t) vs Actual(t+1)')
+        ax.plot(x_vals, actual_c, color='#1976D2', linewidth=1.5, label='Actual CPU')
+        if 0 < h < len(x_vals):
+            ax.plot(np.asarray(x_vals)[h:], np.asarray(pred_c, dtype=float)[:-h],
+                    color='#FF5722', linewidth=1.5, alpha=0.8,
+                    label=f'Predicted CPU (shifted +{h})')
+        else:
+            ax.plot(x_vals, pred_c, color='#FF5722', linewidth=1.5, alpha=0.8,
+                    label='Predicted CPU')
+        _spike_lines(ax)
         ax.set_ylim(0, 1); ax.set_ylabel('CPU')
-        ax.set_title('Predicted vs Actual CPU (shifted +1: pred[t] vs actual[t+1])')
+        ax.set_title(f'Predicted vs Actual CPU (prediction shifted +{h}: '
+                     f'pred[t] at actual[t+{h}])')
         ax.legend(); ax.grid(True, alpha=0.2)
 
         ax = axes[2]
@@ -1012,28 +1109,21 @@ def plot_results(results, msname, plots_dir, pred_horizon, use_conformal, thresh
                         label='Predicted Memory')
         else:
             ax.plot(x_vals, np.zeros(len(x_vals)), color='#4CAF50', linewidth=1.5, label='Memory (N/A)')
+        _spike_lines(ax)
         ax.set_ylim(0, 1); ax.set_ylabel('Memory')
         ax.set_title('Memory')
         ax.legend(); ax.grid(True, alpha=0.2)
 
         ax = axes[3]
-        if rpc_vals is not None and len(rpc_vals) == len(x_vals):
-            ax.plot(x_vals, rpc_vals, color='#9C27B0', linewidth=1.5, label='RPC MCR')
-            rmax = float(np.max(rpc_vals))
-            rmin = float(np.min(rpc_vals))
-            if rmin >= 0.0 and rmax <= 1.0 and (rmax - rmin) > 1e-3:
-                ax.set_ylim(0, 1)
-            else:
-                # RPC is an unbounded sum (often ~0 or >>1): autoscale so the
-                # signal is visible instead of a flat line at the plot edge.
-                span = rmax - rmin
-                pad = span * 0.15 if span > 1e-12 else (abs(rmax) * 0.15 or 1.0)
-                ax.set_ylim(min(0.0, rmin) - pad * 0.1, rmax + pad)
+        if mcr_vals is not None and len(mcr_vals) == len(x_vals):
+            ax.plot(x_vals, mcr_vals, color='#9C27B0', linewidth=1.5, label=mcr_label)
         else:
-            ax.plot(x_vals, np.zeros(len(x_vals)), color='#9C27B0', linewidth=1.5, label='RPC MCR (N/A)')
-            ax.set_ylim(0, 1)
-        ax.set_ylabel('RPC MCR')
-        ax.set_title('RPC MCR')
+            ax.plot(x_vals, np.zeros(len(x_vals)), color='#9C27B0', linewidth=1.5,
+                    label=f'{mcr_label} (N/A)')
+        _spike_lines(ax)
+        ax.set_ylim(0, 1)
+        ax.set_ylabel(mcr_label)
+        ax.set_title(mcr_label)
         ax.set_xlabel('Minute'); ax.legend(); ax.grid(True, alpha=0.2)
 
         plt.tight_layout(rect=[0, 0, 1, 0.96])
@@ -1050,7 +1140,7 @@ def plot_results(results, msname, plots_dir, pred_horizon, use_conformal, thresh
         actual_mem, pred_mem,
         "Full Test Set (unshifted + shifted, h={})".format(pred_horizon),
         filename=f"hpa_sim_{msname}_full_{stamp}.png",
-        rpc_vals=rpc_full,
+        mcr_vals=mcr_full,
     )
 
     zoom_center = _find_zoom_center(actual_cpu)
@@ -1063,7 +1153,7 @@ def plot_results(results, msname, plots_dir, pred_horizon, use_conformal, thresh
         f"Zoomed (min {zoom_start}-{zoom_end}, highest-std window)",
         zoom_start=zoom_start, zoom_end=zoom_end,
         filename=f"hpa_sim_{msname}_zoom_{stamp}.png",
-        rpc_vals=rpc_full,
+        mcr_vals=mcr_full, mark_spikes=True,
     )
 
     return full_path, zoom_path
