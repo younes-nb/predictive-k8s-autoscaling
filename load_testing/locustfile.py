@@ -9,6 +9,21 @@ import gevent
 
 from locust import FastHttpUser, LoadTestShape, events, task
 
+# Service coverage: every request goes to the frontend only (via TARGET_URL /
+# the ingress); the frontend fans out to the backends as follows (Online
+# Boutique v0.10.x). All 10 application services (+ redis-cart, via
+# cartservice) are exercised by the user actions below — nothing talks to a
+# backend ClusterIP directly:
+#   GET  /                  -> frontend, productcatalog, currency, ad
+#   POST /setCurrency        -> frontend, currency
+#   GET  /product/<id>      -> frontend, productcatalog, recommendation, ad, currency
+#   GET  /cart              -> frontend, cartservice (+redis-cart), productcatalog,
+#                              currency, shipping (delivery quote)
+#   POST /cart              -> frontend, cartservice (+redis-cart), productcatalog
+#   POST /cart/empty        -> frontend, cartservice (+redis-cart)
+#   POST /cart/checkout     -> frontend, checkoutservice -> payment, shipping,
+#                              email, cartservice (+redis-cart), currency,
+#                              productcatalog
 products = [
     "0PUK6V6EV0",
     "1YMWWN1N4O",
@@ -88,11 +103,6 @@ def load_mcr_counts(csv_path: str, max_requests: int,
     if peak <= 0:
         sys.exit(f"Workload window has peak http_mcr <= 0 in {csv_path}")
     return [max(0, int(round(value / peak * max_requests))) for value in mcr]
-
-
-def _hit(user):
-    func = random.choices(ENDPOINT_FUNCS, weights=ENDPOINT_WEIGHTS, k=1)[0]
-    func(user)
 
 
 @events.init_command_line_parser.add_listener
@@ -218,6 +228,12 @@ def _request_add_to_cart(user):
         user._cart_items += 1
 
 
+def _request_empty_cart(user):
+    resp = user.client.post("/cart/empty", allow_redirects=False)
+    if resp.status_code < 400:
+        user._cart_items = 0
+
+
 def _request_checkout(user):
     data = {
         "email": "user@example.com",
@@ -242,7 +258,8 @@ ENDPOINTS = [
     (_request_product, 10),
     (_request_cart, 3),
     (_request_add_to_cart, 4),
-    (_request_checkout, 1),
+    (_request_empty_cart, 1),
+    (_request_checkout, 2),
 ]
 ENDPOINT_FUNCS = [e[0] for e in ENDPOINTS]
 ENDPOINT_WEIGHTS = [e[1] for e in ENDPOINTS]

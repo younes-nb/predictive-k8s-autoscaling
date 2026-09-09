@@ -59,7 +59,73 @@ QUERIES = {
         "query": f'sum by (pod) (container_memory_working_set_bytes{{namespace="{NAMESPACE}", container="server"}}) / sum by (pod) (kube_pod_container_resource_requests{{resource="memory", namespace="{NAMESPACE}", container="server"}})',
         "labels": ["pod"],
     },
+    # ---- Infra-native cost/queue/control signals (no app logs) ----
+    # Per-request cost proxies (payload size, tail share, message counts,
+    # error/retry mix) expose request-MIX shifts that volume alone hides.
+    # Envoy pending/active queues are queued/in-flight work: true leads.
+    # HPA desired + unavailable + restarts track the control plane.
+    # Names avoid cpu/mem/mcr/rpc/http substrings so downstream family
+    # transforms (resource precision, MCR normalization) leave them alone.
+    "REQ_BYTES": {
+        "query": f'sum(rate(istio_request_bytes_sum{{reporter="destination", destination_workload_namespace="{NAMESPACE}"}}[1m])) by (destination_workload)',
+        "labels": ["destination_workload"],
+    },
+    "RESP_BYTES": {
+        "query": f'sum(rate(istio_response_bytes_sum{{reporter="destination", destination_workload_namespace="{NAMESPACE}"}}[1m])) by (destination_workload)',
+        "labels": ["destination_workload"],
+    },
+    "REQ_COUNT": {
+        "query": f'sum(rate(istio_requests_total{{reporter="destination", destination_workload_namespace="{NAMESPACE}"}}[1m])) by (destination_workload)',
+        "labels": ["destination_workload"],
+    },
+    "SLOW_LE500": {
+        "query": f'sum(rate(istio_request_duration_milliseconds_bucket{{reporter="destination", destination_workload_namespace="{NAMESPACE}", le="500.0"}}[1m])) by (destination_workload)',
+        "labels": ["destination_workload"],
+    },
+    "REQ_MSGS": {
+        "query": f'sum(rate(istio_request_messages_total{{reporter="destination", destination_workload_namespace="{NAMESPACE}"}}[1m])) by (destination_workload)',
+        "labels": ["destination_workload"],
+    },
+    "RESP_MSGS": {
+        "query": f'sum(rate(istio_response_messages_total{{reporter="destination", destination_workload_namespace="{NAMESPACE}"}}[1m])) by (destination_workload)',
+        "labels": ["destination_workload"],
+    },
+    "ERR_5XX": {
+        "query": f'sum(rate(istio_requests_total{{reporter="destination", destination_workload_namespace="{NAMESPACE}", response_code=~"5.*"}}[1m])) by (destination_workload)',
+        "labels": ["destination_workload"],
+    },
+    "FLAG_ABN": {
+        "query": f'sum(rate(istio_requests_total{{reporter="destination", destination_workload_namespace="{NAMESPACE}", response_flags!="-"}}[1m])) by (destination_workload)',
+        "labels": ["destination_workload"],
+    },
+    "DESIRED": {
+        "query": f'kube_horizontalpodautoscaler_status_desired_replicas{{namespace="{NAMESPACE}"}}',
+        "labels": ["horizontalpodautoscaler"],
+    },
+    "UNAVAIL": {
+        "query": f'kube_deployment_status_replicas_unavailable{{namespace="{NAMESPACE}"}}',
+        "labels": ["deployment"],
+    },
+    "RESTARTS": {
+        "query": f'sum by (pod) (rate(kube_pod_container_status_restarts_total{{namespace="{NAMESPACE}"}}[5m]))',
+        "labels": ["pod"],
+        "agg": "sum",
+    },
 }
+
+# Envoy queue gauges (instant values, NOT rates): pending = queued work,
+# active = in-flight work, per (client pod, upstream cluster).
+PENDING_QUERY = (
+    f'sum(envoy_cluster_upstream_rq_pending_active{{namespace="{NAMESPACE}"}}) '
+    f'by (pod, cluster_name)'
+)
+ACTIVE_QUERY = (
+    f'sum(envoy_cluster_upstream_rq_active{{namespace="{NAMESPACE}"}}) '
+    f'by (pod, cluster_name)'
+)
+# Cluster-wide pressure (noisy-neighbor proxy), broadcast to all services.
+NODE_LOAD_QUERY = "node_load5"
+NODE_CPU_QUERY = 'sum(rate(node_cpu_seconds_total{mode!="idle"}[2m])) by (instance)'
 
 EDGE_QUERY = (
     f'sum(rate(istio_requests_total{{reporter="destination", '
@@ -77,6 +143,19 @@ FINAL_COLUMNS = [
     "neigh_cpu_mean", "neigh_cpu_slope3",
     "neigh_rps_z30_mean", "neigh_rps_slope5_mean",
     "cpu_utilization", "memory_utilization",
+    # Infra-native cost proxies (payload size, tail share, gRPC messages,
+    # error/retry mix) — request-MIX shifts that volume alone hides.
+    "req_byte_rate", "resp_byte_rate",
+    "req_bytes_per_req", "resp_bytes_per_req",
+    "slow_frac",
+    "req_msg_rate", "resp_msg_rate", "msgs_per_req",
+    "err_rate", "err_frac", "flag_rate", "flag_frac",
+    # Envoy queues: pending_for/active_for = queued/in-flight demand FOR this
+    # service from all callers (leads); _in = own sidecar backpressure.
+    "queue_in", "queue_for", "active_in", "active_for",
+    # Control plane + cluster pressure.
+    "desired_replicas", "unavailable", "restart_rate",
+    "node_load_mean", "node_load_max", "node_cpu_mean",
 ]
 
 EPS = 1e-9
@@ -139,10 +218,12 @@ def fetch_metric_data(metric_name, query_info, start_ts, end_ts, prom_url):
         df = pd.DataFrame(rows, columns=cols)
         if "pod" in query_info["labels"]:
             # Pods come and go with autoscaling; collapse to deployment level.
+            # Mean by default (per-pod ratios); sum for counters marked agg.
             df["deployment"] = df["pod"].map(pod_to_deployment)
+            how = query_info.get("agg", "mean")
             df = (
                 df.groupby(["ts", "deployment"], as_index=False)[metric_name]
-                .mean()
+                .agg(how)
             )
             df = df.rename(columns={"deployment": "entity"})
         else:
@@ -202,6 +283,118 @@ def fetch_metric_data_edges(start_ts, end_ts, prom_url):
     except Exception as e:
         print(f"Error fetching edge data: {e}")
         return pd.DataFrame(columns=["ts", "src", "dst", "rps"])
+
+
+_OUTBOUND_RE = None
+
+
+def _parse_queue_cluster(cluster: str):
+    """Map an Envoy cluster_name to ('out', dest_service) or ('in', None).
+
+    Outbound clusters look like `outbound|50051||paymentservice.ns.svc...`;
+    `inbound|...` is the pod's own sidecar backpressure; xds-grpc and the
+    blackhole/passthrough clusters carry no workload signal.
+    """
+    global _OUTBOUND_RE
+    if _OUTBOUND_RE is None:
+        import re
+        _OUTBOUND_RE = re.compile(r"^outbound\|[^|]*\|\|([A-Za-z0-9-]+)\.")
+    if cluster.startswith("inbound|"):
+        return ("in", None)
+    m = _OUTBOUND_RE.match(cluster or "")
+    if m:
+        return ("out", m.group(1))
+    return (None, None)
+
+
+def fetch_queue_data(query, start_ts, end_ts, prom_url):
+    """Instant-value gauge series: (ts, src_deployment, dst_or_self, value).
+
+    Missing series = no queued/in-flight work, treated as 0 downstream.
+    """
+    params = {"query": query, "start": start_ts, "end": end_ts,
+              "step": f"{STEP_SECONDS}s"}
+    try:
+        response = requests.get(
+            f"{prom_url}/api/v1/query_range", params=params, timeout=120
+        )
+        response.raise_for_status()
+        results = response.json().get("data", {}).get("result", [])
+        rows = []
+        for r in results:
+            pod = r["metric"].get("pod", "")
+            kind, dst = _parse_queue_cluster(r["metric"].get("cluster_name", ""))
+            if kind is None or not pod:
+                continue
+            src = pod_to_deployment(pod)
+            target = dst if kind == "out" else src
+            for v in r["values"]:
+                try:
+                    val = float(v[1])
+                except ValueError:
+                    continue
+                rows.append([int(v[0]), src, target, kind, val])
+        return pd.DataFrame(rows, columns=["ts", "src", "dst", "kind", "val"])
+    except Exception as e:
+        print(f"Error fetching queue data: {e}")
+        return pd.DataFrame(columns=["ts", "src", "dst", "kind", "val"])
+
+
+def queue_features(pending_df, active_df, grid):
+    """Per-service queue features on the minute grid (missing -> 0).
+
+    queue_for/active_for  queued/in-flight demand FOR a service from all
+                          callers (leads its CPU)
+    queue_in/active_in    own sidecar backpressure (local saturation)
+    """
+    grid_df = pd.DataFrame({"ts": grid})
+    feats = {}
+    for name, qdf, kinds in (
+        ("queue_for", pending_df, ("out",)),
+        ("queue_in", pending_df, ("in",)),
+        ("active_for", active_df, ("out",)),
+        ("active_in", active_df, ("in",)),
+    ):
+        if qdf.empty:
+            feats[name] = pd.DataFrame(columns=["ts", "msname", name])
+            continue
+        g = (
+            qdf[qdf["kind"].isin(kinds)]
+            .groupby(["ts", "dst"], as_index=False)["val"].sum()
+            .rename(columns={"dst": "msname", "val": name})
+        )
+        # Idle minutes have no rows: drop the grid's null-service filler so
+        # missing stays missing (zero-filled later), never a null service.
+        g = g.merge(grid_df, on="ts", how="right")
+        feats[name] = g[g["msname"].notna()]
+    return feats
+
+
+def fetch_global_series(query, start_ts, end_ts, prom_url):
+    """Cluster-wide instant series (mean and max across all matching series
+    per timestamp): noisy-neighbor pressure, broadcast to every service."""
+    params = {"query": query, "start": start_ts, "end": end_ts,
+              "step": f"{STEP_SECONDS}s"}
+    try:
+        response = requests.get(
+            f"{prom_url}/api/v1/query_range", params=params, timeout=120
+        )
+        response.raise_for_status()
+        results = response.json().get("data", {}).get("result", [])
+        per_ts = {}
+        for r in results:
+            for v in r["values"]:
+                try:
+                    val = float(v[1])
+                except ValueError:
+                    continue
+                per_ts.setdefault(int(v[0]), []).append(val)
+        rows = [(t, float(np.mean(v)), float(np.max(v)))
+                for t, v in sorted(per_ts.items())]
+        return pd.DataFrame(rows, columns=["ts", "mean", "max"])
+    except Exception as e:
+        print(f"Error fetching global data: {e}")
+        return pd.DataFrame(columns=["ts", "mean", "max"])
 
 
 def graph_features(edges_df, grid):
@@ -301,7 +494,9 @@ def finalize_service_frame(full, dep, tehran_tz):
     # Count-rate features are sqrt-compressed so global min-max scaling in
     # build_windows keeps regular variation visible next to extreme spikes.
     for col in ("http_mcr", "providerrpc_mcr", "rps_total",
-                "caller_rps_max", "upstream_rps_sum", "root_rps"):
+                "caller_rps_max", "upstream_rps_sum", "root_rps",
+                "req_byte_rate", "resp_byte_rate",
+                "req_msg_rate", "resp_msg_rate", "err_rate", "flag_rate"):
         out[col] = np.sqrt(out[col].clip(lower=0))
     out["n_callers"] = (full["n_callers"].to_numpy() / 5.0).clip(0, 1)
     out["p99_latency"] = (
@@ -309,6 +504,17 @@ def finalize_service_frame(full, dep, tehran_tz):
     ).clip(0, 1)
     out["net_rx"] = (np.log1p(full["net_rx"].to_numpy().clip(min=0)) / 18.0).clip(0, 1)
     out["throttle_ratio"] = np.clip(full["throttle_ratio"].to_numpy(), 0, 1)
+    # Per-request cost: log-scaled payload sizes (scale-only divisors),
+    # bounded mix fractions, clipped message multiplicity.
+    out["req_bytes_per_req"] = (
+        np.log1p(full["req_bytes_per_req"].to_numpy().clip(min=0)) / 12.0
+    ).clip(0, 1)
+    out["resp_bytes_per_req"] = (
+        np.log1p(full["resp_bytes_per_req"].to_numpy().clip(min=0)) / 14.0
+    ).clip(0, 1)
+    for col in ("slow_frac", "err_frac", "flag_frac"):
+        out[col] = np.clip(full[col].to_numpy(), 0, 1)
+    out["msgs_per_req"] = np.clip(full["msgs_per_req"].to_numpy(), 0, 4)
 
     out = out.round({
         "cpu_utilization": 4, "memory_utilization": 4,
@@ -320,8 +526,19 @@ def finalize_service_frame(full, dep, tehran_tz):
         "neigh_cpu_mean": 4, "neigh_cpu_slope3": 4,
         "neigh_rps_z30_mean": 4, "neigh_rps_slope5_mean": 4,
         "tod_sin": 4, "tod_cos": 4,
+        "req_byte_rate": 3, "resp_byte_rate": 3,
+        "req_bytes_per_req": 4, "resp_bytes_per_req": 4,
+        "slow_frac": 4,
+        "req_msg_rate": 3, "resp_msg_rate": 3, "msgs_per_req": 3,
+        "err_rate": 3, "err_frac": 4, "flag_rate": 3, "flag_frac": 4,
+        "queue_in": 1, "queue_for": 1, "active_in": 1, "active_for": 1,
+        "restart_rate": 4,
+        "node_load_mean": 3, "node_load_max": 3, "node_cpu_mean": 4,
     })
     out["replicas"] = out["replicas"].round().astype(int)
+    for c in ("desired_replicas", "unavailable"):
+        if c in out.columns:
+            out[c] = out[c].round().astype(int)
     return out[FINAL_COLUMNS]
 
 
@@ -422,8 +639,22 @@ def fetch_and_process_data(start_ts, end_ts, prom_url, out_path):
             raw[metric_name] = fetch_metric_data(
                 metric_name, query_info, start_ts, end_ts, prom_url
             )
+        # Normalize empty results so every later rename/merge is safe
+        # (missing series = no signal, zero-filled downstream).
+        for k in QUERIES:
+            if raw[k].empty:
+                raw[k] = pd.DataFrame(columns=["ts", "entity", k])
 
         edges = build_edges(start_ts, end_ts, prom_url)
+
+        print("  -> Querying PENDING/ACTIVE (envoy queues)...")
+        pending_df = fetch_queue_data(PENDING_QUERY, start_ts, end_ts, prom_url)
+        active_df = fetch_queue_data(ACTIVE_QUERY, start_ts, end_ts, prom_url)
+        print(f"     {len(pending_df)} pending rows, {len(active_df)} active rows")
+
+        print("  -> Querying NODE pressure (cluster-wide)...")
+        node_load = fetch_global_series(NODE_LOAD_QUERY, start_ts, end_ts, prom_url)
+        node_cpu = fetch_global_series(NODE_CPU_QUERY, start_ts, end_ts, prom_url)
 
         n_points = int((end_ts - start_ts) // step_sec) + 1
         grid = [start_ts + k * step_sec for k in range(n_points)]
@@ -438,6 +669,47 @@ def fetch_and_process_data(start_ts, end_ts, prom_url, out_path):
             rps_total, on=["ts", "msname"], how="outer"
         )
 
+        def _ren(key):
+            return raw[key].rename(columns={"entity": "msname"})
+
+        # Per-request cost ratios: request-MIX shifts that volume hides.
+        # count==0 (idle minute) -> NaN -> zero-filled in assemble.
+        count = _ren("REQ_COUNT").rename(columns={"REQ_COUNT": "count"})
+
+        def per_req(num_key, col):
+            m = _ren(num_key).merge(count, on=["ts", "msname"], how="left")
+            with np.errstate(divide="ignore", invalid="ignore"):
+                m[col] = m[num_key] / m["count"].replace(0.0, np.nan)
+            return m[["ts", "msname", col]]
+
+        cost_frames = [
+            per_req("REQ_BYTES", "req_bytes_per_req"),
+            per_req("RESP_BYTES", "resp_bytes_per_req"),
+            per_req("REQ_MSGS", "msgs_per_req"),
+            per_req("ERR_5XX", "err_frac"),
+            per_req("FLAG_ABN", "flag_frac"),
+        ]
+        slow = _ren("SLOW_LE500").merge(count, on=["ts", "msname"], how="left")
+        with np.errstate(divide="ignore", invalid="ignore"):
+            slow["slow_frac"] = 1.0 - (
+                slow["SLOW_LE500"] / slow["count"].replace(0.0, np.nan))
+        cost_frames.append(slow[["ts", "msname", "slow_frac"]])
+
+        queue_feats = queue_features(pending_df, active_df, grid)
+        n_qsvc = sum(f["msname"].nunique() for f in queue_feats.values())
+        print(f"  Queue features cover {n_qsvc} service-slots "
+              f"(missing minutes = idle queues = 0)")
+
+        # Cluster-wide pressure, broadcast to every service in assemble.
+        broadcast = {}
+        if not node_load.empty:
+            nl = node_load.set_index("ts")
+            broadcast["node_load_mean"] = nl["mean"]
+            broadcast["node_load_max"] = nl["max"]
+        if not node_cpu.empty:
+            broadcast["node_cpu_mean"] = node_cpu.set_index("ts")["mean"]
+        print(f"  Node broadcast series: {sorted(broadcast)}")
+
         # Metric name -> CSV/feature column name.
         METRIC_TO_COL = {
             "replicas": "replicas",
@@ -448,10 +720,18 @@ def fetch_and_process_data(start_ts, end_ts, prom_url, out_path):
             "Memory": "memory_utilization",
             "THROTTLE": "throttle_ratio",
             "NET_RX": "net_rx",
+            "REQ_BYTES": "req_byte_rate",
+            "RESP_BYTES": "resp_byte_rate",
+            "REQ_MSGS": "req_msg_rate",
+            "RESP_MSGS": "resp_msg_rate",
+            "ERR_5XX": "err_rate",
+            "FLAG_ABN": "flag_rate",
+            "DESIRED": "desired_replicas",
+            "UNAVAIL": "unavailable",
+            "RESTARTS": "restart_rate",
         }
         for metric_name, col in METRIC_TO_COL.items():
-            if not raw[metric_name].empty:
-                raw[metric_name] = raw[metric_name].rename(columns={metric_name: col})
+            raw[metric_name] = raw[metric_name].rename(columns={metric_name: col})
 
         core = raw["replicas"].rename(columns={"entity": "msname"})
         for m in ("RPS_HTTP", "RPS_GRPC", "P99_LATENCY"):
@@ -466,6 +746,16 @@ def fetch_and_process_data(start_ts, end_ts, prom_url, out_path):
                 on=["ts", "msname"], how="outer",
             )
         core = core.merge(pod_all, on=["ts", "msname"], how="outer")
+        for m in ("REQ_BYTES", "RESP_BYTES", "REQ_MSGS", "RESP_MSGS",
+                  "ERR_5XX", "FLAG_ABN", "DESIRED", "UNAVAIL", "RESTARTS"):
+            core = core.merge(
+                raw[m].rename(columns={"entity": "msname"}),
+                on=["ts", "msname"], how="outer",
+            )
+        for frame in cost_frames:
+            core = core.merge(frame, on=["ts", "msname"], how="outer")
+        for frame in queue_feats.values():
+            core = core.merge(frame, on=["ts", "msname"], how="outer")
         core = core.merge(graph, on=["ts", "msname"], how="outer")
         core = core[core["msname"] != "redis-cart"]
 
@@ -485,7 +775,8 @@ def fetch_and_process_data(start_ts, end_ts, prom_url, out_path):
             full = pd.DataFrame(index=idx)
             for col in FINAL_COLUMNS[2:]:
                 if col in ("root_rps", "neigh_cpu_mean", "neigh_cpu_slope3",
-                           "neigh_rps_z30_mean", "neigh_rps_slope5_mean"):
+                           "neigh_rps_z30_mean", "neigh_rps_slope5_mean",
+                           "node_load_mean", "node_load_max", "node_cpu_mean"):
                     continue
                 if col in g.columns:
                     full[col] = rekey(g, col)
@@ -493,6 +784,13 @@ def fetch_and_process_data(start_ts, end_ts, prom_url, out_path):
                 rs = root_series.copy()
                 rs.index = pd.to_datetime(pd.Index(rs.index), unit="s", utc=True)
                 full["root_rps"] = rs.reindex(idx)
+            for col, series in broadcast.items():
+                s = series.copy()
+                s.index = pd.to_datetime(pd.Index(s.index), unit="s", utc=True)
+                full[col] = s.reindex(idx)
+            for col in ("node_load_mean", "node_load_max", "node_cpu_mean"):
+                if col not in full.columns:
+                    full[col] = 0.0
 
             all_nan = [c for c in full.columns if full[c].notna().sum() == 0]
             for c in all_nan:
@@ -508,12 +806,18 @@ def fetch_and_process_data(start_ts, end_ts, prom_url, out_path):
                 "http_mcr", "providerrpc_mcr", "p99_latency", "throttle_ratio",
                 "net_rx", "rps_total", "caller_rps_max", "n_callers",
                 "upstream_rps_sum", "root_rps",
+                "req_byte_rate", "resp_byte_rate",
+                "req_bytes_per_req", "resp_bytes_per_req",
+                "slow_frac", "req_msg_rate", "resp_msg_rate", "msgs_per_req",
+                "err_rate", "err_frac", "flag_rate", "flag_frac",
+                "queue_in", "queue_for", "active_in", "active_for",
+                "unavailable", "restart_rate",
+                "node_load_mean", "node_load_max", "node_cpu_mean",
             ]
             full = full.fillna({c: 0.0 for c in zero_fill if c in full.columns})
-            if "replicas" in full.columns:
-                full["replicas"] = (
-                    full["replicas"].ffill().bfill().fillna(1)
-                )
+            for c, fb in (("replicas", 1), ("desired_replicas", 1)):
+                if c in full.columns:
+                    full[c] = full[c].ffill().bfill().fillna(fb)
             full = full.dropna(how="any")
             diffs = full.index.to_series().diff().dt.total_seconds()
             if len(full):
