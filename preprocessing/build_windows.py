@@ -1075,18 +1075,24 @@ def _phase_windows(args, args_dict, target_indices, all_services_list,
     print(f"Loaded service arrays (mmap): {big.shape[0]} rows x {big.shape[1]} ch, "
           f"{len(index)} services", flush=True)
 
-    # Fail fast instead of silently writing zero shards: the cache holds a
-    # different service set than requested (e.g. --msname changed without
-    # cache invalidation). Remove the _service_arrays files to re-aggregate.
+    # Services shorter than input_len+pred_horizon are dropped during
+    # aggregation, so the discovery list (all parquet services) is normally
+    # a superset of the cache index. Skip those silently-skipped services
+    # here (mirrors _process_service_group's `pos is None: continue`).
+    # Only an explicit --msname miss is fatal (stale cache / wrong service).
     missing = [s for s in all_services_list if s not in index]
     if missing:
-        have = sorted(index.keys())
-        raise SystemExit(
-            f"{len(missing)} requested services not in the service-array cache "
-            f"(e.g. {missing[:5]}). Cache holds {len(have)} services "
-            f"(e.g. {have[:5]}). Delete {arrays_path} and {index_path} "
-            f"(or change a signature input like --msname) to force re-aggregation."
-        )
+        if getattr(args, "msname", None) is not None and args.msname in missing:
+            have = sorted(index.keys())
+            raise SystemExit(
+                f"Service '{args.msname}' not in the service-array cache. "
+                f"Cache holds {len(have)} services "
+                f"(e.g. {have[:5]}). Delete {arrays_path} and {index_path} "
+                f"to force re-aggregation."
+            )
+        print(f"Skipping {len(missing)} services with too little data "
+              f"(e.g. {missing[:5]}): no service-array entry "
+              f"(< input_len+pred_horizon rows at aggregation).", flush=True)
 
     feature_names = list(get_feature_set(args_dict["feature_set"])["features"])
     mcr_cols = _mcr_cols_of(feature_names)
@@ -1128,11 +1134,18 @@ def _phase_windows(args, args_dict, target_indices, all_services_list,
         "sync": args.sync,
     }
 
+    index_set = set(index.keys())
     tasks = []
     for gi in groups_to_run:
         start_idx = gi * group_size
         end_idx = min(start_idx + group_size, len(all_services_list))
-        tasks.append((gi, all_services_list[start_idx:end_idx]))
+        ids = [s for s in all_services_list[start_idx:end_idx] if s in index_set]
+        if not ids:
+            continue
+        tasks.append((gi, ids))
+    if not tasks:
+        print("No service groups with cached arrays left to process.")
+        return
 
     print(f"Processing {len(tasks)} groups with {num_workers} workers "
           f"(group_size={group_size})", flush=True)
