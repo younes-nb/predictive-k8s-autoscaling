@@ -132,10 +132,10 @@ def load_service_split_sizes():
 
 
 def query_mcrtmcr_oscillations(con, mcr_dir, window_ms, in_clause,
-                                expected_pts, svc_n_df):
+                                 expected_pts, svc_n_df, min_points):
     """Scan every {window_ms}-long sliding segment of each service's http_mcr
-    timeline (not just the last window) and return one row per
-    (service, window end) with window stats.
+    timeline (not just the last window) and return one row per service: its
+    highest-oscillation segment with at least `min_points` rows.
 
     A segment is a frame of `expected_pts` consecutive 1-minute rows
     (ROWS BETWEEN expected_pts-1 PRECEDING AND CURRENT ROW), matching the
@@ -143,7 +143,11 @@ def query_mcrtmcr_oscillations(con, mcr_dir, window_ms, in_clause,
     normalized http_mcr within the segment, i.e. std_mcr / (g_max - g_min);
     win_start/win_end are the actual first/last timestamps of the segment.
 
-    Every segment of the full timeline is a candidate.
+    Every segment of the full timeline is a candidate; only the best segment
+    per service is returned (ranked by oscillation DESC). The global winner
+    is therefore identical to ranking every segment globally, but this
+    avoids materializing + globally sorting one row per segment (hundreds of
+    millions of rows for the full trace), which spills temp storage.
 
     Assumes all services listed in in_clause are present in mcr_dir."""
     con.register("svc_n", svc_n_df)
@@ -195,7 +199,12 @@ def query_mcrtmcr_oscillations(con, mcr_dir, window_ms, in_clause,
         SELECT msname, oscillation, avg_mcr, std_mcr, win_start, win_end,
                n_points, n_nonzero, g_min, g_max, max_ts, n_rows, n_rows AS test_len
         FROM final
-        ORDER BY oscillation DESC
+        WHERE n_points >= {min_points}
+        QUALIFY ROW_NUMBER() OVER (
+            PARTITION BY msname
+            ORDER BY oscillation DESC NULLS LAST, win_end
+        ) = 1
+        ORDER BY oscillation DESC NULLS LAST, msname
     """
     df = con.execute(sql).df()
     return df
@@ -407,8 +416,20 @@ def main():
     msresource_dir = os.path.join(parquet_root, "msresource")
 
     con = duckdb.connect()
-    con.execute("SET threads TO 16")
-    con.execute("SET memory_limit = \"16GB\"")
+    # The sliding-window scan aggregates tens of billions of raw msrtmcre
+    # rows into hundreds of millions of per-minute groups. The default
+    # DuckDB temp dir lives on the small root disk, so spilling there dies
+    # with "No space left on device". Keep temp on the large /dataset volume
+    # (parquet root may be overridden via --parquet_dir, so derive it from
+    # there) and allow DuckDB to actually use this machine's RAM/cores.
+    tmp_dir = os.path.join(os.path.dirname(parquet_root.rstrip(os.sep)),
+                           ".duckdb_tmp")
+    os.makedirs(tmp_dir, exist_ok=True)
+    con.execute("SET threads TO 32")
+    con.execute("SET memory_limit = '100GB'")
+    con.execute(f"SET temp_directory = '{tmp_dir}'")
+    con.execute("SET preserve_insertion_order TO false")
+    log(f"DuckDB temp_directory={tmp_dir}")
 
     # Use cached service info if available, otherwise build cache from parquet
     idx_path = SERVICE_INDEX_PATH
@@ -435,9 +456,11 @@ def main():
 
     in_clause = ",".join(f"'{n}'" for n in names)
 
+    # Minimum rows per window/sequence; enforced inside both branches so the
+    # ranked "best" segment is always a valid one.
+    min_points = int(args.min_hours * 60) + 1
     if args.window_hours is None:
         log("Analyzing full http_mcr sequence from cached stats...")
-        min_points = int(args.min_hours * 60) + 1
         df = compute_full_sequence_oscillation_from_cache(names, sizes, min_points)
         window_size_for_filtering = None
     else:
@@ -446,15 +469,15 @@ def main():
         log("Scanning http_mcr (msrtmcre) across all sliding segments...")
         df = query_mcrtmcr_oscillations(
             con, mcr_dir, window_ms, in_clause,
-            expected, svc_n_df,
+            expected, svc_n_df, min_points,
         )
         window_size_for_filtering = expected
 
     log("Filtering candidates...")
     valid = df.dropna(subset=["oscillation"])
-    min_points = int(args.min_hours * 60) + 1
     if args.window_hours is not None:
         # Sliding window mode: filter by minimum points in window
+        # (already enforced in SQL; kept as a safety net).
         valid = valid[valid["n_points"] >= min_points]
     # For full sequence mode, filtering already done in compute_full_sequence_oscillation_from_cache
     valid = valid.sort_values("oscillation", ascending=False)
