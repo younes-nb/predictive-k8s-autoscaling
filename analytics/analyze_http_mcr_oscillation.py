@@ -132,22 +132,57 @@ def load_service_split_sizes():
 
 
 def query_mcrtmcr_oscillations(con, mcr_dir, window_ms, in_clause,
-                                 expected_pts, svc_n_df, min_points):
+                                 expected_pts, svc_n_df, min_points,
+                                 min_rel_range=0.01, min_turns=10,
+                                 min_step_frac=0.05):
     """Scan every {window_ms}-long sliding segment of each service's http_mcr
     timeline (not just the last window) and return one row per service: its
-    highest-oscillation segment with at least `min_points` rows.
+    best segment with at least `min_points` rows.
 
     A segment is a frame of `expected_pts` consecutive 1-minute rows
     (ROWS BETWEEN expected_pts-1 PRECEDING AND CURRENT ROW), matching the
-    existing window definition. oscillation is the std of the min-max
-    normalized http_mcr within the segment, i.e. std_mcr / (g_max - g_min);
-    win_start/win_end are the actual first/last timestamps of the segment.
+    existing window definition. win_start/win_end are the actual first/last
+    timestamps of the segment.
 
-    Every segment of the full timeline is a candidate; only the best segment
-    per service is returned (ranked by oscillation DESC). The global winner
-    is therefore identical to ranking every segment globally, but this
-    avoids materializing + globally sorting one row per segment (hundreds of
-    millions of rows for the full trace), which spills temp storage.
+    Raw std alone is a bad selector: it ranks single step functions (one
+    0->1 jump, oscillation ~0.35-0.5), perfect square waves (alternating
+    0/max every minute, oscillation ~0.5), and even float-rounding dust on
+    flat lines above genuinely swinging traffic. Three guards fix this:
+
+    - rel_range = window range / robust service-global range (1st-99th
+      percentile, so one outlier spike cannot shrink every window) must
+      clear `min_rel_range`, so the window varies meaningfully in absolute
+      terms instead of amplifying numerical noise via min-max
+      normalization.
+    - n_turns = number of significant direction reversals within the
+      segment must reach `min_turns`. A reversal is a step of at least
+      `min_step_frac` of the robust global range whose sign differs from
+      the previous such step within the trailing window, ignoring flat
+      minutes in between, so the segment repeatedly swings instead of
+      stepping once, spiking once, or drifting. Windows are scored
+      self-contained: only rows inside the segment count.
+    - rich = fraction of the segment's rows using intermediate levels of
+      their own trailing windows, scaled by min/max own-window range
+      within the segment. The range ratio collapses to ~0 when the
+      segment straddles a regime change (a step looks middling only
+      through mixing frames, while its narrow pre/post frames expose
+      it); it is ~1 for stationary traffic. Binary/square-wave traffic
+      lives on two rails and scores ~0; traffic zig-zagging through its
+      whole range scores high.
+
+    Candidates are ranked by score = oscillation * rich, where
+    oscillation = std_mcr / (g_max - g_min) is the std of the min-max
+    normalized http_mcr within the segment. Only the best segment per
+    service is returned, preferring full-length windows on ties. This
+    avoids materializing + globally sorting one row per segment (hundreds
+    of millions of rows for the full trace), which spills temp storage.
+
+    Correctness note: every per-row quantity aggregated over a frame
+    (step signs, mid flags) is defined from row-local values and global
+    per-service bounds only -- never from that row's own window
+    aggregates. Judging rows by their own sliding-window min/max and then
+    averaging over a later frame mixes hundreds of different frames and
+    silently reports wrong numbers.
 
     Assumes all services listed in in_clause are present in mcr_dir."""
     con.register("svc_n", svc_n_df)
@@ -160,18 +195,20 @@ def query_mcrtmcr_oscillations(con, mcr_dir, window_ms, in_clause,
             GROUP BY msname, timestamp
         ),
         maxes AS (
-            SELECT msname, MAX(timestamp) AS max_ts
+            SELECT msname, MAX(timestamp) AS max_ts,
+                   APPROX_QUANTILE(http_mcr_sum, 0.01) AS glo,
+                   APPROX_QUANTILE(http_mcr_sum, 0.99) AS ghi
             FROM agg
             GROUP BY msname
             HAVING MAX(http_mcr_sum) > 0
         ),
         cand AS (
-            SELECT a.msname, a.timestamp, a.http_mcr_sum
+            SELECT a.msname, a.timestamp, a.http_mcr_sum, m.glo, m.ghi
             FROM agg a
             JOIN maxes m ON a.msname = m.msname
         ),
         wstats AS (
-            SELECT msname, timestamp, http_mcr_sum,
+            SELECT msname, timestamp, http_mcr_sum, glo, ghi,
                    COUNT(http_mcr_sum) OVER w AS n_points,
                    SUM(CASE WHEN http_mcr_sum > 0 THEN 1 ELSE 0 END) OVER w AS n_nonzero,
                    AVG(http_mcr_sum) OVER w AS avg_mcr,
@@ -179,32 +216,81 @@ def query_mcrtmcr_oscillations(con, mcr_dir, window_ms, in_clause,
                    MIN(http_mcr_sum) OVER w AS g_min,
                    MAX(http_mcr_sum) OVER w AS g_max,
                    MIN(timestamp) OVER w AS win_start,
-                   MAX(timestamp) OVER w AS win_end
+                   MAX(timestamp) OVER w AS win_end,
+                   LAG(http_mcr_sum) OVER
+                       (PARTITION BY msname ORDER BY timestamp) AS lag_s
             FROM cand
             WINDOW w AS (
                 PARTITION BY msname ORDER BY timestamp
                 ROWS BETWEEN {n_preceding} PRECEDING AND CURRENT ROW
             )
         ),
+        steps AS (
+            SELECT *,
+                   CASE WHEN ABS(http_mcr_sum - lag_s)
+                             >= {min_step_frac} * (ghi - glo)
+                             AND SIGN(http_mcr_sum - lag_s) <> 0
+                        THEN SIGN(http_mcr_sum - lag_s) END AS step
+            FROM wstats
+        ),
+        prev AS (
+            SELECT *,
+                   LAST_VALUE(step IGNORE NULLS) OVER
+                       (PARTITION BY msname ORDER BY timestamp
+                        ROWS BETWEEN {n_preceding} PRECEDING AND 1 PRECEDING) AS prev_step
+            FROM steps
+        ),
+        xcross AS (
+            SELECT *,
+                   SUM(CASE WHEN step IS NOT NULL AND prev_step IS NOT NULL
+                                 AND step <> prev_step
+                            THEN 1 ELSE 0 END)
+                   OVER (PARTITION BY msname ORDER BY timestamp
+                         ROWS BETWEEN {n_preceding} PRECEDING
+                         AND CURRENT ROW) AS n_turns,
+                   AVG(CASE WHEN http_mcr_sum BETWEEN g_min + (g_max - g_min) / 3
+                                 AND g_max - (g_max - g_min) / 3
+                            THEN 1.0 ELSE 0.0 END)
+                   OVER (PARTITION BY msname ORDER BY timestamp
+                         ROWS BETWEEN {n_preceding} PRECEDING
+                         AND CURRENT ROW) AS mid_own,
+                   MIN(g_max - g_min)
+                   OVER (PARTITION BY msname ORDER BY timestamp
+                         ROWS BETWEEN {n_preceding} PRECEDING
+                         AND CURRENT ROW) AS min_rng,
+                   MAX(g_max - g_min)
+                   OVER (PARTITION BY msname ORDER BY timestamp
+                         ROWS BETWEEN {n_preceding} PRECEDING
+                         AND CURRENT ROW) AS max_rng
+            FROM prev
+        ),
         final AS (
             SELECT w.msname,
                    w.std_mcr / NULLIF(w.g_max - w.g_min, 0) AS oscillation,
                    w.avg_mcr, w.std_mcr, w.win_start, w.win_end,
-                   w.n_points, w.n_nonzero, w.g_min, w.g_max, m.max_ts,
-                   n.n AS n_rows
-            FROM wstats w
+                   w.n_points, w.n_nonzero, w.g_min, w.g_max,
+                   w.n_turns, w.mid_own,
+                   w.mid_own * (w.min_rng / NULLIF(w.max_rng, 0)) AS rich,
+                   (w.g_max - w.g_min)
+                       / NULLIF(w.ghi - w.glo, 0) AS rel_range,
+                   m.max_ts, n.n AS n_rows
+            FROM xcross w
             LEFT JOIN maxes m ON w.msname = m.msname
             LEFT JOIN svc_n n ON w.msname = n.msname
         )
         SELECT msname, oscillation, avg_mcr, std_mcr, win_start, win_end,
-               n_points, n_nonzero, g_min, g_max, max_ts, n_rows, n_rows AS test_len
+               n_points, n_nonzero, g_min, g_max, n_turns, mid_own, rich,
+               rel_range, max_ts, n_rows, n_rows AS test_len,
+               oscillation * rich AS score
         FROM final
         WHERE n_points >= {min_points}
+          AND n_turns >= {min_turns}
+          AND rel_range >= {min_rel_range}
         QUALIFY ROW_NUMBER() OVER (
             PARTITION BY msname
-            ORDER BY oscillation DESC NULLS LAST, win_end
+            ORDER BY score DESC NULLS LAST, n_points DESC, win_end
         ) = 1
-        ORDER BY oscillation DESC NULLS LAST, msname
+        ORDER BY score DESC NULLS LAST, msname
     """
     df = con.execute(sql).df()
     return df
@@ -359,23 +445,56 @@ def plot_timeseries(df_mcr: pd.DataFrame, df_res: pd.DataFrame,
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Analyze each service's full http_mcr timeline -- ranked by oscillation "
-        "(std of normalized http_mcr over sliding window of --window_hours, or over full sequence if not specified) "
+        description="Analyze each service's full http_mcr timeline -- ranked by score "
+        "(oscillation * richness over sliding windows of --window_hours, or by full-sequence "
+        "oscillation if --window_hours is not specified) "
         "-- and plot the winner's http_mcr plus CPU/memory utilization for that window."
     )
     parser.add_argument("--parquet_dir", type=str, default=None,
                         help="Root containing msrtmcre/ and msresource/ subdirs. "
                              "Defaults to Paths.PARQUET_ROOT.")
     parser.add_argument("--max_services", type=int, default=None)
+    parser.add_argument("--chunk_index", type=int, default=None,
+                         help="0-based chunk id; must be given together with "
+                              "--num_chunks. Partitions the full sorted service "
+                              "list deterministically (service i goes to chunk "
+                              "i %% num_chunks) so a full-trace scan can run as "
+                              "several small sequential processes. The global "
+                              "winner over all chunk winners is identical to one "
+                              "full run. Cannot be combined with --max_services.")
+    parser.add_argument("--num_chunks", type=int, default=None,
+                         help="Total number of chunks; see --chunk_index.")
+    parser.add_argument("--winner_json", type=str, default=None,
+                         help="If given, write the winner row (metrics plus "
+                              "output file paths) as JSON to this path, for "
+                              "aggregating chunked runs.")
     parser.add_argument("--seed", type=int, default=DEFAULT_SUBSET_SEED)
     parser.add_argument("--out_dir", type=str, default=Paths.ANALYTICS_OUT_DIR)
     parser.add_argument("--window_hours", type=float, default=None,
                         help="Window size in hours for oscillation calculation. "
                              "If not specified, analyzes the full sequence for each service.")
     parser.add_argument("--min_hours", type=float, default=1.0,
-                        help="Minimum hours of data required per service/window. "
-                             "In sliding window mode: minimum hours within window. "
-                             "In full sequence mode: minimum total hours of data per service.")
+                         help="Minimum hours of data required per service/window. "
+                              "In sliding window mode: minimum hours within window. "
+                              "In full sequence mode: minimum total hours of data per service.")
+    parser.add_argument("--min_rel_range", type=float, default=0.01,
+                         help="Sliding window mode only: minimum window range as a "
+                              "fraction of the service's global http_mcr range. "
+                              "Filters windows whose min-max normalized std only "
+                              "amplifies float noise on an effectively flat line.")
+    parser.add_argument("--min_turns", type=int, default=10,
+                         help="Sliding window mode only: minimum number of "
+                              "significant direction reversals within the window. "
+                              "A reversal is a step of at least --min_step_frac "
+                              "of the robust global range whose sign differs from "
+                              "the previous such step. Filters single "
+                              "steps/spikes/drifts in favor of repeatedly "
+                              "swinging traffic.")
+    parser.add_argument("--min_step_frac", type=float, default=0.05,
+                         help="Sliding window mode only: minimum consecutive-minute "
+                              "step, as a fraction of the robust global range, to "
+                              "count toward --min_turns. Ignores flat minutes and "
+                              "micro-dither.")
     return parser.parse_args()
 
 
@@ -395,15 +514,22 @@ def format_relative(ms: int) -> str:
 
 def print_eval_results(df: pd.DataFrame) -> None:
     cols = ["msname", "oscillation", "std_mcr", "win_start", "win_end",
-            "n_points", "n_nonzero", "g_min", "g_max", "max_ts", "test_len", "n_rows"]
+            "n_points", "n_nonzero", "g_min", "g_max", "n_turns", "rich",
+            "rel_range", "score", "max_ts", "test_len", "n_rows"]
     show = df.head(20).copy()
     for _, r in show.iterrows():
+        extra = ""
+        if "n_turns" in show.columns:
+            extra = (f"turns={int(r['n_turns']):>3d} "
+                     f"rich={r['rich']:.3f} "
+                     f"rel={r['rel_range']:.3g} ")
+        score = f"score={r['score']:.3f} " if "score" in show.columns else ""
         print(f"{r['msname']:<12} {r['oscillation']:>7.3f} "
               f"std={r['std_mcr']:>9.3g} "
               f"start={format_relative(r['win_start'])} "
               f"end={format_relative(r['win_end'])} "
               f"pts={int(r['n_points']):>3d} nz={int(r['n_nonzero']):>3d} "
-              f"g=[{r['g_min']:.3g},{r['g_max']:.3g}] "
+              f"g=[{r['g_min']:.3g},{r['g_max']:.3g}] " + extra + score +
               f"test_len={int(r['test_len']):>4d} n_rows={int(r['n_rows']):>6d}")
     print()
 
@@ -426,7 +552,7 @@ def main():
                            ".duckdb_tmp")
     os.makedirs(tmp_dir, exist_ok=True)
     con.execute("SET threads TO 32")
-    con.execute("SET memory_limit = '100GB'")
+    con.execute("SET memory_limit = '60GB'")
     con.execute(f"SET temp_directory = '{tmp_dir}'")
     con.execute("SET preserve_insertion_order TO false")
     log(f"DuckDB temp_directory={tmp_dir}")
@@ -441,6 +567,20 @@ def main():
         log("Loading service info from cache...")
 
     names = load_service_names()
+
+    if (args.chunk_index is None) != (args.num_chunks is None):
+        raise SystemExit("--chunk_index and --num_chunks must be given together")
+    if args.chunk_index is not None and args.max_services is not None:
+        raise SystemExit("--max_services cannot be combined with chunking")
+    names = sorted(names)
+    if args.chunk_index is not None:
+        if not (0 <= args.chunk_index < args.num_chunks):
+            raise SystemExit(
+                f"--chunk_index must be in [0, {args.num_chunks})")
+        names = [n for i, n in enumerate(names)
+                 if i % args.num_chunks == args.chunk_index]
+        log(f"Chunk {args.chunk_index + 1}/{args.num_chunks}: "
+            f"{len(names)} services")
 
     # Mirror build_windows.py subset selection.
     if args.max_services and len(names) > args.max_services:
@@ -470,17 +610,26 @@ def main():
         df = query_mcrtmcr_oscillations(
             con, mcr_dir, window_ms, in_clause,
             expected, svc_n_df, min_points,
+            min_rel_range=args.min_rel_range,
+            min_turns=args.min_turns,
+            min_step_frac=args.min_step_frac,
         )
         window_size_for_filtering = expected
 
     log("Filtering candidates...")
     valid = df.dropna(subset=["oscillation"])
     if args.window_hours is not None:
-        # Sliding window mode: filter by minimum points in window
-        # (already enforced in SQL; kept as a safety net).
+        # Sliding window mode: filters already enforced in SQL; kept as safety nets.
         valid = valid[valid["n_points"] >= min_points]
-    # For full sequence mode, filtering already done in compute_full_sequence_oscillation_from_cache
-    valid = valid.sort_values("oscillation", ascending=False)
+        if "n_turns" in valid.columns:
+            valid = valid[valid["n_turns"] >= args.min_turns]
+        if "rel_range" in valid.columns:
+            valid = valid[valid["rel_range"] >= args.min_rel_range]
+        valid = valid.sort_values("score", ascending=False)
+    else:
+        # Full sequence mode: filtering already done in
+        # compute_full_sequence_oscillation_from_cache.
+        valid = valid.sort_values("oscillation", ascending=False)
     print_eval_results(valid)
 
     if valid.empty:
@@ -498,8 +647,12 @@ def main():
             f"{format_relative(winner['max_ts'])})")
     else:
         log(f"Winner: {winner['msname']} "
-            f"(oscillation={winner['oscillation']:.3f}, "
-            f"std_mcr={winner['std_mcr']:.3g}, window "
+            f"(score={winner['score']:.3f}, "
+            f"oscillation={winner['oscillation']:.3f}, "
+            f"std_mcr={winner['std_mcr']:.3g}, "
+            f"turns={int(winner['n_turns'])}, "
+            f"rich={winner['rich']:.3f}, "
+            f"rel_range={winner['rel_range']:.3g}, window "
             f"{format_relative(winner['win_start'])} -> "
             f"{format_relative(winner['win_end'])}, "
             f"test_len={int(winner['test_len'])} min, max_ts="
@@ -535,6 +688,24 @@ def main():
     print(f"  {mcr_png}")
     print(f"  {cpu_png}")
     print(f"  {mem_png}")
+
+    if args.winner_json:
+        row = {}
+        for k, v in winner.items():
+            if isinstance(v, (bool, np.bool_)):
+                row[k] = bool(v)
+            elif isinstance(v, (int, np.integer)):
+                row[k] = int(v)
+            elif isinstance(v, (float, np.floating)):
+                row[k] = float(v)
+            else:
+                row[k] = str(v)
+        row["outputs"] = [mcr_csv, res_csv, mcr_png, cpu_png, mem_png]
+        out_path = os.path.abspath(args.winner_json)
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        with open(out_path, "w") as f:
+            json.dump(row, f, indent=2)
+        log(f"Winner row written to {out_path}")
 
 
 if __name__ == "__main__":
