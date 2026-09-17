@@ -44,10 +44,6 @@ def _to_unix(ts_str):
     except ValueError:
         return 0.0
 def read_last_row():
-    """Return the last data row as a dict, mapped by the file's own header.
-    Handles both the canonical schema and the legacy 9-col schema so
-    rolling upgrades keep exporting during the transition.
-    """
     if not os.path.exists(EXPERIMENT_METRICS_FILE):
         return None
     with open(EXPERIMENT_METRICS_FILE, "r") as f:

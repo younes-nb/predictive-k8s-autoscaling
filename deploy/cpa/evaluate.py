@@ -16,9 +16,6 @@ def _last_target():
     except Exception:
         return 1
 def _scale_up_ceiling(current_replicas):
-    """Max replicas reachable in one eval interval under the HPA default
-    scaleUp policy: at most max(100% of current, SCALE_UP_MAX_PODS) pods per
-    15s period."""
     rep = int(current_replicas)
     periods = max(
         1, int(config.EVAL_INTERVAL_SECONDS // config.SCALE_UP_PERIOD_SECONDS)

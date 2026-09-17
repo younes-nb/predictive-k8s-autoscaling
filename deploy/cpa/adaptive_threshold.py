@@ -1,21 +1,3 @@
-"""Adaptive CPA threshold driven by recent model errors.
-Threshold = BASE_THRESHOLD (80%) shifted by the recency-weighted bias of
-recent prediction errors, clipped to [BASE - RANGE, BASE + RANGE]
-(e.g. RANGE=10 -> live threshold in [70, 90]).
-- Signed error: e = actual - predicted (point forecast). Positive bias means
-  the model UNDER-predicts -> lower the threshold (scale earlier/safer).
-  Negative bias (over-prediction) -> raise the threshold (avoid waste).
-- Window: last ADAPTIVE_ERROR_WINDOW errors (defaults to WINDOW_SIZE).
-- Newest errors weigh most: w_i = exp(-age/tau), tau = N/3, so the oldest
-  sample carries ~5% of the newest sample's weight.
-- Source of truth is Prometheus (cpa_actual_cpu / cpa_pred_cpu / mem series
-  scraped via the metrics-exporter + PodMonitor), so error history survives
-  CPA pod restarts. Pod-local CSV is only a cold-start fallback when
-  Prometheus has < 2 samples.
-Because the CPA interval is aligned to the prediction horizon
-(EVAL_INTERVAL_SECONDS == HORIZON * 60), a prediction written at cycle t
-targets cycle t+1, so errors align as actual[i+1] - pred[i].
-"""
 import csv
 import os
 import time
@@ -23,7 +5,6 @@ import numpy as np
 import config
 import utils
 def exp_weights(n):
-    """Recency weights, oldest -> newest. Newest weighs most."""
     n = int(n)
     if n <= 0:
         return np.array([], dtype=float)
@@ -33,7 +14,6 @@ def exp_weights(n):
     ages = np.arange(n - 1, -1, -1, dtype=float)                          
     return np.exp(-ages / tau)
 def weighted_bias(errors):
-    """Recency-weighted mean of signed errors (oldest -> newest)."""
     arr = np.asarray(list(errors), dtype=float)
     arr = arr[np.isfinite(arr)]
     if arr.size == 0:
@@ -41,11 +21,6 @@ def weighted_bias(errors):
     w = exp_weights(arr.size)
     return float(np.sum(w * arr) / np.sum(w))
 def compute_threshold(errors_cpu, errors_mem=None):
-    """Map recent errors to a live threshold in [MIN, MAX].
-    Returns (threshold, combined_bias, bias_cpu, bias_mem).
-    Combined bias uses max() so the most under-predicted signal dominates
-    (conservative: scale earlier when either CPU or memory is under-shot).
-    """
     bias_cpu = weighted_bias(errors_cpu)
     bias_mem = weighted_bias(errors_mem) if errors_mem is not None else 0.0
     if errors_mem is not None and len(list(errors_mem)) > 0:
@@ -62,7 +37,6 @@ def compute_threshold(errors_cpu, errors_mem=None):
     )
     return threshold, combined, bias_cpu, bias_mem
 def _series_values(result):
-    """Pick the richest series from a range-query result -> float list."""
     best = []
     for series in result or []:
         vals = []
@@ -82,10 +56,6 @@ def _query_metric(metric, deployment, window_s, step_s):
     result = utils.query_prometheus_range(q, now - window_s, now, step_s)
     return _series_values(result)
 def get_recent_errors_from_prometheus():
-    """Fetch horizon-aligned errors from Prometheus.
-    Returns (errors_cpu, errors_mem, n_points). Errors are oldest -> newest,
-    at most ADAPTIVE_ERROR_WINDOW entries.
-    """
     n = int(config.ADAPTIVE_ERROR_WINDOW)
     step = int(config.EVAL_INTERVAL_SECONDS)
     window_s = (n + 1) * step
@@ -109,7 +79,6 @@ def get_recent_errors_from_prometheus():
             ][-n:]
     return errors_cpu, errors_mem, min(len(actual_cpu), len(pred_cpu))
 def _fallback_errors_from_csv():
-    """Cold-start fallback: align last CSV rows as actual[i+1] - pred[i]."""
     path = config.EXPERIMENT_METRICS_FILE
     n = int(config.ADAPTIVE_ERROR_WINDOW)
     if not os.path.exists(path):
@@ -136,11 +105,6 @@ def _fallback_errors_from_csv():
     except Exception:
         return [], []
 def get_adaptive_threshold():
-    """Compute the live threshold.
-    Primary source: Prometheus error history (persistent). Falls back to the
-    pod-local CSV on cold start, then to BASE_THRESHOLD.
-    Returns (threshold, info dict).
-    """
     n = int(config.ADAPTIVE_ERROR_WINDOW)
     errors_cpu, errors_mem, n_points = get_recent_errors_from_prometheus()
     source = "prometheus"

@@ -20,7 +20,6 @@ def query_prometheus(query, is_range=False, params=None):
         sys.stderr.write(f"Prometheus Error: {e}\n")
         return []
 def query_prometheus_range(query, start_ts, end_ts, step_s):
-    """Range query returning the raw series list (each with 'values')."""
     try:
         response = requests.get(
             f"{config.PROMETHEUS_URL}/api/v1/query_range",

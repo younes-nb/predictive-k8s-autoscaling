@@ -16,9 +16,6 @@ WINDOW_SIZE = int(os.getenv("WINDOW_SIZE", "32"))
 STABILIZATION_WINDOW_SECONDS = 300
 TOLERANCE = 0.1
 def _parse_pct(value, default):
-    """Parse a percentage-or-fraction env value into a 0-1 fraction.
-    Accepts "80" (percent) or "0.8" (fraction); values > 1 are /100.
-    """
     try:
         v = float(value)
     except (TypeError, ValueError):
