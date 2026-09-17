@@ -152,8 +152,8 @@ def build_tcn_dual(checkpoint, model_type):
 
     return DualPathTCN(
         input_size=_input_size(checkpoint, ckpt_args, hyperparams),
-        cpu_channels=6,  # SWT level 5 => 6 channels
-        mem_channels=6,  # SWT level 5 => 6 channels
+        cpu_channels=6,
+        mem_channels=6,
         num_channels=num_channels,
         kernel_size=kernel_size,
         dropout=dropout,
@@ -182,10 +182,8 @@ def build_quantile_ensemble(checkpoint, model_type):
 
 
 def load_cqr_calibrators(checkpoint) -> dict:
-    """Load CQR calibrators from checkpoint if available."""
     cqr_calibrators = checkpoint.get("cqr_calibrators")
     if cqr_calibrators:
-        # Convert to simple dict with q_conf per target
         return {t_idx: cal.get("q_conf", 0.0) for t_idx, cal in cqr_calibrators.items()}
     return {}
 
