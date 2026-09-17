@@ -11,4 +11,7 @@ metric:
     entrypoint: "python"
     command: ["/app/metric.py"]
 runMode: "per-resource"
-interval: 60000
+# Default for HORIZON=5: CPA runs once per prediction horizon (5 min).
+# At container start, entrypoint.sh rewrites this from $HORIZON, and
+# deploy_all_cpas.sh sets the CPA spec interval to HORIZON*60*1000 ms.
+interval: 300000

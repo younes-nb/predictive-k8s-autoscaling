@@ -19,21 +19,26 @@ POD_NAME = os.getenv("POD_NAME") or socket.gethostname()
 
 TS_FORMAT = "%Y-%m-%d %H:%M:%S"
 TEHRAN = timezone(timedelta(hours=3, minutes=30))
+# Canonical schema (no conformal bounds). read_last_row maps by the file's
+# own header, so older files (with lower_/upper_* or delta_* columns) keep
+# exporting the columns they have.
 CSV_COLUMNS = [
     "timestamp", "cpu", "memory", "pred_cpu", "pred_mem",
-    "lower_cpu", "upper_cpu", "lower_mem", "upper_mem",
+    "threshold", "error_bias",
     "inference_time_s", "replicas",
+]
+LEGACY_COLUMNS = [
+    "timestamp", "cpu", "memory", "pred_cpu", "pred_mem",
+    "delta_cpu", "delta_mem", "inference_time_s", "replicas",
 ]
 
 GAUGES = {
     "cpu": ("cpa_actual_cpu", "Current CPU usage normalized to pod limit"),
     "memory": ("cpa_actual_memory", "Current memory usage normalized to pod limit"),
-    "pred_cpu": ("cpa_pred_cpu", "Predicted CPU usage (median q50)"),
-    "pred_mem": ("cpa_pred_mem", "Predicted memory usage (median q50)"),
-    "lower_cpu": ("cpa_lower_cpu", "Conformal lower bound (CPU)"),
-    "upper_cpu": ("cpa_upper_cpu", "Conformal upper bound (CPU)"),
-    "lower_mem": ("cpa_lower_mem", "Conformal lower bound (Memory)"),
-    "upper_mem": ("cpa_upper_mem", "Conformal upper bound (Memory)"),
+    "pred_cpu": ("cpa_pred_cpu", "Predicted CPU usage (point forecast)"),
+    "pred_mem": ("cpa_pred_mem", "Predicted memory usage (point forecast)"),
+    "threshold": ("cpa_adaptive_threshold", "Live adaptive scaling threshold"),
+    "error_bias": ("cpa_prediction_error_bias", "Recency-weighted prediction bias (actual-pred)"),
     "inference_time_s": ("cpa_inference_time_s", "Model inference time in seconds"),
     "replicas": ("cpa_replicas", "Current replica count"),
 }
@@ -51,13 +56,25 @@ def _to_unix(ts_str):
 
 
 def read_last_row():
+    """Return the last data row as a dict, mapped by the file's own header.
+
+    Handles both the canonical schema and the legacy 9-col schema so
+    rolling upgrades keep exporting during the transition.
+    """
     if not os.path.exists(EXPERIMENT_METRICS_FILE):
         return None
     with open(EXPERIMENT_METRICS_FILE, "r") as f:
-        for line in reversed(f.read().splitlines()):
-            parts = line.split(",")
-            if len(parts) == len(CSV_COLUMNS):
-                return dict(zip(CSV_COLUMNS, parts))
+        lines = [ln for ln in f.read().splitlines() if ln.strip()]
+    if len(lines) < 2:
+        return None
+    header = [h.strip() for h in lines[0].split(",")]
+    if "timestamp" not in header or "cpu" not in header:
+        return None
+    for line in reversed(lines[1:]):
+        parts = line.split(",")
+        if len(parts) != len(header):
+            continue
+        return dict(zip(header, (p.strip() for p in parts)))
     return None
 
 
@@ -65,11 +82,11 @@ def count_valid_rows():
     if not os.path.exists(EXPERIMENT_METRICS_FILE):
         return 0
     with open(EXPERIMENT_METRICS_FILE, "r") as f:
-        return sum(
-            1
-            for line in f.read().splitlines()
-            if line and len(line.split(",")) == len(CSV_COLUMNS)
-        )
+        lines = [ln for ln in f.read().splitlines() if ln.strip()]
+    if len(lines) < 2:
+        return 0
+    ncols = len(lines[0].split(","))
+    return sum(1 for line in lines[1:] if len(line.split(",")) == ncols)
 
 
 class CpaMetricsCollector:

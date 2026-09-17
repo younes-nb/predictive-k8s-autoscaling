@@ -6,18 +6,20 @@ PROMETHEUS_URL="http://prometheus-stack-kube-prom-prometheus.monitoring.svc.clus
 FEATURE_SET="cpu_mem_both"
 MODEL_TYPE="dpam"
 PREPROCESS_APPROACH="swt"
-WINDOW_SIZE="128"
+WINDOW_SIZE="32"
 SWT_LEVEL="5"
 MEM_SWT_LEVEL="5"
 HORIZON="5"
+# CPA eval interval is aligned to the prediction horizon: the CPA runs once
+# per HORIZON minutes so each cycle consumes exactly one horizon-ahead
+# prediction (e.g. HORIZON=5 -> CPA every 5 minutes = 300000 ms).
+INTERVAL_MS=$((HORIZON * 60 * 1000))
+EVAL_INTERVAL_SECONDS=$((HORIZON * 60))
 
-# Conformal Prediction Configuration
-CONFORMAL_WINDOW="500"
-CONFORMAL_TARGET_ALPHA="0.05"
-CONFORMAL_ETA="0.01"
-CONFORMAL_ALPHA_MIN="0.01"
-CONFORMAL_ALPHA_MAX="0.20"
-SPIKE_THRESHOLD="0.6099"
+# Adaptive threshold: base 80%, live range = base +/- range
+# (e.g. range 10 -> threshold floats in [70, 90]).
+BASE_THRESHOLD="80"
+ADAPTIVE_THRESHOLD_RANGE="10"
 
 for DEPLOYMENT in $(kubectl get deployments -n $NAMESPACE -o jsonpath='{.items[*].metadata.name}'); do
     
@@ -63,18 +65,12 @@ spec:
             value: "${MEM_SWT_LEVEL}"
           - name: HORIZON
             value: "${HORIZON}"
-          - name: CONFORMAL_WINDOW
-            value: "${CONFORMAL_WINDOW}"
-          - name: CONFORMAL_TARGET_ALPHA
-            value: "${CONFORMAL_TARGET_ALPHA}"
-          - name: CONFORMAL_ETA
-            value: "${CONFORMAL_ETA}"
-          - name: CONFORMAL_ALPHA_MIN
-            value: "${CONFORMAL_ALPHA_MIN}"
-          - name: CONFORMAL_ALPHA_MAX
-            value: "${CONFORMAL_ALPHA_MAX}"
-          - name: SPIKE_THRESHOLD
-            value: "${SPIKE_THRESHOLD}"
+          - name: EVAL_INTERVAL_SECONDS
+            value: "${EVAL_INTERVAL_SECONDS}"
+          - name: BASE_THRESHOLD
+            value: "${BASE_THRESHOLD}"
+          - name: ADAPTIVE_THRESHOLD_RANGE
+            value: "${ADAPTIVE_THRESHOLD_RANGE}"
           - name: TARGET_DEPLOYMENT
             value: "${DEPLOYMENT}"
           - name: TARGET_NAMESPACE
@@ -110,7 +106,7 @@ spec:
     name: ${DEPLOYMENT}
   config:
     - name: interval
-      value: "60000"
+      value: "${INTERVAL_MS}"
     - name: logVerbosity
       value: "3"
 EOF

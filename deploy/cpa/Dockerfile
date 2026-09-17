@@ -13,6 +13,7 @@ RUN curl -L https://github.com/jthomperoo/custom-pod-autoscaler/releases/downloa
     rm cpa.tar.gz
 
 COPY deploy/cpa/*.py ./
+COPY deploy/cpa/entrypoint.sh /app/entrypoint.sh
 COPY core/models.py core/
 COPY core/architectures/ core/architectures/
 COPY preprocessing/__init__.py preprocessing/__init__.py
@@ -22,6 +23,6 @@ COPY shared/config_preprocessing_defaults.py shared/config_preprocessing_default
 COPY deploy/model.pt .
 COPY deploy/cpa/config.yaml /config.yaml
 
-RUN touch core/__init__.py && chmod +x metric.py evaluate.py
+RUN touch core/__init__.py && chmod +x metric.py evaluate.py /app/entrypoint.sh
 
-ENTRYPOINT ["/custom-pod-autoscaler"]
+ENTRYPOINT ["/app/entrypoint.sh"]

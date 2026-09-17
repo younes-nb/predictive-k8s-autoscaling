@@ -23,6 +23,26 @@ def query_prometheus(query, is_range=False, params=None):
         return []
 
 
+def query_prometheus_range(query, start_ts, end_ts, step_s):
+    """Range query returning the raw series list (each with 'values')."""
+    try:
+        response = requests.get(
+            f"{config.PROMETHEUS_URL}/api/v1/query_range",
+            params={
+                "query": query,
+                "start": start_ts,
+                "end": end_ts,
+                "step": f"{int(step_s)}s",
+            },
+            timeout=10,
+        )
+        response.raise_for_status()
+        return response.json()["data"]["result"]
+    except Exception as e:
+        sys.stderr.write(f"Prometheus Range Error: {e}\n")
+        return []
+
+
 def load_state():
     defaults = {
         "history": [],
@@ -77,23 +97,35 @@ def get_tehran_time():
     return tehran_time.strftime("%Y-%m-%d %H:%M:%S")
 
 
+EXPERIMENT_CSV_COLUMNS = [
+    "timestamp",
+    "cpu",
+    "memory",
+    "pred_cpu",
+    "pred_mem",
+    "threshold",
+    "error_bias",
+    "inference_time_s",
+    "replicas",
+]
+
+
 def log_metrics(
     timestamp,
     curr_cpu,
     curr_mem,
     pred_cpu,
     pred_mem,
-    delta_cpu,
-    delta_mem,
+    threshold,
+    error_bias,
     inf_time,
     replicas,
 ):
     if not os.path.exists(config.EXPERIMENT_METRICS_FILE):
         with open(config.EXPERIMENT_METRICS_FILE, "w") as f:
-            f.write(
-                "timestamp,cpu,memory,pred_cpu,pred_mem,delta_cpu,delta_mem,inference_time_s,replicas\n"
-            )
+            f.write(",".join(EXPERIMENT_CSV_COLUMNS) + "\n")
     with open(config.EXPERIMENT_METRICS_FILE, "a") as f:
         f.write(
-            f"{timestamp},{curr_cpu:.4f},{curr_mem:.4f},{pred_cpu:.4f},{pred_mem:.4f},{delta_cpu:.4f},{delta_mem:.4f},{inf_time:.4f},{replicas}\n"
+            f"{timestamp},{curr_cpu:.4f},{curr_mem:.4f},{pred_cpu:.4f},{pred_mem:.4f},"
+            f"{threshold:.4f},{error_bias:.4f},{inf_time:.4f},{replicas}\n"
         )
