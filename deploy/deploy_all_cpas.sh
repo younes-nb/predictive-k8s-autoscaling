@@ -10,14 +10,9 @@ WINDOW_SIZE="32"
 SWT_LEVEL="5"
 MEM_SWT_LEVEL="5"
 HORIZON="5"
-# CPA eval interval is aligned to the prediction horizon: the CPA runs once
-# per HORIZON minutes so each cycle consumes exactly one horizon-ahead
-# prediction (e.g. HORIZON=5 -> CPA every 5 minutes = 300000 ms).
 INTERVAL_MS=$((HORIZON * 60 * 1000))
 EVAL_INTERVAL_SECONDS=$((HORIZON * 60))
 
-# Adaptive threshold: base 80%, live range = base +/- range
-# (e.g. range 10 -> threshold floats in [70, 90]).
 BASE_THRESHOLD="80"
 ADAPTIVE_THRESHOLD_RANGE="10"
 

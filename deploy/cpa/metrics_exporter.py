@@ -2,26 +2,19 @@ import os
 import socket
 import time
 from datetime import datetime, timedelta, timezone
-
 from prometheus_client import CollectorRegistry, start_http_server
-
 try:
     from prometheus_client import GaugeMetricFamily
 except ImportError:
     from prometheus_client.metrics_core import GaugeMetricFamily
-
 EXPERIMENT_METRICS_FILE = os.getenv(
     "EXPERIMENT_METRICS_FILE", "/tmp/experiment_metrics.csv"
 )
 METRICS_PORT = int(os.getenv("METRICS_PORT", "8000"))
 TARGET_DEPLOYMENT = os.getenv("TARGET_DEPLOYMENT", "unknown")
 POD_NAME = os.getenv("POD_NAME") or socket.gethostname()
-
 TS_FORMAT = "%Y-%m-%d %H:%M:%S"
 TEHRAN = timezone(timedelta(hours=3, minutes=30))
-# Canonical schema (no conformal bounds). read_last_row maps by the file's
-# own header, so older files (with lower_/upper_* or delta_* columns) keep
-# exporting the columns they have.
 CSV_COLUMNS = [
     "timestamp", "cpu", "memory", "pred_cpu", "pred_mem",
     "threshold", "error_bias",
@@ -31,7 +24,6 @@ LEGACY_COLUMNS = [
     "timestamp", "cpu", "memory", "pred_cpu", "pred_mem",
     "delta_cpu", "delta_mem", "inference_time_s", "replicas",
 ]
-
 GAUGES = {
     "cpu": ("cpa_actual_cpu", "Current CPU usage normalized to pod limit"),
     "memory": ("cpa_actual_memory", "Current memory usage normalized to pod limit"),
@@ -42,8 +34,6 @@ GAUGES = {
     "inference_time_s": ("cpa_inference_time_s", "Model inference time in seconds"),
     "replicas": ("cpa_replicas", "Current replica count"),
 }
-
-
 def _to_unix(ts_str):
     try:
         return (
@@ -53,11 +43,8 @@ def _to_unix(ts_str):
         )
     except ValueError:
         return 0.0
-
-
 def read_last_row():
     """Return the last data row as a dict, mapped by the file's own header.
-
     Handles both the canonical schema and the legacy 9-col schema so
     rolling upgrades keep exporting during the transition.
     """
@@ -76,8 +63,6 @@ def read_last_row():
             continue
         return dict(zip(header, (p.strip() for p in parts)))
     return None
-
-
 def count_valid_rows():
     if not os.path.exists(EXPERIMENT_METRICS_FILE):
         return 0
@@ -87,12 +72,9 @@ def count_valid_rows():
         return 0
     ncols = len(lines[0].split(","))
     return sum(1 for line in lines[1:] if len(line.split(",")) == ncols)
-
-
 class CpaMetricsCollector:
     def collect(self):
         labels = (TARGET_DEPLOYMENT, POD_NAME)
-
         rows_total = GaugeMetricFamily(
             "cpa_metrics_rows_total",
             "Number of valid experiment rows recorded in the CSV",
@@ -100,14 +82,11 @@ class CpaMetricsCollector:
         )
         rows_total.add_metric(labels, count_valid_rows())
         yield rows_total
-
         row = read_last_row()
         if row is None:
             return
-
         row_ts = _to_unix(row["timestamp"])
         since = (time.time() - row_ts) if row_ts else float("nan")
-
         row_ts_g = GaugeMetricFamily(
             "cpa_row_timestamp",
             "Unix timestamp of the latest experiment CSV row",
@@ -115,7 +94,6 @@ class CpaMetricsCollector:
         )
         row_ts_g.add_metric(labels, row_ts)
         yield row_ts_g
-
         since_g = GaugeMetricFamily(
             "cpa_metrics_seconds_since_update",
             "Seconds elapsed since the latest experiment row was written",
@@ -123,7 +101,6 @@ class CpaMetricsCollector:
         )
         since_g.add_metric(labels, since)
         yield since_g
-
         for col, (name, help_) in GAUGES.items():
             family = GaugeMetricFamily(name, help_, labels=["deployment", "pod"])
             try:
@@ -131,8 +108,6 @@ class CpaMetricsCollector:
             except (ValueError, KeyError):
                 continue
             yield family
-
-
 if __name__ == "__main__":
     registry = CollectorRegistry()
     registry.register(CpaMetricsCollector())

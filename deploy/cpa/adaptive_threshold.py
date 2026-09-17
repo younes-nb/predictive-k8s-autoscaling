@@ -1,9 +1,7 @@
 """Adaptive CPA threshold driven by recent model errors.
-
 Threshold = BASE_THRESHOLD (80%) shifted by the recency-weighted bias of
 recent prediction errors, clipped to [BASE - RANGE, BASE + RANGE]
 (e.g. RANGE=10 -> live threshold in [70, 90]).
-
 - Signed error: e = actual - predicted (point forecast). Positive bias means
   the model UNDER-predicts -> lower the threshold (scale earlier/safer).
   Negative bias (over-prediction) -> raise the threshold (avoid waste).
@@ -14,22 +12,16 @@ recent prediction errors, clipped to [BASE - RANGE, BASE + RANGE]
   scraped via the metrics-exporter + PodMonitor), so error history survives
   CPA pod restarts. Pod-local CSV is only a cold-start fallback when
   Prometheus has < 2 samples.
-
 Because the CPA interval is aligned to the prediction horizon
 (EVAL_INTERVAL_SECONDS == HORIZON * 60), a prediction written at cycle t
 targets cycle t+1, so errors align as actual[i+1] - pred[i].
 """
-
 import csv
 import os
 import time
-
 import numpy as np
-
 import config
 import utils
-
-
 def exp_weights(n):
     """Recency weights, oldest -> newest. Newest weighs most."""
     n = int(n)
@@ -38,10 +30,8 @@ def exp_weights(n):
     if n == 1:
         return np.ones(1, dtype=float)
     tau = max(1.0, n / 3.0)
-    ages = np.arange(n - 1, -1, -1, dtype=float)  # oldest has largest age
+    ages = np.arange(n - 1, -1, -1, dtype=float)                          
     return np.exp(-ages / tau)
-
-
 def weighted_bias(errors):
     """Recency-weighted mean of signed errors (oldest -> newest)."""
     arr = np.asarray(list(errors), dtype=float)
@@ -50,11 +40,8 @@ def weighted_bias(errors):
         return 0.0
     w = exp_weights(arr.size)
     return float(np.sum(w * arr) / np.sum(w))
-
-
 def compute_threshold(errors_cpu, errors_mem=None):
     """Map recent errors to a live threshold in [MIN, MAX].
-
     Returns (threshold, combined_bias, bias_cpu, bias_mem).
     Combined bias uses max() so the most under-predicted signal dominates
     (conservative: scale earlier when either CPU or memory is under-shot).
@@ -74,8 +61,6 @@ def compute_threshold(errors_cpu, errors_mem=None):
         )
     )
     return threshold, combined, bias_cpu, bias_mem
-
-
 def _series_values(result):
     """Pick the richest series from a range-query result -> float list."""
     best = []
@@ -91,18 +76,13 @@ def _series_values(result):
         if len(vals) > len(best):
             best = vals
     return best
-
-
 def _query_metric(metric, deployment, window_s, step_s):
     now = time.time()
     q = f'avg({metric}{{deployment="{deployment}"}})'
     result = utils.query_prometheus_range(q, now - window_s, now, step_s)
     return _series_values(result)
-
-
 def get_recent_errors_from_prometheus():
     """Fetch horizon-aligned errors from Prometheus.
-
     Returns (errors_cpu, errors_mem, n_points). Errors are oldest -> newest,
     at most ADAPTIVE_ERROR_WINDOW entries.
     """
@@ -110,17 +90,14 @@ def get_recent_errors_from_prometheus():
     step = int(config.EVAL_INTERVAL_SECONDS)
     window_s = (n + 1) * step
     dep = config.DEPLOYMENT
-
     actual_cpu = _query_metric("cpa_actual_cpu", dep, window_s, step)
     pred_cpu = _query_metric("cpa_pred_cpu", dep, window_s, step)
     errors_cpu = []
     if len(actual_cpu) >= 2 and len(pred_cpu) >= 2:
         m = min(len(actual_cpu), len(pred_cpu))
-        # pred[t] targets actual[t+1] (interval == horizon)
         errors_cpu = [
             actual_cpu[i + 1] - pred_cpu[i] for i in range(m - 1)
         ][-n:]
-
     errors_mem = []
     if config.NUM_TARGETS > 1:
         actual_mem = _query_metric("cpa_actual_memory", dep, window_s, step)
@@ -130,10 +107,7 @@ def get_recent_errors_from_prometheus():
             errors_mem = [
                 actual_mem[i + 1] - pred_mem[i] for i in range(m - 1)
             ][-n:]
-
     return errors_cpu, errors_mem, min(len(actual_cpu), len(pred_cpu))
-
-
 def _fallback_errors_from_csv():
     """Cold-start fallback: align last CSV rows as actual[i+1] - pred[i]."""
     path = config.EXPERIMENT_METRICS_FILE
@@ -161,11 +135,8 @@ def _fallback_errors_from_csv():
         return errors_cpu, errors_mem
     except Exception:
         return [], []
-
-
 def get_adaptive_threshold():
     """Compute the live threshold.
-
     Primary source: Prometheus error history (persistent). Falls back to the
     pod-local CSV on cold start, then to BASE_THRESHOLD.
     Returns (threshold, info dict).

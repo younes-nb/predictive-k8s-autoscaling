@@ -7,8 +7,6 @@ import torch
 import requests
 import config
 import model_builder
-
-
 def query_prometheus(query, is_range=False, params=None):
     endpoint = "query_range" if is_range else "query"
     try:
@@ -21,8 +19,6 @@ def query_prometheus(query, is_range=False, params=None):
     except Exception as e:
         sys.stderr.write(f"Prometheus Error: {e}\n")
         return []
-
-
 def query_prometheus_range(query, start_ts, end_ts, step_s):
     """Range query returning the raw series list (each with 'values')."""
     try:
@@ -41,8 +37,6 @@ def query_prometheus_range(query, start_ts, end_ts, step_s):
     except Exception as e:
         sys.stderr.write(f"Prometheus Range Error: {e}\n")
         return []
-
-
 def load_state():
     defaults = {
         "history": [],
@@ -57,8 +51,6 @@ def load_state():
         except Exception:
             pass
     return defaults
-
-
 def save_state(state):
     history = state.get("history", [])[-200:]
     payload = {**state, "history": history}
@@ -67,8 +59,6 @@ def save_state(state):
             json.dump(payload, f)
     except Exception as e:
         sys.stderr.write(f"State Save Error: {e}\n")
-
-
 def load_model():
     if os.path.exists(config.MODEL_PATH):
         checkpoint = torch.load(config.MODEL_PATH, map_location="cpu")
@@ -80,23 +70,17 @@ def load_model():
         model = model_builder.build_model({}, config.MODEL_TYPE or "lstm")
     model.eval()
     return model
-
-
 def log_to_file(msg):
     try:
         with open("/tmp/cpa_debug.log", "a") as f:
             f.write(f"{time.ctime()} - {msg}\n")
     except Exception:
         pass
-
-
 def get_tehran_time():
     utc_now = datetime.datetime.utcnow()
     tehran_offset = datetime.timedelta(hours=3, minutes=30)
     tehran_time = utc_now + tehran_offset
     return tehran_time.strftime("%Y-%m-%d %H:%M:%S")
-
-
 EXPERIMENT_CSV_COLUMNS = [
     "timestamp",
     "cpu",
@@ -108,8 +92,6 @@ EXPERIMENT_CSV_COLUMNS = [
     "inference_time_s",
     "replicas",
 ]
-
-
 def log_metrics(
     timestamp,
     curr_cpu,
