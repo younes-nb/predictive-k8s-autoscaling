@@ -83,11 +83,18 @@ def _scalar(result):
         return 0.0
     vals = []
     for s in result:
-        for _, v in s.get("values", []):
+        # instant queries -> "value": [ts, "val"]; range queries -> "values": [[ts, "val"], ...]
+        if "value" in s:
             try:
-                vals.append(float(v))
-            except (TypeError, ValueError):
+                vals.append(float(s["value"][1]))
+            except (TypeError, ValueError, IndexError):
                 pass
+        elif "values" in s:
+            for _, v in s.get("values", []):
+                try:
+                    vals.append(float(v))
+                except (TypeError, ValueError):
+                    pass
     return sum(vals) if vals else 0.0
 def load_state():
     defaults = {
