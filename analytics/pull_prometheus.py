@@ -40,7 +40,12 @@ COLUMN_MAP = {
     "cpa_replicas": "replicas",
 }
 
-CSV_HEADER = "timestamp,cpu,memory,pred_cpu,pred_mem,threshold,error_bias,inference_time_s,replicas"
+CSV_HEADER = "timestamp,cpu,memory,pred_cpu,pred_mem,threshold,error_bias,inference_time_s,replicas,mcr"
+
+MCR_QUERY = (
+    'sum(rate(istio_requests_total{reporter="destination",'
+    'destination_workload_namespace="online-boutique"}[1m])) by (destination_workload)'
+)
 
 
 def parse_args():
@@ -149,6 +154,16 @@ def pull_deployment(url, deployment, start, end, step):
             print(f"warning: {metric} has no data for {deployment}", file=sys.stderr)
         series[metric] = merge_series(result)
 
+    mcr_result = query_range(url, MCR_QUERY, start, end, step)
+    mcr_by_workload = {}
+    for s in mcr_result:
+        wl = s.get("metric", {}).get("destination_workload", "")
+        if wl:
+            mcr_by_workload[wl] = merge_series([s])
+    if deployment not in mcr_by_workload:
+        print(f"warning: mcr has no data for {deployment}", file=sys.stderr)
+    mcr = mcr_by_workload.get(deployment, {})
+
     if not series["cpa_row_timestamp"]:
         return []
 
@@ -175,6 +190,8 @@ def pull_deployment(url, deployment, start, end, step):
         values = seen_rows[row_ts]
         if any(not math.isfinite(v) for v in values.values()):
             continue
+        mcr_ts = max((k for k in mcr if k <= row_ts), default=None)
+        values["mcr"] = mcr[mcr_ts] if mcr_ts is not None else 0.0
         rows.append((tehran_wall(row_ts), values))
     return rows
 
