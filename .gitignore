@@ -3,6 +3,7 @@
 venv
 /local_data
 /data/
+/analytics/data/
 *.pyc
 __pycache__/
 AGENTS.md
