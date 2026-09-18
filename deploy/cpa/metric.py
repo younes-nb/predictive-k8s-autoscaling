@@ -62,7 +62,7 @@ def main():
         safe_threshold, thresh_info = adaptive_threshold.get_adaptive_threshold()
         if use_prediction and len(history_metrics) >= config.WINDOW_SIZE:
             x_tensor = (
-                torch.tensor(history_metrics)
+                torch.tensor(history_metrics[-config.WINDOW_SIZE:])
                 .float()
                 .view(1, config.WINDOW_SIZE, config.INPUT_SIZE)
             )
