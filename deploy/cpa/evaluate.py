@@ -51,6 +51,11 @@ def main():
         current_memory = float(data.get("current_memory", 0.0))
         current_replicas = int(data.get("current_replicas", 1))
         metric_duration = float(data.get("duration_seconds", 0.0))
+        if current_load <= 0.0 and current_memory <= 0.0:
+            fallback_load, fallback_mem = utils.fetch_current_load()
+            if fallback_load > 0.0 or fallback_mem > 0.0:
+                current_load = fallback_load
+                current_memory = fallback_mem
         state = utils.load_state()
         state.pop("conformal", None)
         state.pop("conformal_pending", None)

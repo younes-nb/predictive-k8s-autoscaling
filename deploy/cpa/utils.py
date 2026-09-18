@@ -36,6 +36,59 @@ def query_prometheus_range(query, start_ts, end_ts, step_s):
     except Exception as e:
         sys.stderr.write(f"Prometheus Range Error: {e}\n")
         return []
+
+
+def fetch_current_load():
+    """Real CPU/memory for this CPA's deployment from Prometheus.
+
+    The custom-pod-autoscaler operator feeds the scripts a JSON envelope
+    with current_load/current_memory. When it is missing or zero (the
+    deployed CPA specs declare no metrics queries), fall back to querying
+    Prometheus directly for this pod's own container, so the loop still
+    reacts to real load instead of scaling on zeros forever.
+    """
+    dep = config.DEPLOYMENT
+    ns = config.NAMESPACE
+    try:
+        cpu_q = (
+            f'sum(rate(container_cpu_usage_seconds_total{{namespace="{ns}",'
+            f'pod=~"{dep}-.*",container="server"}}[1m]))'
+        )
+        mem_q = (
+            f'sum(container_memory_working_set_bytes{{namespace="{ns}",'
+            f'pod=~"{dep}-.*",container="server"}})'
+        )
+        req_q = (
+            f'sum(kube_pod_container_resource_requests{{resource="cpu",'
+            f'namespace="{ns}",pod=~"{dep}-.*",container="server"}})'
+        )
+        mem_req_q = (
+            f'sum(kube_pod_container_resource_requests{{resource="memory",'
+            f'namespace="{ns}",pod=~"{dep}-.*",container="server"}})'
+        )
+        cpu = _scalar(query_prometheus(cpu_q))
+        mem = _scalar(query_prometheus(mem_q))
+        cpu_req = _scalar(query_prometheus(req_q))
+        mem_req = _scalar(query_prometheus(mem_req_q))
+        cpu_norm = cpu / cpu_req if cpu_req > 0 else 0.0
+        mem_norm = mem / mem_req if mem_req > 0 else 0.0
+        return cpu_norm, mem_norm
+    except Exception as e:
+        sys.stderr.write(f"fetch_current_load error: {e}\n")
+        return 0.0, 0.0
+
+
+def _scalar(result):
+    if not result:
+        return 0.0
+    vals = []
+    for s in result:
+        for _, v in s.get("values", []):
+            try:
+                vals.append(float(v))
+            except (TypeError, ValueError):
+                pass
+    return sum(vals) if vals else 0.0
 def load_state():
     defaults = {
         "history": [],
