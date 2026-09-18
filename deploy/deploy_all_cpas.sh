@@ -14,7 +14,12 @@ INTERVAL_MS=$((HORIZON * 60 * 1000))
 EVAL_INTERVAL_SECONDS=$((HORIZON * 60))
 
 BASE_THRESHOLD="80"
-ADAPTIVE_THRESHOLD_RANGE="10"
+ADAPTIVE_THRESHOLD_RANGE="0"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if ! kubectl apply -f "${SCRIPT_DIR}/cpa-pods-podmonitor.yaml"; then
+    echo "WARNING: failed to apply cpa-pods PodMonitor; Prometheus will not scrape CPA metrics" >&2
+fi
 
 for DEPLOYMENT in $(kubectl get deployments -n $NAMESPACE -o jsonpath='{.items[*].metadata.name}'); do
     

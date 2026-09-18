@@ -25,7 +25,8 @@ DEFAULT_DEPLOYMENTS = [
 
 METRIC_COLUMNS = [
     "cpa_actual_cpu", "cpa_actual_memory", "cpa_pred_cpu", "cpa_pred_mem",
-    "cpa_delta_cpu", "cpa_delta_mem", "cpa_inference_time_s", "cpa_replicas",
+    "cpa_adaptive_threshold", "cpa_prediction_error_bias",
+    "cpa_inference_time_s", "cpa_replicas",
 ]
 
 COLUMN_MAP = {
@@ -33,13 +34,13 @@ COLUMN_MAP = {
     "cpa_actual_memory": "memory",
     "cpa_pred_cpu": "pred_cpu",
     "cpa_pred_mem": "pred_mem",
-    "cpa_delta_cpu": "delta_cpu",
-    "cpa_delta_mem": "delta_mem",
+    "cpa_adaptive_threshold": "threshold",
+    "cpa_prediction_error_bias": "error_bias",
     "cpa_inference_time_s": "inference_time_s",
     "cpa_replicas": "replicas",
 }
 
-CSV_HEADER = "timestamp,cpu,memory,pred_cpu,pred_mem,delta_cpu,delta_mem,inference_time_s,replicas"
+CSV_HEADER = "timestamp,cpu,memory,pred_cpu,pred_mem,threshold,error_bias,inference_time_s,replicas"
 
 
 def parse_args():
@@ -117,6 +118,16 @@ def query_range(url, query, start, end, step):
     return payload["data"]["result"]
 
 
+def metric_exists(url, metric, ts):
+    params = urllib.parse.urlencode({"query": metric, "time": str(int(ts))})
+    try:
+        with urllib.request.urlopen(f"{url}/api/v1/query?{params}", timeout=30) as resp:
+            payload = json.load(resp)
+        return payload["status"] == "success" and len(payload["data"]["result"]) > 0
+    except Exception:
+        return False
+
+
 def merge_series(series_list):
     merged = {}
     for series in series_list:
@@ -134,6 +145,8 @@ def pull_deployment(url, deployment, start, end, step):
         result = query_range(
             url, f'{metric}{{deployment="{deployment}"}}', start, end, step
         )
+        if not result:
+            print(f"warning: {metric} has no data for {deployment}", file=sys.stderr)
         series[metric] = merge_series(result)
 
     if not series["cpa_row_timestamp"]:
@@ -198,6 +211,11 @@ def main():
             print(f"{deployment}: {len(rows)} rows -> {out_path}")
             total_rows += len(rows)
         print(f"Total rows: {total_rows}")
+        if total_rows == 0:
+            if not metric_exists(args.prometheus_url, "cpa_row_timestamp", end):
+                print("HINT: no cpa_* series in Prometheus at all. The cpa-pods PodMonitor is probably missing or not scraping: kubectl get podmonitor -A; kubectl apply -f deploy/cpa-pods-podmonitor.yaml")
+            else:
+                print("HINT: cpa_* series exist but the window is empty. Pick a window after the CPA image with metrics-exporter was deployed.")
     finally:
         if proc is not None:
             proc.terminate()
