@@ -19,6 +19,7 @@ COPY core/architectures/ core/architectures/
 COPY preprocessing/__init__.py preprocessing/__init__.py
 COPY preprocessing/swt/ preprocessing/swt/
 COPY shared/__init__.py shared/__init__.py
+COPY shared/config_env.py shared/config_env.py
 COPY shared/config_preprocessing_defaults.py shared/config_preprocessing_defaults.py
 COPY deploy/model.pt .
 COPY deploy/cpa/config.yaml /config.yaml
