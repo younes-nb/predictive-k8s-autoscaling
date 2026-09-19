@@ -41,12 +41,15 @@ def main():
             return
         envelope = json.loads(raw_input)
         metrics_list = envelope.get("metrics", [])
-        if not metrics_list:
-            raise ValueError("No metrics found in CPA envelope")
-        inner_json_str = metrics_list[0].get("value", "{}")
-        data = json.loads(inner_json_str)
-        history_metrics = data.get("metrics", [])
-        use_prediction = data.get("use_prediction", False)
+        if metrics_list:
+            inner_json_str = metrics_list[0].get("value", "{}")
+            data = json.loads(inner_json_str)
+        else:
+            data = {}
+        history_metrics, use_prediction = utils.fetch_history()
+        if data.get("metrics"):
+            history_metrics = data.get("metrics", history_metrics)
+            use_prediction = data.get("use_prediction", use_prediction)
         current_load = float(data.get("current_load", 0.0))
         current_memory = float(data.get("current_memory", 0.0))
         current_replicas = int(data.get("current_replicas", 1))
@@ -56,6 +59,9 @@ def main():
             if fallback_load > 0.0 or fallback_mem > 0.0:
                 current_load = fallback_load
                 current_memory = fallback_mem
+        real_replicas = utils.fetch_current_replicas()
+        if real_replicas is not None:
+            current_replicas = int(real_replicas)
         state = utils.load_state()
         state.pop("conformal", None)
         state.pop("conformal_pending", None)
