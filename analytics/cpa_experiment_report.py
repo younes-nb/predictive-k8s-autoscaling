@@ -219,6 +219,12 @@ def calculate_metrics(global_df, horizon=5):
     print(f"P95 Inference Time:   {p95_inf:.4f} s")
     print("=" * 40)
     print(f"Avg Replicas: {avg_replicas:.2f}")
+    if "cpu" in global_df.columns:
+        print(f"Avg CPU: {global_df['cpu'].mean():.4f}")
+    if "memory" in global_df.columns:
+        print(f"Avg Memory: {global_df['memory'].mean():.4f}")
+    if "threshold" in global_df.columns:
+        print(f"Avg Threshold: {global_df['threshold'].mean():.4f}")
     print("=" * 40)
 
 
@@ -280,6 +286,14 @@ def plot_cpu(deployment_data, plots_dir, horizon=5):
             color="orange",
             linestyle="--",
         )
+        if "threshold" in df.columns:
+            ax.plot(
+                df["timestamp"],
+                df["threshold"],
+                label="Threshold",
+                color="red",
+                linestyle=":",
+            )
 
         ax.set_title(
             f"Deployment: {name} (Limit: {get_limit(name)}m per pod)", fontweight="bold"
@@ -359,6 +373,14 @@ def plot_memory(deployment_data, plots_dir, horizon=5):
             color="orange",
             linestyle="--",
         )
+        if "threshold" in df.columns:
+            ax.plot(
+                df["timestamp"],
+                df["threshold"],
+                label="Threshold",
+                color="red",
+                linestyle=":",
+            )
 
         ax.set_title(
             f"Deployment: {name} (Limit: {get_limit(name)}m per pod)", fontweight="bold"

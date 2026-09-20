@@ -1,6 +1,7 @@
 import argparse
 import os
 import subprocess
+import sys
 import time
 import urllib.request
 from datetime import datetime
@@ -19,6 +20,8 @@ OUTPUT_DIR = "/proj/k8sautoscaledl-PG0"
 OUTPUT_NAME = "hpa_logs.csv"
 
 NAMESPACE = "online-boutique"
+
+HPA_TARGET = 0.80
 
 QUERIES = {
     "replicas": {
@@ -214,22 +217,111 @@ def fetch_and_process_data(start_ts, end_ts, prom_url, out_path):
             proc.terminate()
 
 
+def analyze_file(csv_path, plots_dir):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import matplotlib.dates as mdates
+    import matplotlib.ticker as ticker
+    from tqdm import tqdm
+
+    df = pd.read_csv(csv_path, parse_dates=["timestamp"])
+    print(f"Loaded {len(df)} rows x {df.shape[1]} cols from {csv_path}")
+    print(f"Avg CPU: {df['cpu'].mean():.4f}")
+    print(f"Avg Memory: {df['memory'].mean():.4f}")
+    print(f"Avg Replicas: {df['replicas'].mean():.2f}")
+    print(f"Avg Threshold (HPA target): {HPA_TARGET:.4f}")
+
+    os.makedirs(plots_dir, exist_ok=True)
+    services = sorted(df["msname"].unique())
+    cols = 2
+    rows = (len(services) + 1) // cols
+
+    def grid():
+        fig, axes = plt.subplots(rows, cols, figsize=(36, 6 * rows), sharex=False)
+        axes = axes.flatten()
+        for j in range(len(services), len(axes)):
+            axes[j].axis("off")
+        return fig, axes
+
+    def style(ax):
+        ax.xaxis.set_major_locator(mdates.MinuteLocator(interval=30))
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+        plt.setp(ax.get_xticklabels(), rotation=30, ha="right")
+        ax.grid(True, alpha=0.3)
+        lines, labels = ax.get_legend_handles_labels()
+        ax.legend(lines, labels, loc="upper left")
+
+    def finish(fig, suffix):
+        plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+        plt.subplots_adjust(hspace=0.6)
+        out = os.path.join(plots_dir, f"hpa_{suffix}.png")
+        plt.savefig(out, dpi=150)
+        plt.close(fig)
+        print(f"Plot saved to {out}")
+
+    fig, axes = grid()
+    for i, dep in tqdm(list(enumerate(services)), desc="Plotting CPU", unit="svc"):
+        ax = axes[i]
+        g = df[df["msname"] == dep]
+        ax.plot(g["timestamp"], g["cpu"], label="CPU", color="blue", alpha=0.6)
+        ax.axhline(y=HPA_TARGET, label="Threshold (0.80)", color="red", linestyle=":")
+        ax.set_title(f"Service: {dep}", fontweight="bold")
+        ax.set_ylabel("CPU Utilization")
+        ax.set_ylim(-0.05, 1.05)
+        style(ax)
+    finish(fig, "cpu")
+
+    fig, axes = grid()
+    for i, dep in tqdm(list(enumerate(services)), desc="Plotting memory", unit="svc"):
+        ax = axes[i]
+        g = df[df["msname"] == dep]
+        ax.plot(g["timestamp"], g["memory"], label="Memory", color="blue", alpha=0.6)
+        ax.axhline(y=HPA_TARGET, label="Threshold (0.80)", color="red", linestyle=":")
+        ax.set_title(f"Service: {dep}", fontweight="bold")
+        ax.set_ylabel("Memory Utilization")
+        ax.set_ylim(-0.05, max(1.05, float(g["memory"].max()) + 0.05))
+        style(ax)
+    finish(fig, "mem")
+
+    fig, axes = grid()
+    for i, dep in tqdm(list(enumerate(services)), desc="Plotting replicas", unit="svc"):
+        ax = axes[i]
+        g = df[df["msname"] == dep]
+        ax.step(g["timestamp"], g["replicas"], label="Replicas", color="green",
+                where="post", alpha=0.7)
+        ax.set_title(f"Service: {dep}", fontweight="bold")
+        ax.set_ylabel("Replicas")
+        ax.yaxis.set_major_locator(ticker.MaxNLocator(integer=True))
+        lo, hi = float(g["replicas"].min()), float(g["replicas"].max())
+        ax.set_ylim(min(lo, HPA_TARGET) - 0.2, hi + 0.5)
+        style(ax)
+    finish(fig, "replicas")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Export per-service cpu/memory/replicas/incoming-mcr "
                     "at 1-minute granularity."
     )
-    parser.add_argument("--start", required=True,
+    parser.add_argument("--start", required=False, default=None,
                         help="Start time ('YYYY-MM-DD HH:MM:SS' Tehran or Unix ts)")
-    parser.add_argument("--end", required=True,
+    parser.add_argument("--end", required=False, default=None,
                         help="End time ('YYYY-MM-DD HH:MM:SS' Tehran or Unix ts)")
     parser.add_argument("--prometheus-url", type=str, default=PROMETHEUS_URL,
                         help="Prometheus API base URL (default localhost:9090 via port-forward)")
     parser.add_argument("--out", type=str,
                         default=os.path.join(OUTPUT_DIR, OUTPUT_NAME),
                         help="Output CSV path (default %(default)s)")
+    parser.add_argument("--analyze", type=str, default=None,
+                        help="Analyze an existing CSV (plots + averages) instead of exporting")
 
     args = parser.parse_args()
+    if args.analyze:
+        analyze_file(args.analyze, os.path.join(OUTPUT_DIR, "hpa_plots"))
+        sys.exit(0)
+    if not args.start or not args.end:
+        parser.error("--start and --end are required for export mode")
     tehran_tz = pytz.timezone("Asia/Tehran")
 
     def parse_time_arg(time_str):
