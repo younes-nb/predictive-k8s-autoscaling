@@ -14,7 +14,7 @@ INTERVAL_MS=$((HORIZON * 60 * 1000))
 EVAL_INTERVAL_SECONDS=$((HORIZON * 60))
 
 BASE_THRESHOLD="80"
-ADAPTIVE_THRESHOLD_RANGE="0"
+ADAPTIVE_THRESHOLD_RANGE="10"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if ! kubectl apply -f "${SCRIPT_DIR}/cpa-pods-podmonitor.yaml"; then

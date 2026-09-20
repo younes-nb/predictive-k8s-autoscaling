@@ -285,7 +285,7 @@ def plot_cpu(deployment_data, plots_dir, horizon=5):
             f"Deployment: {name} (Limit: {get_limit(name)}m per pod)", fontweight="bold"
         )
         ax.set_ylabel("CPU Utilization (0.0 - 1.0)")
-        ax.set_ylim(0, 1.0)
+        ax.set_ylim(-0.05, 1.05)
         ax.set_yticks(np.arange(0, 1.1, 0.2))
         ax.grid(True, alpha=0.3)
         ax.axhline(y=1.0, color="gray", linestyle="--", alpha=0.3, linewidth=1)
@@ -324,7 +324,9 @@ def plot_replicas(deployment_data, plots_dir):
         rep_min = df["replicas"].min()
         rep_max = df["replicas"].max()
         if rep_min == rep_max:
-            ax.set_ylim(rep_min - 1, rep_max + 1)
+            ax.set_ylim(rep_min - 1.1, rep_max + 1.1)
+        else:
+            ax.margins(y=0.1)
 
         _style_time_axis(ax)
         _add_legend(ax)
@@ -362,7 +364,7 @@ def plot_memory(deployment_data, plots_dir, horizon=5):
             f"Deployment: {name} (Limit: {get_limit(name)}m per pod)", fontweight="bold"
         )
         ax.set_ylabel("Memory Utilization (0.0 - 1.0)")
-        ax.set_ylim(0, 1.0)
+        ax.set_ylim(-0.05, 1.05)
         ax.set_yticks(np.arange(0, 1.1, 0.2))
         ax.grid(True, alpha=0.3)
         ax.axhline(y=1.0, color="gray", linestyle="--", alpha=0.3, linewidth=1)
