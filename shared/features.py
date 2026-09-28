@@ -31,6 +31,8 @@ FEATURES: Dict[str, Dict[str, str]] = {
     "active_for": {"table": "msrtmcre", "column": "active_for"},
     "tod_sin": {"table": "time", "column": "tod_sin"},
     "tod_cos": {"table": "time", "column": "tod_cos"},
+    # Tier-0 spike features served from the HPA-logs CSV (--csv_path;
+    # analytics/export_hpa.py). No parquet table backs them.
     "neigh_cpu_mean": {"table": "msrtmcre", "column": "neigh_cpu_mean"},
     "neigh_cpu_slope3": {"table": "msrtmcre", "column": "neigh_cpu_slope3"},
     "neigh_rps_z30_mean": {"table": "msrtmcre", "column": "neigh_rps_z30_mean"},
@@ -82,6 +84,21 @@ FEATURES: Dict[str, Dict[str, str]] = {
     "interface": {"table": "mscallgraph", "column": "interface"},
     "uminstanceid": {"table": "mscallgraph", "column": "uminstanceid"},
     "dminstanceid": {"table": "mscallgraph", "column": "dminstanceid"},
+    # Tier-0 spike-prediction features: csv/export-native (see
+    # analytics/export_hpa.py). Table tags are nominal on the CSV path;
+    # they only matter for parquet sourcing, which has no backing table
+    # for these columns.
+    "cpu_lim": {"table": "msresource", "column": "cpu_lim"},
+    "mem_lim": {"table": "msresource", "column": "mem_lim"},
+    "pgfault": {"table": "msresource", "column": "pgfault"},
+    "pgmajfault": {"table": "msresource", "column": "pgmajfault"},
+    "from_frontend": {"table": "msrtmcre", "column": "from_frontend"},
+    "frontend_rps": {"table": "msresource", "column": "frontend_rps"},
+    "mesh_rps": {"table": "msresource", "column": "mesh_rps"},
+    "concurrency": {"table": "msrtmcre", "column": "concurrency"},
+    "scale_recency": {"table": "msresource", "column": "scale_recency"},
+    "vol_rps": {"table": "msrtmcre", "column": "vol_rps"},
+    "vol_cpu": {"table": "msresource", "column": "vol_cpu"},
 }
 
 
@@ -238,9 +255,9 @@ FEATURE_SETS: Dict[str, Dict[str, Any]] = {
     },
     # Full infra-native MS feature set for next-minute cpu_utilization:
     # mesh/call-graph load + per-request cost proxies + envoy queues +
-    # control-plane + node pressure. Served from the HPA-logs CSV
-    # (--csv_path); csv/export-native (no parquet tables back the
-    # istio/envoy/node columns).
+    # saturation proximity + engineered dynamics. Served from the HPA-logs
+    # CSV (--csv_path); csv/export-native (no parquet tables back the
+    # istio/envoy columns).
     "cpu_ms_infra": {
         "features": [
             "cpu_utilization",
@@ -260,10 +277,6 @@ FEATURE_SETS: Dict[str, Dict[str, Any]] = {
             "resp_byte_rate",
             "req_bytes_per_req",
             "resp_bytes_per_req",
-            "slow_frac",
-            "req_msg_rate",
-            "resp_msg_rate",
-            "msgs_per_req",
             "err_rate",
             "err_frac",
             "flag_rate",
@@ -286,9 +299,21 @@ FEATURE_SETS: Dict[str, Dict[str, Any]] = {
             "neigh_cpu_slope3",
             "neigh_rps_z30_mean",
             "neigh_rps_slope5_mean",
-            "node_load_mean",
-            "node_load_max",
-            "node_cpu_mean",
+            # Tier-0 spike features (csv/export-native; analytics/export_hpa.py).
+            # Dropped vs the original sketch: slow_frac, req/resp_msg_rate,
+            # msgs_per_req (no Prometheus source) and node_load_mean/max,
+            # node_cpu_mean (measured ~zero gain in spike_hunt ablation).
+            "from_frontend",
+            "frontend_rps",
+            "mesh_rps",
+            "concurrency",
+            "scale_recency",
+            "vol_rps",
+            "vol_cpu",
+            "cpu_lim",
+            "mem_lim",
+            "pgfault",
+            "pgmajfault",
         ],
         "target": "cpu_utilization",
         "base_table": "msresource",

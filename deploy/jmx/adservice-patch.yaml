@@ -1,0 +1,29 @@
+# Strategic-merge patch applied to online-boutique/adservice (Tier-1 runtime metrics):
+#   kubectl -n online-boutique patch deploy adservice --type strategic --patch-file deploy/jmx/adservice-patch.yaml
+# Agentless JMX: initContainer fetches the exporter jar (no image rebuild),
+# JAVA_TOOL_OPTIONS injects -javaagent, port 9404 scraped by podmonitor.yaml.
+spec:
+  template:
+    spec:
+      volumes:
+      - name: jmx
+        emptyDir: {}
+      - name: jmx-config
+        configMap:
+          name: adservice-jmx-config
+      initContainers:
+      - name: fetch-jmx-agent
+        image: busybox:1.36
+        command: ["sh","-c","wget -O /jmx/jmx_prometheus_javaagent.jar https://repo1.maven.org/maven2/io/prometheus/jmx/jmx_prometheus_javaagent/0.20.0/jmx_prometheus_javaagent-0.20.0.jar && cp /jmx-config/config.yaml /jmx/config.yaml && ls -la /jmx/"]
+        volumeMounts:
+        - {name: jmx, mountPath: /jmx}
+        - {name: jmx-config, mountPath: /jmx-config}
+      containers:
+      - name: server
+        ports:
+        - {containerPort: 9555}
+        - {containerPort: 9404, name: jmx-metrics}
+        env:
+        - {name: JAVA_TOOL_OPTIONS, value: "-javaagent:/jmx/jmx_prometheus_javaagent.jar=9404:/jmx/config.yaml"}
+        volumeMounts:
+        - {name: jmx, mountPath: /jmx}

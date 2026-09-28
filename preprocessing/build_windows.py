@@ -100,6 +100,18 @@ _CSV_COLUMN_MAP = {
     "node_load_mean": "node_load_mean",
     "node_load_max": "node_load_max",
     "node_cpu_mean": "node_cpu_mean",
+    # Tier-0 spike features (analytics/export_hpa.py), identity-mapped.
+    "from_frontend": "from_frontend",
+    "frontend_rps": "frontend_rps",
+    "mesh_rps": "mesh_rps",
+    "concurrency": "concurrency",
+    "scale_recency": "scale_recency",
+    "vol_rps": "vol_rps",
+    "vol_cpu": "vol_cpu",
+    "cpu_lim": "cpu_lim",
+    "mem_lim": "mem_lim",
+    "pgfault": "pgfault",
+    "pgmajfault": "pgmajfault",
 }
 
 _CSV_COLUMN_MINMAX = {"http_mcr", "providerrpc_mcr"}
@@ -802,9 +814,17 @@ def main():
     # is sliced to the input channels; y comes from target_indices.
     array_features = feature_names + [t for t in target_features if t not in feature_names]
     target_indices = [array_features.index(f) for f in target_features]
+    # Channels stored as float16 rounded to 1e-2: ONLY the raw utilization
+    # levels. Derived dynamics (slopes/deltas/volatility/z-scores/gaps)
+    # carry their signal in small magnitudes that 1e-2 rounding would
+    # destroy, so they are excluded even though their names contain
+    # cpu/mem/rps substrings.
+    _DERIVED_SUBSTR = ("slope", "delta", "vel", "acc", "vol", "z30", "gap",
+                       "concurrency", "recency")
     resource_indices = [
         i for i, f in enumerate(feature_names)
-        if "cpu" in f.lower() or "mem" in f.lower()
+        if ("cpu" in f.lower() or "mem" in f.lower())
+        and not any(k in f.lower() for k in _DERIVED_SUBSTR)
     ]
 
     if args.csv_path:

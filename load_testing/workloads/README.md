@@ -2,7 +2,7 @@
 
 `load_testing/nasa_workload.py` builds a per-minute `http_mcr` curve from a real
 web-server trace — the NASA Kennedy Space Center HTTP logs (July 1995) — for use
-with `load_testing/run_test.sh` / `locustfile.py`.
+with `load_testing/run_test.sh` / `trainticket_locustfile.py`.
 
 ## Data
 
@@ -21,7 +21,7 @@ with `load_testing/run_test.sh` / `locustfile.py`.
 
 `http_mcr_NASA_jul95.csv` — columns `msname,timestamp,http_mcr`, one row per
 minute, `http_mcr` normalized to [0,1] (peak = 1.0). Exactly the format
-`run_test.sh`/`locustfile.py` consume.
+`run_test.sh`/`trainticket_locustfile.py` consume.
 
 Usage (run from repo root):
 
@@ -56,8 +56,8 @@ correlation of hourly profiles. For the July curve these are ≈0.70 (1 h),
 
 `load_testing/wikipedia_workload.py` builds a per-minute `http_mcr` curve from
 real Wikipedia traffic — the Wikimedia Foundation's per-project pageview
-aggregates — for use with `load_testing/run_test.sh` / `locustfile.py`. No
-changes to `run_test.sh`/`locustfile.py` are needed: the output CSV has the
+aggregates — for use with `load_testing/run_test.sh` / `trainticket_locustfile.py`. No
+changes to `run_test.sh`/`trainticket_locustfile.py` are needed: the output CSV has the
 identical `msname,timestamp,http_mcr` format.
 
 ## Data

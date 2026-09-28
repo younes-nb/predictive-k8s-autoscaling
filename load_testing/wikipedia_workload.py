@@ -8,7 +8,7 @@ DATA_DIR (cached on disk), sums the English-Wikipedia all-access traffic
 (domain codes `en` + `en.m`) into per-1-hour buckets, upsamples to per-1-minute
 resolution, normalizes to [0,1] (peak = 1.0), and writes a CSV with columns
 msname,timestamp,http_mcr — the exact format consumed by
-load_testing/run_test.sh / locustfile.py.
+load_testing/run_test.sh / trainticket_locustfile.py.
 
 The default window (Mon 2024-04-08 + 14 days = two full Mon-Sun weeks) shows a
 genuine diurnal + weekend pattern: night trough vs. midday peak each day with

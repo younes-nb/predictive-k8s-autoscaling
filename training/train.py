@@ -37,7 +37,7 @@ from training.sfoa_search import run_sfoa_search
 from training.sfoa_configs import get_config
 
 
-MODEL_TYPES = ("lstm", "gru", "bilstm", "bigrue", "cnn_bilstm", "dlinear", "dpam", "linearreg")
+MODEL_TYPES = ("lstm", "gru", "bilstm", "bigrue", "cnn_bilstm", "dlinear", "dpam", "linearreg", "tcn", "tcn_focal")
 PREPROCESS_APPROACHES = ("none", "smoothing", "swt", "cskv")
 
 
@@ -391,7 +391,7 @@ def train(args):
     if accelerator.mixed_precision == "fp16":
         log_info("AMP (FP16 mixed precision) enabled via Accelerate")
 
-    def _compute_loss(model, preds, y):
+    def _compute_loss(model, preds, y, x=None):
         # Contract: (B, H, T). Single-target linear models (linearreg,
         # dlinear) return 2D (B, H); without promotion the [..., -1:, :]
         # slice below would silently select the last BATCH row instead of
@@ -409,7 +409,53 @@ def train(args):
                 f"{tuple(y.shape)}. Check model output dims for "
                 f"feature_set={getattr(args, 'feature_set', '?')}."
             )
-        if args.loss_mode == "joint_mse":
+        elif args.loss_mode == "focal_event":
+            if getattr(args, "preprocess_approach", "none") != "none":
+                raise RuntimeError("focal_event requires --preprocess_approach none")
+            from shared.features import feature_names_for_feature_set
+            cpu_idx = feature_names_for_feature_set(args.feature_set).index(
+                "cpu_utilization")
+            x_last = x[:, -1:, cpu_idx:cpu_idx + 1].float()
+            jump = y.float() - x_last
+            delta = float(getattr(args, "event_delta", 0.2))
+            spike_t = (jump >= delta).float()
+            drop_t = (jump <= -delta).float()
+            logits = model.event_logits(x.float())
+            if logits.dim() == 2:
+                logits = logits.unsqueeze(-1).expand(-1, -1, 2)
+            if args.last_step_only:
+                logits = logits[:, -1:, :]
+            alpha = float(getattr(args, "focal_alpha", 0.25))
+            gamma = float(getattr(args, "focal_gamma", 2.0))
+            lam = float(getattr(args, "focal_weight", 1.0))
+
+            def _focal_bce(logit, target):
+                bce = nn.functional.binary_cross_entropy_with_logits(
+                    logit, target, reduction="none")
+                pt = torch.exp(-bce)
+                at = alpha * target + (1 - alpha) * (1 - target)
+                return (at * (1 - pt) ** gamma * bce).mean()
+
+            loss = (nn.functional.mse_loss(preds, y)
+                    + lam * (_focal_bce(logits[..., 0:1], spike_t)
+                             + _focal_bce(logits[..., 1:2], drop_t)) / 2.0)
+        elif args.loss_mode == "lds_mse":
+            # Imbalanced-regression weighting (LDS spirit, Yang et al. 2021):
+            # weight each sample by the inverse SQRT of the Gaussian-smoothed
+            # train density of its jump magnitude. Rare-magnitude samples
+            # count more; no resampling, no synthetic data.
+            if getattr(args, "preprocess_approach", "none") != "none":
+                raise RuntimeError("lds_mse requires --preprocess_approach none")
+            from shared.features import feature_names_for_feature_set
+            _cpu_idx = feature_names_for_feature_set(
+                args.feature_set).index("cpu_utilization")
+            _x_last = x[:, -1:, _cpu_idx:_cpu_idx + 1].float()
+            _jump = (y.float() - _x_last).detach().flatten()
+            _idx = torch.bucketize(
+                _jump, lds_edges.to(_jump.device)) .clamp(0, len(lds_w) - 1)
+            _se = ((preds - y) ** 2).mean(dim=tuple(range(1, preds.dim())))
+            loss = (lds_w.to(_se.device)[_idx] * _se).mean()
+        elif args.loss_mode == "joint_mse":
             loss = nn.functional.mse_loss(preds, y)
         elif args.loss_mode == "per_target_huber":
             loss = per_target_huber_loss(
@@ -430,6 +476,40 @@ def train(args):
             loss = per_target_loss(preds, y, mem_mode=mem_mode)
         return loss
 
+    # LDS jump-density table (train rows only — no leak): one pass over the
+    # train loader collecting last-step jumps, histogrammed and smoothed.
+    lds_edges, lds_w = None, None
+    if getattr(args, "loss_mode", "") == "lds_mse":
+        from shared.features import feature_names_for_feature_set
+        _ci = feature_names_for_feature_set(args.feature_set).index(
+            "cpu_utilization")
+        _js = []
+        was_training = model.training
+        model.eval()
+        with torch.no_grad():
+            for _b in train_loader:
+                _x, _y = _b[0], _b[1]
+                if _x.dim() == 3:
+                    _jl = _y[:, -1].float().flatten() - _x[:, -1, _ci].float().flatten()
+                else:
+                    _jl = _y.float().flatten() - _x.float().flatten()
+                _js.append(_jl.cpu().numpy())
+        if was_training:
+            model.train()
+        _js = np.concatenate(_js)
+        _bins = np.linspace(-2.0, 2.0, 201)
+        _cnt, _ = np.histogram(np.clip(_js, -2.0, 2.0), bins=_bins)
+        _k = np.arange(-15, 16)
+        _ker = np.exp(-0.5 * (_k / 5.0) ** 2)
+        _ker /= _ker.sum()
+        _den = np.convolve(_cnt + 1e-3, _ker, mode="same")
+        _w = 1.0 / np.sqrt(_den)
+        _w = _w / _w.mean()
+        lds_edges = torch.from_numpy(_bins[1:-1].astype(np.float32))
+        lds_w = torch.from_numpy(_w.astype(np.float32))
+        log_info(f"LDS table: {len(_js)} train jumps, "
+                 f"max weight={_w.max():.1f} (rarest bin)")
+
     log_info("\n--- Starting Training Loop ---")
 
     for epoch in range(start_epoch, args.epochs + 1):
@@ -448,7 +528,7 @@ def train(args):
 
             with accelerator.autocast():
                 preds = model(x)
-                loss = _compute_loss(model, preds, y)
+                loss = _compute_loss(model, preds, y, x)
 
             accelerator.backward(loss)
 
@@ -477,7 +557,7 @@ def train(args):
 
                 with accelerator.autocast():
                     preds = model(x)
-                    loss = _compute_loss(model, preds, y)
+                    loss = _compute_loss(model, preds, y, x)
 
                 val_loss_accum += loss.item() * x.size(0)
                 val_samples_seen += x.size(0)
@@ -586,12 +666,22 @@ def main():
                    help="Multiplier for CPU underprediction penalty in asymmetric_huber (default 3.0)")
     p.add_argument("--under_weight_mem", type=float, default=1.0,
                    help="Multiplier for memory underprediction penalty in asymmetric_huber (default 1.0)")
+    p.add_argument("--focal_alpha", type=float, default=0.25,
+                   help="Focal-loss class balance for focal_event (default 0.25)")
+    p.add_argument("--focal_gamma", type=float, default=2.0,
+                   help="Focal-loss focusing parameter for focal_event (default 2.0)")
+    p.add_argument("--focal_weight", type=float, default=1.0,
+                   help="Weight of the focal event term in focal_event (default 1.0)")
+    p.add_argument("--event_delta", type=float, default=0.2,
+                   help="Absolute cpu jump defining spike/drop event labels "
+                        "in focal_event (default 0.2)")
     p.add_argument(
         "--loss_mode",
         default="per_target_mse",
-        choices=["joint_mse", "per_target_mse", "per_target_mae", "per_target_huber", "asymmetric_huber"],
+        choices=["joint_mse", "per_target_mse", "per_target_mae", "per_target_huber", "asymmetric_huber", "focal_event", "lds_mse"],
         help="joint_mse: MSE over all targets. per_target_*: equal-weight per target; "
-             "per_target_mae uses L1 for the memory target. asymmetric_huber penalizes underprediction more.",
+             "per_target_mae uses L1 for the memory target. asymmetric_huber penalizes underprediction more. "
+             "focal_event: MSE level loss + focal BCE on spike/drop event heads (tcn_focal).",
     )
     p.add_argument("--last_step_only", action=argparse.BooleanOptionalAction, default=True,
                    help="Compute loss only on the final horizon step (H-1); use --no-last_step_only "

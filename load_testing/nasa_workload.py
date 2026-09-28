@@ -5,7 +5,7 @@ Downloads NASA_access_log_{Jul95,Aug95}.gz into DATA_DIR (cached on disk),
 parses the Apache common-log lines (one per request), aggregates requests into
 per-1-minute buckets, fills empty minutes with 0, normalizes counts to [0,1]
 (peak = 1.0), and writes a CSV with columns msname,timestamp,http_mcr — the
-exact format consumed by load_testing/run_test.sh / locustfile.py.
+exact format consumed by load_testing/run_test.sh / trainticket_locustfile.py.
 
 The July trace is the cleaner choice: ~28 contiguous days of diurnal traffic.
 August contains a multi-hour zero-traffic gap (Hurricane Erin, 01-03 Aug 1995).
