@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Auxiliary experiment export: JVM runtime series (adservice) + sharp RPS.
 
-JVM_* only exist for adservice (agentless jmx_exporter, deploy/jmx/);
+JVM_* only exist for adservice (agentless jmx_exporter, since removed);
 other services get NaN (no agent), NEVER zeros. RPS_SHARP uses a 30s rate
 window (vs 1m in the main export) to test whether sharper timing helps.
 Merged into analytics/twostage.py via --aux-csv (same grid => pass the
