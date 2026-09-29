@@ -950,7 +950,7 @@ def plot_results(results, msname, plots_dir, pred_horizon, threshold,
         x_range, actual_cpu, pred_cpu,
         actual_mem, pred_mem,
         "Full Test Set (unshifted + shifted, h={})".format(pred_horizon),
-        filename=f"hpa_sim_{msname}_full_{stamp}.png",
+        filename=f"trace_eval_{msname}_full_{stamp}.png",
         mcr_vals=mcr_full,
     )
 
@@ -963,7 +963,7 @@ def plot_results(results, msname, plots_dir, pred_horizon, threshold,
         actual_mem, pred_mem,
         f"Zoomed (min {zoom_start}-{zoom_end}, highest-std window)",
         zoom_start=zoom_start, zoom_end=zoom_end,
-        filename=f"hpa_sim_{msname}_zoom_{stamp}.png",
+        filename=f"trace_eval_{msname}_zoom_{stamp}.png",
         mcr_vals=mcr_full, mark_spikes=True,
     )
 
@@ -1084,8 +1084,8 @@ def main():
 
     os.makedirs(args.plots_dir, exist_ok=True)
     stamp = time.strftime("%Y%m%d_%H%M%S")
-    csv_path = os.path.join(args.plots_dir, f"hpa_sim_{msname}_{stamp}.csv")
-    json_path = os.path.join(args.plots_dir, f"hpa_sim_{msname}_{stamp}.json")
+    csv_path = os.path.join(args.plots_dir, f"trace_eval_{msname}_{stamp}.csv")
+    json_path = os.path.join(args.plots_dir, f"trace_eval_{msname}_{stamp}.json")
 
     pd.DataFrame(results).to_csv(csv_path, index=False)
     metrics.update({

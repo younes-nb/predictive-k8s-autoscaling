@@ -209,7 +209,7 @@ def main():
     train_script = os.path.join(REPO_ROOT, "training", "train.py")
     test_script = os.path.join(REPO_ROOT, "training", "evaluate.py")
     simulate_script = os.path.join(
-        REPO_ROOT, "analytics", "simulate_hpa.py"
+        REPO_ROOT, "analytics", "evaluate_trace.py"
     )
 
     total_times = {}
