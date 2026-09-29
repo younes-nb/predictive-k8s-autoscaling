@@ -50,7 +50,7 @@ VAL_FRAC = 0.1
 
 def parse_args():
     ap = argparse.ArgumentParser(
-        description="Simulate traditional vs predictive HPA on Alibaba traces"
+        description="Simulate traditional vs predictive HPA on a service trace"
     )
     ap.add_argument("--checkpoint", default=DEFAULT_CHECKPOINT)
     ap.add_argument("--parquet_root", default=DEFAULT_PARQUET_ROOT)
@@ -171,7 +171,7 @@ def resolve_msname(requested, available):
     return None
 
 
-def load_alibaba_parquet(parquet_root, feature_set, service_arrays_path=None,
+def load_trace_parquet(parquet_root, feature_set, service_arrays_path=None,
                          service_index_path=None, replica_counts_path=None,
                          windows_dir=None):
     if windows_dir:
@@ -979,8 +979,8 @@ def main():
     if args.input_len is not None:
         meta["input_len"] = args.input_len
 
-    print("Loading Alibaba parquet...")
-    service_data, target_data, cache_feats, _ = load_alibaba_parquet(
+    print("Loading trace parquet...")
+    service_data, target_data, cache_feats, _ = load_trace_parquet(
         args.parquet_root, meta["feature_set"],
         windows_dir=args.windows_dir,
     )
