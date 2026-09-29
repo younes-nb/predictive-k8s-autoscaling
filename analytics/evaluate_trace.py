@@ -35,6 +35,7 @@ from shared.features import (
 )
 from preprocessing.swt.decomposition import decompose_window
 from preprocessing.swt.config import CFG as SWT_CFG
+from preprocessing.build_windows import _CSV_COLUMN_MAP, _CSV_COLUMN_MINMAX
 
 RNN_TYPES = ("lstm", "gru", "bilstm", "bigrue")
 BUILDER_TYPES = ("cnn_bilstm", "dpam", "quantile_ensemble", "linearreg", "dlinear")
@@ -58,6 +59,12 @@ def parse_args():
                     help="Path to windows directory (contains _service_arrays.npy)")
     ap.add_argument("--msname", default=None,
                     help="Specific msname (default: auto-select best)")
+    ap.add_argument("--csv_path", default=None,
+                    help="HPA-logs CSV to evaluate instead of windows/parquet "
+                         "(export_hpa.py output or Alibaba format)")
+    ap.add_argument("--deployment", default=None,
+                    help="Deployment to evaluate in --csv_path mode "
+                         "(default: auto-select best)")
     ap.add_argument("--hours", type=float, default=6.0)
     ap.add_argument("--input_len", type=int, default=None)
     ap.add_argument("--device", default=None)
@@ -145,6 +152,41 @@ def load_service_arrays_cache(arrays_path, index_path, feature_set,
         print("[WARN] No replica counts cache; using baseline_replicas=1 for all services")
 
     return service_data, target_data, [cached_features[i] for i in feat_indices], baseline_replicas
+
+
+def _load_csv_service_data(csv_path, feature_set):
+    df = pd.read_csv(csv_path)
+    if "timestamp" in df.columns:
+        df["timestamp"] = pd.to_datetime(df["timestamp"])
+    elif "Timestamp" in df.columns:
+        df["timestamp"] = pd.to_datetime(df["Timestamp"])
+    else:
+        raise SystemExit(f"CSV {csv_path} has no 'timestamp'/'Timestamp' column")
+    id_col = "msname" if "msname" in df.columns else "Deployment"
+    if id_col not in df.columns:
+        raise SystemExit(f"CSV {csv_path} has no 'msname'/'Deployment' column")
+    feature_names = feature_names_for_feature_set(feature_set)
+    cols = []
+    for f in feature_names:
+        if f not in _CSV_COLUMN_MAP:
+            raise SystemExit(f"Feature '{f}' has no CSV column mapping")
+        c = _CSV_COLUMN_MAP[f]
+        if c not in df.columns:
+            raise SystemExit(f"CSV missing column '{c}' needed for feature '{f}'")
+        cols.append(c)
+    lo = {c: float(df[c].min()) for c in cols if c in _CSV_COLUMN_MINMAX}
+    hi = {c: float(df[c].max()) for c in cols if c in _CSV_COLUMN_MINMAX}
+    service_data, ts_map = {}, {}
+    for svc, g in df.groupby(id_col):
+        g = g.sort_values("timestamp").reset_index(drop=True)
+        mat = g[cols].to_numpy(dtype=np.float32)
+        for i, c in enumerate(cols):
+            if c in _CSV_COLUMN_MINMAX:
+                mat[:, i] = 0.0 if hi[c] - lo[c] <= 1e-12 else (mat[:, i] - lo[c]) / (hi[c] - lo[c])
+        service_data[svc] = mat
+        ts_map[svc] = g["timestamp"].to_numpy()
+    print(f"Loaded {len(service_data)} services from CSV (features: {cols})")
+    return service_data, ts_map
 
 
 def resolve_msname(requested, available):
@@ -979,14 +1021,21 @@ def main():
     if args.input_len is not None:
         meta["input_len"] = args.input_len
 
-    print("Loading trace parquet...")
-    service_data, target_data, cache_feats, _ = load_trace_parquet(
-        args.parquet_root, meta["feature_set"],
-        windows_dir=args.windows_dir,
-    )
+    ts_map = None
+    if args.csv_path:
+        service_data, ts_map = _load_csv_service_data(
+            args.csv_path, meta["feature_set"])
+        target_data = None
+    else:
+        print("Loading trace parquet...")
+        service_data, target_data, cache_feats, _ = load_trace_parquet(
+            args.parquet_root, meta["feature_set"],
+            windows_dir=args.windows_dir,
+        )
 
-    if args.msname:
-        msname = args.msname
+    want = args.deployment or args.msname
+    if want:
+        msname = want
         if msname not in service_data:
             resolved = resolve_msname(msname, service_data)
             if resolved is not None:
@@ -1045,7 +1094,7 @@ def main():
     else:
         model_feat = raw_feat
 
-    timestamps = None
+    timestamps = ts_map[msname] if ts_map is not None else None
     eval_minutes = n_minutes
 
     print(f"Evaluation phase: {args.hours}h ({eval_minutes} min) "
