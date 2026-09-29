@@ -28,3 +28,4 @@ def build_model(hyperparams, input_size, args, num_targets, device):
         bilstm_hidden=(h0, h0 * 2, h0 * 4),
         num_targets=num_targets,
     ).to(device)
+

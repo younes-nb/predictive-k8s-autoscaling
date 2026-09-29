@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Benchmark per-window inference time of SWT vs CSKV preprocessing."""
 
 import argparse
 import glob
@@ -44,7 +43,7 @@ def load_windows(windows_dir: str, n: int, rng: np.random.Generator) -> np.ndarr
     chosen_files = rng.choice(len(npy_files), size=min(n, len(npy_files)), replace=False)
     windows = []
     for idx in chosen_files:
-        data = np.load(npy_files[idx])  # shape (N_timesteps, window_len)
+        data = np.load(npy_files[idx])
         row = rng.integers(data.shape[0])
         windows.append(data[row])
     return np.stack(windows, axis=0)
@@ -183,3 +182,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

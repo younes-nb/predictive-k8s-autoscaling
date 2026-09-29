@@ -39,14 +39,6 @@ def query_prometheus_range(query, start_ts, end_ts, step_s):
 
 
 def fetch_current_load():
-    """Real CPU/memory for this CPA's deployment from Prometheus.
-
-    The custom-pod-autoscaler operator feeds the scripts a JSON envelope
-    with current_load/current_memory. When it is missing or zero (the
-    deployed CPA specs declare no metrics queries), fall back to querying
-    Prometheus directly for this pod's own container, so the loop still
-    reacts to real load instead of scaling on zeros forever.
-    """
     dep = config.DEPLOYMENT
     ns = config.NAMESPACE
     try:
@@ -83,7 +75,6 @@ def _scalar(result):
         return 0.0
     vals = []
     for s in result:
-        # instant queries -> "value": [ts, "val"]; range queries -> "values": [[ts, "val"], ...]
         if "value" in s:
             try:
                 vals.append(float(s["value"][1]))
@@ -256,3 +247,4 @@ def log_metrics(
             f"{timestamp},{curr_cpu:.4f},{curr_mem:.4f},{pred_cpu:.4f},{pred_mem:.4f},"
             f"{threshold:.4f},{error_bias:.4f},{inf_time:.4f},{replicas}\n"
         )
+

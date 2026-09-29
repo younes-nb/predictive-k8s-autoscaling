@@ -1,18 +1,4 @@
 #!/usr/bin/env python3
-"""Two-sided CUSUM detector baseline (classical quickest detection).
-
-Page's CUSUM with reference k=0.5 (train-z-scored units): g+ accumulates
-upward drift, g- downward drift. Score at t = statistic value (detection
-frame, same as analytics/bocpd_baseline.py: onset in [t-H, t]).
-
-CUSUM/SR procedures are minimax-optimal for detection delay under a false
-alarm constraint (Lorden/Pollak/Tartakovsky) — the classical answer to
-"react as fast as possible", complementing BOCPD's Bayesian view.
-
-Run from repo root:
-    python analytics/cusum_baseline.py --csv <tier0.csv> \\
-        --out analytics/data/transitions/cusum.json
-"""
 
 import argparse
 import json
@@ -92,3 +78,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

@@ -1,25 +1,4 @@
 #!/usr/bin/env python3
-"""Two-stage CPU-transition forecast (approach B) with no-leak discipline.
-
-Stage 1 (workload): forecast rps_total[t+H] from trailing rps lags +
-    time-of-day (calendar of the target step is knowable in advance).
-Stage 2 (static map): per-service map predicted-workload -> cpu[t+H],
-    fitted on TRAIN true pairs only: cpu ~ [rps, rps - rps_now].
-
-Split (mirrors pipeline fracs): per service, rows [0,70%) train,
-[80%,100%) test; middle 10% dropped as val zone. Scalers/stage models see
-TRAIN ONLY. Test scoring uses past data + frozen params.
-
-Scored with the same cold-transition metric as analytics/transition_metric.py
-(spike/drop PR-AUC, P@R50, transition-MAE ratio, global-MAE guard, cheater
-audit) so A and B compare head-to-head on the test set.
-
-Variants: --s1 ridge|hgb, --s2 ridge|hgb.
-
-Run from repo root:
-    python analytics/twostage.py --csv /tmp/opencode/newtest/hpa_new_10s.csv \\
-        --out analytics/data/twostage/b0.json --s1 ridge --s2 ridge
-"""
 
 import argparse
 import json
@@ -70,7 +49,6 @@ def make_stage2(kind, seed=42):
                                              min_samples_leaf=100,
                                              random_state=seed)
     if kind == "hurdle":
-        # hurdle = gate x magnitude, fitted in main() (needs event splits)
         return None
     from sklearn.ensemble import HistGradientBoostingRegressor
     return HistGradientBoostingRegressor(max_iter=200, learning_rate=0.06,
@@ -128,8 +106,6 @@ def main():
         aux = aux[["timestamp", "msname"] + [c for c in aux.columns
                                              if c in JVM_COLS + ["rps_sharp"]]]
         df = df.merge(aux, on=["msname", "timestamp"], how="left")
-        # train-zone z-score per service (leak-free); no-agent NaN -> 0
-        # (= train mean) after scaling.
         df = df.sort_values(["msname", "timestamp"]).reset_index(drop=True)
         for svc, idx in df.groupby("msname").groups.items():
             ii = np.asarray(list(idx))
@@ -191,14 +167,11 @@ def main():
         else:
             YTR = cpu[tr_idx + H]
             YTE = cpu[te_idx + H]
-        # stage 1 targets (no leak: rps[t+H] is future relative to row t,
-        # model inputs are trailing only)
         s1 = make_stage1(args.s1, args.seed)
         s1.fit(F1[tr_idx], rps[tr_idx + H])
         rps_hat_te = s1.predict(F1[te_idx])
         rps_mae += float(np.abs(rps_hat_te - rps[te_idx + H]).sum())
         rps_n += len(te_idx)
-        # stage 2 map on TRAIN true pairs
         r_now_tr, r_fut_tr = rps[tr_idx], rps[tr_idx + H]
         M2 = np.stack([r_fut_tr, r_fut_tr - r_now_tr], axis=1)
         if args.s2_in in ("full", "jvm"):
@@ -209,8 +182,6 @@ def main():
             M2 = np.concatenate([M2, J], axis=1)
         s2 = make_stage2(args.s2, args.seed)
         if args.s2 == "hurdle":
-            # hurdle: balanced gates x event-only magnitude specialists.
-            # Levels combine as p_s*m_s + p_d*m_d + (1-p_s-p_d)*persistence.
             from sklearn.ensemble import (HistGradientBoostingClassifier,
                                           HistGradientBoostingRegressor)
             sl = (YTR - cpu[tr_idx] >= delta).astype(int)
@@ -328,8 +299,6 @@ def main():
             f"PR-AUC={r['pr_auc']} P@R50={r['prec_at_rec50']} "
             f"transMAE_ratio={r['mae_ratio']}")
     if "gate_spike" in P:
-        # hurdle gate probabilities scored directly (detection view of the
-        # same test rows; levels above already carry the hurdle forecast).
         GS = np.concatenate(P["gate_spike"])
         GD = np.concatenate(P["gate_drop"])
         for ename, probs in (("spike", GS), ("drop", GD)):
@@ -381,3 +350,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

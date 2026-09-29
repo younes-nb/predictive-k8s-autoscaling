@@ -65,3 +65,4 @@ STATE_FILE = os.getenv("STATE_FILE", "/tmp/cpa_state.json")
 EXPERIMENT_METRICS_FILE = os.getenv(
     "EXPERIMENT_METRICS_FILE", "/tmp/experiment_metrics.csv"
 )
+

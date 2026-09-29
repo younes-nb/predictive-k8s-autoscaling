@@ -31,19 +31,8 @@ def log(msg: str) -> None:
 
 
 def build_service_cache(con, mcr_dir):
-    """Build service cache files: _service_index.json and _service_arrays.npy.
-
-    The _service_index.json contains:
-      - "index": dict mapping msname to [length_of_timeline, timestamp_range]
-      - "train_frac": used by build_windows.py to derive splits
-      - "val_frac": used by build_windows.py to derive splits
-      - "stats": dict with per-service statistics (min, max, std, n_nonzero) for full sequence
-    
-    The _service_arrays.npy contains the actual http_mcr arrays for each service.
-    """
     log("Building service cache (single query)...")
 
-    # Single query to get all data at once
     sql = f"""
         SELECT msname, timestamp, SUM(http_mcr) AS http_mcr_sum
         FROM read_parquet('{mcr_dir}/*.parquet')
@@ -53,7 +42,6 @@ def build_service_cache(con, mcr_dir):
     """
     df = con.execute(sql).df()
 
-    # Group by msname and build arrays
     grouped = df.groupby("msname")
     names = list(grouped.groups.keys())
     sizes = {name: len(group) for name, name, group in grouped}
@@ -62,7 +50,7 @@ def build_service_cache(con, mcr_dir):
         "index": {},
         "train_frac": PREPROCESSING.TRAIN_FRAC,
         "val_frac": PREPROCESSING.VAL_FRAC,
-        "stats": {},  # Will store min, max, std, n_nonzero for each service
+        "stats": {},
     }
 
     arrays_list = []
@@ -70,14 +58,13 @@ def build_service_cache(con, mcr_dir):
         group = grouped.get_group(msname)
         length = len(group)
         index_data["index"][msname] = [length, length]
-        
-        # Compute statistics for full sequence
+
         http_mcr_series = group["http_mcr_sum"].values
         g_min = float(http_mcr_series.min()) if len(http_mcr_series) > 0 else 0.0
         g_max = float(http_mcr_series.max()) if len(http_mcr_series) > 0 else 0.0
         std_mcr = float(http_mcr_series.std()) if len(http_mcr_series) > 0 else 0.0
         n_nonzero = int((http_mcr_series > 0).sum()) if len(http_mcr_series) > 0 else 0
-        
+
         index_data["stats"][msname] = {
             "g_min": g_min,
             "g_max": g_max,
@@ -85,17 +72,15 @@ def build_service_cache(con, mcr_dir):
             "n_nonzero": n_nonzero,
             "length": length,
         }
-        
+
         arrays_list.append(http_mcr_series)
 
-    # Stack all arrays into a single numpy array (variable lengths - use object array)
     if arrays_list:
         arrays_array = np.array(arrays_list, dtype=object)
         if not os.path.exists(os.path.dirname(SERVICE_ARRAYS_PATH)):
             os.makedirs(os.path.dirname(SERVICE_ARRAYS_PATH), exist_ok=True)
         np.save(SERVICE_ARRAYS_PATH, arrays_array, allow_pickle=True)
 
-    # Save the index data to JSON
     os.makedirs(os.path.dirname(SERVICE_INDEX_PATH), exist_ok=True)
     with open(SERVICE_INDEX_PATH, "w") as f:
         json.dump(index_data, f, indent=2)
@@ -104,7 +89,6 @@ def build_service_cache(con, mcr_dir):
 
 
 def load_service_names():
-    """Load the list of microservice names used to build the windows cache."""
     idx_path = SERVICE_INDEX_PATH
     arrays_path = SERVICE_ARRAYS_PATH
     if not (os.path.exists(idx_path) and os.path.exists(arrays_path)):
@@ -117,15 +101,6 @@ def load_service_names():
 
 
 def load_service_split_sizes():
-    """Return {msname: n_rows} where n_rows is the msresource feature-array
-    length used by build_windows.py to derive the train/val/test split.
-
-    build_windows.py (mirrored here):
-        n = len(feat_raw)            # per-service msresource timeline (1/min)
-        idx_tr = int(n * TRAIN_FRAC)
-        idx_val = int(n * (TRAIN_FRAC + VAL_FRAC))
-        test split = [idx_val, n)    # timestamps idx_val..n-1 minutes
-    """
     with open(SERVICE_INDEX_PATH, "r") as f:
         data = json.load(f)
     return {name: entry[1] for name, entry in data["index"].items()}
@@ -135,56 +110,6 @@ def query_mcrtmcr_oscillations(con, mcr_dir, window_ms, in_clause,
                                  expected_pts, svc_n_df, min_points,
                                  min_rel_range=0.01, min_turns=10,
                                  min_step_frac=0.05):
-    """Scan every {window_ms}-long sliding segment of each service's http_mcr
-    timeline (not just the last window) and return one row per service: its
-    best segment with at least `min_points` rows.
-
-    A segment is a frame of `expected_pts` consecutive 1-minute rows
-    (ROWS BETWEEN expected_pts-1 PRECEDING AND CURRENT ROW), matching the
-    existing window definition. win_start/win_end are the actual first/last
-    timestamps of the segment.
-
-    Raw std alone is a bad selector: it ranks single step functions (one
-    0->1 jump, oscillation ~0.35-0.5), perfect square waves (alternating
-    0/max every minute, oscillation ~0.5), and even float-rounding dust on
-    flat lines above genuinely swinging traffic. Three guards fix this:
-
-    - rel_range = window range / robust service-global range (1st-99th
-      percentile, so one outlier spike cannot shrink every window) must
-      clear `min_rel_range`, so the window varies meaningfully in absolute
-      terms instead of amplifying numerical noise via min-max
-      normalization.
-    - n_turns = number of significant direction reversals within the
-      segment must reach `min_turns`. A reversal is a step of at least
-      `min_step_frac` of the robust global range whose sign differs from
-      the previous such step within the trailing window, ignoring flat
-      minutes in between, so the segment repeatedly swings instead of
-      stepping once, spiking once, or drifting. Windows are scored
-      self-contained: only rows inside the segment count.
-    - rich = fraction of the segment's rows using intermediate levels of
-      their own trailing windows, scaled by min/max own-window range
-      within the segment. The range ratio collapses to ~0 when the
-      segment straddles a regime change (a step looks middling only
-      through mixing frames, while its narrow pre/post frames expose
-      it); it is ~1 for stationary traffic. Binary/square-wave traffic
-      lives on two rails and scores ~0; traffic zig-zagging through its
-      whole range scores high.
-
-    Candidates are ranked by score = oscillation * rich, where
-    oscillation = std_mcr / (g_max - g_min) is the std of the min-max
-    normalized http_mcr within the segment. Only the best segment per
-    service is returned, preferring full-length windows on ties. This
-    avoids materializing + globally sorting one row per segment (hundreds
-    of millions of rows for the full trace), which spills temp storage.
-
-    Correctness note: every per-row quantity aggregated over a frame
-    (step signs, mid flags) is defined from row-local values and global
-    per-service bounds only -- never from that row's own window
-    aggregates. Judging rows by their own sliding-window min/max and then
-    averaging over a later frame mixes hundreds of different frames and
-    silently reports wrong numbers.
-
-    Assumes all services listed in in_clause are present in mcr_dir."""
     con.register("svc_n", svc_n_df)
     n_preceding = max(0, expected_pts - 1)
     sql = f"""
@@ -297,21 +222,16 @@ def query_mcrtmcr_oscillations(con, mcr_dir, window_ms, in_clause,
 
 
 def load_cached_stats():
-    """Load per-service statistics from cached _service_index.json."""
     with open(SERVICE_INDEX_PATH, "r") as f:
         data = json.load(f)
     return data.get("stats", {})
 
 
 def compute_full_sequence_oscillation_from_cache(names, sizes, min_points):
-    """Compute oscillation stats for each service from cached statistics.
-    
-    Much faster than querying parquet since we use precomputed stats.
-    """
     import numpy as np
-    
-    stats = load_cached_stats()  # Dict with per-service stats
-    
+
+    stats = load_cached_stats()
+
     results = []
     for msname in names:
         if msname not in sizes:
@@ -319,30 +239,26 @@ def compute_full_sequence_oscillation_from_cache(names, sizes, min_points):
         n_rows = sizes[msname]
         if n_rows < min_points:
             continue
-         
-        # Get cached stats for this service
+
         if msname not in stats:
             continue
         stat = stats[msname]
-        
+
         g_min = stat["g_min"]
         g_max = stat["g_max"]
         std_mcr = stat["std_mcr"]
         n_points = stat["length"]
         n_nonzero = stat["n_nonzero"]
-        
+
         if g_max - g_min == 0:
             oscillation = 0.0
         else:
             oscillation = std_mcr / (g_max - g_min)
-        
-        # win_start and win_end: first and last timestamps of the service
-        # Since we don't store exact timestamps in stats, approximate:
-        # win_start = 0 (first minute), win_end = (n_rows-1) * 60_000 ms
+
         win_start = 0
         win_end = int((n_rows - 1) * 60_000)
         max_ts = win_end
-        
+
         results.append({
             "msname": msname,
             "oscillation": oscillation,
@@ -358,14 +274,11 @@ def compute_full_sequence_oscillation_from_cache(names, sizes, min_points):
             "n_rows": n_rows,
             "test_len": n_rows,
         })
-    
+
     return pd.DataFrame(results)
 
 
 def query_winner_mcr(con, mcr_dir, msname, win_start, win_end):
-    """Query per-minute http_mcr for the winner window, min-max normalized to
-    [0, 1] using the winner window's own min/max so the saved CSV always spans
-    the full [0, 1] range (min value -> 0.0, max value -> 1.0)."""
     sql = f"""
         SELECT msname, timestamp, SUM(http_mcr) AS http_mcr_raw
         FROM read_parquet('{mcr_dir}/*.parquet')
@@ -386,7 +299,6 @@ def query_winner_mcr(con, mcr_dir, msname, win_start, win_end):
 
 
 def query_msresource_window(con, msresource_dir, msname, win_start, win_end):
-    """Query CPU/memory utilization for a specific window of a service."""
     sql = f"""
         SELECT msname, timestamp, AVG(cpu_utilization) AS cpu,
                AVG(memory_utilization) AS mem
@@ -402,7 +314,6 @@ def query_msresource_window(con, msresource_dir, msname, win_start, win_end):
 
 def plot_timeseries(df_mcr: pd.DataFrame, df_res: pd.DataFrame,
                     service: str, out_dir: str, ts_str: str) -> None:
-    """Plot http_mcr and CPU/memory for the winner window."""
     mcr_path = os.path.join(out_dir, f"http_mcr_{service}_{ts_str}.png")
     fig, ax = plt.subplots(figsize=(14, 6))
     ax.plot(df_mcr["timestamp"], df_mcr["http_mcr"], color="#d62728",
@@ -499,7 +410,6 @@ def parse_args():
 
 
 def format_relative(ms: int) -> str:
-    """Format milliseconds as relative days/hours/minutes from trace start (ms=0)."""
     minutes = ms // 60_000
     days = minutes // 1440
     hours = (minutes % 1440) // 60
@@ -542,12 +452,6 @@ def main():
     msresource_dir = os.path.join(parquet_root, "msresource")
 
     con = duckdb.connect()
-    # The sliding-window scan aggregates tens of billions of raw msrtmcre
-    # rows into hundreds of millions of per-minute groups. The default
-    # DuckDB temp dir lives on the small root disk, so spilling there dies
-    # with "No space left on device". Keep temp on the large /dataset volume
-    # (parquet root may be overridden via --parquet_dir, so derive it from
-    # there) and allow DuckDB to actually use this machine's RAM/cores.
     tmp_dir = os.path.join(os.path.dirname(parquet_root.rstrip(os.sep)),
                            ".duckdb_tmp")
     os.makedirs(tmp_dir, exist_ok=True)
@@ -557,7 +461,6 @@ def main():
     con.execute("SET preserve_insertion_order TO false")
     log(f"DuckDB temp_directory={tmp_dir}")
 
-    # Use cached service info if available, otherwise build cache from parquet
     idx_path = SERVICE_INDEX_PATH
     arrays_path = SERVICE_ARRAYS_PATH
     if not (os.path.exists(idx_path) and os.path.exists(arrays_path)):
@@ -582,7 +485,6 @@ def main():
         log(f"Chunk {args.chunk_index + 1}/{args.num_chunks}: "
             f"{len(names)} services")
 
-    # Mirror build_windows.py subset selection.
     if args.max_services and len(names) > args.max_services:
         rng = np.random.default_rng(args.seed)
         idx = rng.choice(len(names), size=args.max_services, replace=False)
@@ -596,8 +498,6 @@ def main():
 
     in_clause = ",".join(f"'{n}'" for n in names)
 
-    # Minimum rows per window/sequence; enforced inside both branches so the
-    # ranked "best" segment is always a valid one.
     min_points = int(args.min_hours * 60) + 1
     if args.window_hours is None:
         log("Analyzing full http_mcr sequence from cached stats...")
@@ -619,7 +519,6 @@ def main():
     log("Filtering candidates...")
     valid = df.dropna(subset=["oscillation"])
     if args.window_hours is not None:
-        # Sliding window mode: filters already enforced in SQL; kept as safety nets.
         valid = valid[valid["n_points"] >= min_points]
         if "n_turns" in valid.columns:
             valid = valid[valid["n_turns"] >= args.min_turns]
@@ -627,8 +526,6 @@ def main():
             valid = valid[valid["rel_range"] >= args.min_rel_range]
         valid = valid.sort_values("score", ascending=False)
     else:
-        # Full sequence mode: filtering already done in
-        # compute_full_sequence_oscillation_from_cache.
         valid = valid.sort_values("oscillation", ascending=False)
     print_eval_results(valid)
 
@@ -662,13 +559,11 @@ def main():
     out_dir = args.out_dir
     os.makedirs(out_dir, exist_ok=True)
 
-    # http_mcr table for the winner window
     mcr_full = query_winner_mcr(con, mcr_dir, winner["msname"],
                                 winner["win_start"], winner["win_end"])
     mcr_full.to_csv(f"{out_dir}/http_mcr_{winner['msname']}_{ts_str}.csv",
                     index=False)
 
-    # msresource CPU/memory for the winner window
     res_df = query_msresource_window(con, msresource_dir, winner["msname"],
                                      winner["win_start"], winner["win_end"])
     res_df.to_csv(f"{out_dir}/resource_{winner['msname']}_{ts_str}.csv",
@@ -710,3 +605,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

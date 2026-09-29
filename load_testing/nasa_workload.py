@@ -1,24 +1,4 @@
 #!/usr/bin/env python3
-"""Generate a predictable per-minute http_mcr workload from the NASA-HTTP trace.
-
-Downloads NASA_access_log_{Jul95,Aug95}.gz into DATA_DIR (cached on disk),
-parses the Apache common-log lines (one per request), aggregates requests into
-per-1-minute buckets, fills empty minutes with 0, normalizes counts to [0,1]
-(peak = 1.0), and writes a CSV with columns msname,timestamp,http_mcr — the
-exact format consumed by load_testing/run_test.sh (k6).
-
-The July trace is the cleaner choice: ~28 contiguous days of diurnal traffic.
-August contains a multi-hour zero-traffic gap (Hurricane Erin, 01-03 Aug 1995).
-
-Predictability check: prints the autocorrelation of the emitted curve at lag 60
-(1 hour) and lag 1440 (1 day), the peak |autocorr| over lags 1..2880, and the
-mean day-over-day Pearson correlation of hourly profiles.
-
-Reference:
-  M. Arlitt and C. Williamson, "Web Server Workload Characterization: The
-  Search for Invariants", ACM SIGMETRICS 1996. Distributed via the Internet
-  Traffic Archive (https://ita.ee.lbl.gov/traces/NASA-HTTP.html).
-"""
 
 import argparse
 import gzip
@@ -55,7 +35,6 @@ def log(msg: str) -> None:
 
 
 def download(month: str, data_dir: str) -> str:
-    """Download the trace for `month` into data_dir (cached). Returns path."""
     path = os.path.join(data_dir, f"NASA_access_log_{month.title()}95.gz")
     if os.path.exists(path):
         try:
@@ -79,7 +58,6 @@ def download(month: str, data_dir: str) -> str:
 
 
 def count_requests(path: str) -> dict:
-    """Return {minute_since_month_start: request_count} for one trace file."""
     counts = {}
     n_parsed = 0
     n_skipped = 0
@@ -98,16 +76,10 @@ def count_requests(path: str) -> dict:
 
 
 def last_active_day(counts: dict) -> int:
-    """Last day-of-month (1-indexed) that has any recorded request."""
     return max(counts) // MIN_PER_DAY + 1
 
 
 def build_curve(counts: dict, start_day: int, end_day: int, days_in_month: int):
-    """Return (timestamps_ms, mcr_list) over the [start_day, end_day] window.
-
-    Missing minutes (no requests) are filled with 0 so the curve is contiguous.
-    Normalization is min-max over the selected window (peak = 1.0).
-    """
     start_min = (start_day - 1) * MIN_PER_DAY
     end_min = end_day * MIN_PER_DAY - 1
     n_minutes = end_min - start_min + 1
@@ -121,7 +93,6 @@ def build_curve(counts: dict, start_day: int, end_day: int, days_in_month: int):
 
 
 def predictability_report(mcr) -> None:
-    """Autocorrelation + day-over-day alignment of the emitted curve."""
     try:
         import numpy as np
     except ImportError:
@@ -217,3 +188,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

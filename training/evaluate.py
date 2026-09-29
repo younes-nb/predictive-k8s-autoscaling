@@ -171,13 +171,6 @@ def _natural_key(p):
 
 
 def _load_ylast_for_split(windows_dir, split):
-    """Per-window last-observed-target values, exact for any stride/split.
-
-    build_windows writes part-*_ylast_<split>.npy next to the X shards, in
-    identical row order. Returns (N, T) float32 or None when absent
-    (pre-fix caches) so callers can fall back to the previous-window
-    approximation (exact only for stride 1).
-    """
     files = sorted(glob.glob(os.path.join(windows_dir, f"part-*_ylast_{split}.npy")),
                    key=_natural_key)
     if not files:
@@ -208,8 +201,6 @@ def _load_test_dataset(args, ckpt_args, device, log_info, feature_set_name="cpu"
 
     target_features = target_features_for_feature_set(feature_set_name)
     feature_names = feature_names_for_feature_set(feature_set_name)
-    # None when a target lives outside the model inputs (only consumed by
-    # no-op near-constant filters here).
     target_idxs_in_features = [feature_names.index(f) if f in feature_names else None
                                for f in target_features]
 
@@ -419,9 +410,6 @@ def evaluate(args):
     target_features = target_features_for_feature_set(feature_set_name)
     feature_names = feature_names_for_feature_set(feature_set_name)
     num_targets = len(target_features)
-    # None when a target lives outside the model inputs (e.g. cpu for
-    # http_time); the per-target loop below sources its reference values
-    # from previous windows instead of X.
     target_idxs_in_features = [feature_names.index(f) if f in feature_names else None
                                for f in target_features]
 
@@ -459,7 +447,6 @@ def evaluate(args):
         np.random.seed(wseed)
         torch.manual_seed(wseed)
 
-    # On Windows, local functions can't be pickled for DataLoader workers
     if os.name == "nt":
         optimal_workers = 0
 
@@ -548,11 +535,6 @@ def evaluate(args):
 
     total_samples = y_pred.shape[0]
 
-    # Exact per-window last-observed targets for targets outside the model
-    # inputs (recorded at build time, valid for any stride/split). Only
-    # meaningful when y_true is raw-space (approach "none"); the files live
-    # next to the raw shards and share their row order, and the evaluated
-    # rows are its head slice (same prefix rule as head_slice_dataset_by_pct).
     ylast_exact = None
     needs_exact = (preprocess_approach == "none"
                    and any(t is None for t in target_idxs_in_features))
@@ -593,9 +575,6 @@ def evaluate(args):
         y_last_all = np.stack(last_lasts, axis=0)
         y_second_last_all = np.stack(second_lasts, axis=0)
     else:
-        # For CSKV/SWT: the dataset returns `last` as raw target (1 column),
-        # but we need last values for ALL target features.
-        # Load raw reference data to get last values for each target.
         raw_ref = ShardedWindowsDataset(
             args.windows_dir, split, input_len, horizon
         )
@@ -618,10 +597,6 @@ def evaluate(args):
 
     for t_idx, t_name in zip(target_idxs_in_features, target_features):
         if t_idx is None:
-            # Target outside the model inputs: the last observed target is
-            # not in X. Prefer the recorded per-window values (exact for any
-            # stride); otherwise approximate with the previous window's last
-            # target (exact only for stride 1) and drop sample 0.
             if y_true.ndim not in (2, 3):
                 raise RuntimeError(
                     f"Cannot derive reference values for out-of-input target "
@@ -741,3 +716,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

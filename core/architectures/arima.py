@@ -25,11 +25,6 @@ def select_order(
     q_values: Sequence[int] = DEFAULT_Q_GRID,
     trend: str = "auto",
 ) -> Tuple[int, int, int]:
-    """Pick the (p, d, q) order minimizing AIC over a small grid.
-
-    Falls back to (1, 1, 0) (the classic random-walk-with-drift ARIMA) if no
-    candidate converges.
-    """
     best = None
     best_aic = np.inf
     for p, d, q in itertools.product(p_values, d_values, q_values):
@@ -50,15 +45,6 @@ def select_order(
 
 
 class ArimaForecaster:
-    """Classical ARIMA(p,d,q) statistical baseline backed by statsmodels.
-
-    Unlike the nn.Module architectures in this package, this is NOT trainable
-    via backprop and is deliberately NOT registered in the SFOA/training
-    pipeline. It is the canonical statistical baseline from the forecasting
-    literature: fitted per-series by maximum likelihood on the training
-    segment, then used to multi-step forecast the test segment offline. Run it
-    via `analytics/arima_baseline.py`.
-    """
 
     def __init__(
         self,
@@ -105,12 +91,8 @@ class ArimaForecaster:
         return np.asarray(self._fit_result.forecast(steps), dtype=np.float64)
 
     def predict(self, start: int, end: int) -> np.ndarray:
-        """Predicted mean for the inclusive range [start, end].
-
-        Indices are absolute positions in the fitted series (0-based). `end`
-        may exceed the training length (future predictions).
-        """
         if self._fit_result is None:
             raise RuntimeError("ArimaForecaster.predict() called before fit()")
         idx = self._fit_result.get_prediction(start=start, end=end)
         return np.asarray(idx.predicted_mean, dtype=np.float64)
+

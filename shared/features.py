@@ -6,9 +6,6 @@ FEATURES: Dict[str, Dict[str, str]] = {
     "cpu_utilization": {"table": "msresource", "column": "cpu_utilization"},
     "memory_utilization": {"table": "msresource", "column": "memory_utilization"},
     "replicas": {"table": "msresource", "column": "replicas"},
-    # Infra-native columns from analytics/export_hpa.py (istio/envoy/
-    # kube-state/node telemetry, no app logs). Served from the HPA-logs CSV
-    # (--csv_path); the feature_set using them is csv/export-native.
     "desired_replicas": {"table": "msresource", "column": "desired_replicas"},
     "unavailable": {"table": "msresource", "column": "unavailable"},
     "restart_rate": {"table": "msresource", "column": "restart_rate"},
@@ -31,8 +28,6 @@ FEATURES: Dict[str, Dict[str, str]] = {
     "active_for": {"table": "msrtmcre", "column": "active_for"},
     "tod_sin": {"table": "time", "column": "tod_sin"},
     "tod_cos": {"table": "time", "column": "tod_cos"},
-    # Tier-0 spike features served from the HPA-logs CSV (--csv_path;
-    # analytics/export_hpa.py). No parquet table backs them.
     "neigh_cpu_mean": {"table": "msrtmcre", "column": "neigh_cpu_mean"},
     "neigh_cpu_slope3": {"table": "msrtmcre", "column": "neigh_cpu_slope3"},
     "neigh_rps_z30_mean": {"table": "msrtmcre", "column": "neigh_rps_z30_mean"},
@@ -40,7 +35,6 @@ FEATURES: Dict[str, Dict[str, str]] = {
     "node_load_mean": {"table": "node", "column": "node_load_mean"},
     "node_load_max": {"table": "node", "column": "node_load_max"},
     "node_cpu_mean": {"table": "node", "column": "node_cpu_mean"},
-    # Older export columns (analytics/export_hpa.py causal/graph features).
     "p99_latency": {"table": "msrtmcre", "column": "p99_latency"},
     "throttle_ratio": {"table": "msresource", "column": "throttle_ratio"},
     "net_rx": {"table": "msresource", "column": "net_rx"},
@@ -67,10 +61,6 @@ FEATURES: Dict[str, Dict[str, str]] = {
     "readmc_mcr": {"table": "msrtmcre", "column": "readmc_mcr"},
     "writedb_mcr": {"table": "msrtmcre", "column": "writedb_mcr"},
     "readdb_mcr": {"table": "msrtmcre", "column": "readdb_mcr"},
-    # Calendar features derived from the (relative) trace timestamp, not from
-    # any parquet column. minute/hour wrap on wall clock (t=0 is 00:00);
-    # day is the day-index since trace start (timestamps are relative, so
-    # no calendar date exists). Values are exact integers (no normalization).
     "minute": {"table": "time", "column": "minute", "derived": True},
     "hour": {"table": "time", "column": "hour", "derived": True},
     "day": {"table": "time", "column": "day", "derived": True},
@@ -84,10 +74,6 @@ FEATURES: Dict[str, Dict[str, str]] = {
     "interface": {"table": "mscallgraph", "column": "interface"},
     "uminstanceid": {"table": "mscallgraph", "column": "uminstanceid"},
     "dminstanceid": {"table": "mscallgraph", "column": "dminstanceid"},
-    # Tier-0 spike-prediction features: csv/export-native (see
-    # analytics/export_hpa.py). Table tags are nominal on the CSV path;
-    # they only matter for parquet sourcing, which has no backing table
-    # for these columns.
     "cpu_lim": {"table": "msresource", "column": "cpu_lim"},
     "mem_lim": {"table": "msresource", "column": "mem_lim"},
     "pgfault": {"table": "msresource", "column": "pgfault"},
@@ -253,11 +239,6 @@ FEATURE_SETS: Dict[str, Dict[str, Any]] = {
         "target": "um",
         "base_table": "mscallgraph",
     },
-    # Full infra-native MS feature set for next-minute cpu_utilization:
-    # mesh/call-graph load + per-request cost proxies + envoy queues +
-    # saturation proximity + engineered dynamics. Served from the HPA-logs
-    # CSV (--csv_path); csv/export-native (no parquet tables back the
-    # istio/envoy columns).
     "cpu_ms_infra": {
         "features": [
             "cpu_utilization",
@@ -299,10 +280,6 @@ FEATURE_SETS: Dict[str, Dict[str, Any]] = {
             "neigh_cpu_slope3",
             "neigh_rps_z30_mean",
             "neigh_rps_slope5_mean",
-            # Tier-0 spike features (csv/export-native; analytics/export_hpa.py).
-            # Dropped vs the original sketch: slow_frac, req/resp_msg_rate,
-            # msgs_per_req (no Prometheus source) and node_load_mean/max,
-            # node_cpu_mean (measured ~zero gain in spike_hunt ablation).
             "from_frontend",
             "frontend_rps",
             "mesh_rps",
@@ -346,10 +323,6 @@ def get_feature_set(name: str) -> Dict[str, Any]:
                 f"feature_set='{name}': unknown target '{tf}' "
                 f"(must be defined in FEATURES)"
             )
-        # NOTE: a target may live outside the input features (e.g. http_time
-        # predicts cpu_utilization from http+time inputs). Consumers that need
-        # target data (build_windows aggregation, simulator actuals) source
-        # such target-only columns explicitly; model inputs stay as listed.
     for f in feats:
         if f not in FEATURES:
             raise KeyError(
@@ -371,14 +344,10 @@ def target_features_for_feature_set(feature_set: str) -> List[str]:
 
 
 def is_derived_feature(feature_name: str) -> bool:
-    """Whether a feature is synthesized from the timestamp (minute/hour/day)
-    rather than read from a parquet column."""
     return bool(FEATURES.get(feature_name, {}).get("derived", False))
 
 
 def derived_time_value(feature_name: str, minute_index: int) -> int:
-    """Exact calendar component for a relative minute index (t=0 is 00:00 of
-    day 0): minute-of-hour (0-59), hour-of-day (0-23), day-index (0-N)."""
     if feature_name == "minute":
         return minute_index % 60
     if feature_name == "hour":
@@ -389,8 +358,6 @@ def derived_time_value(feature_name: str, minute_index: int) -> int:
 
 
 def _sourced_names(spec: Dict[str, Any]) -> List[str]:
-    """Input features plus target-only extras (targets outside the inputs,
-    e.g. cpu_utilization for http_time) that still need table sourcing."""
     names = list(spec["features"])
     for tf in spec.get("targets", []):
         if tf not in names:
@@ -434,26 +401,16 @@ def table_to_feature_exprs(feature_set: str) -> Dict[str, List[tuple]]:
 
 
 def is_mcr_feature(feature_name: str) -> bool:
-    """Whether a feature is an MCR-family column (rpc/http/mcr rate columns
-    from msrtmcre). Single source of truth for the --normalize_mcr column rule
-    shared by build_windows and the simulator."""
     n = feature_name.lower()
     return "mcr" in n or "rpc" in n or "http" in n
 
 
 def mcr_column_indices(feature_names: List[str]) -> List[int]:
-    """Channel positions of MCR-family features within an ordered feature list."""
     return [i for i, f in enumerate(feature_names) if is_mcr_feature(f)]
 
 
 def normalize_mcr_array(arr: np.ndarray, cols: List[int],
                         lo_hi: Optional[Dict[int, tuple]] = None) -> Dict[int, tuple]:
-    """In-place per-column [0,1] min-max normalization of MCR channels.
-
-    With lo_hi=None the bounds are computed over arr (per-service scope when
-    arr holds one service's full timeline); otherwise the given global bounds
-    are applied. Zero-range columns become 0.0. Returns {col: (lo, hi)}.
-    """
     out: Dict[int, tuple] = {}
     for j in cols:
         if lo_hi is not None:
@@ -467,3 +424,4 @@ def normalize_mcr_array(arr: np.ndarray, cols: List[int],
             arr[:, j] = 0.0
         out[j] = (lo, hi)
     return out
+

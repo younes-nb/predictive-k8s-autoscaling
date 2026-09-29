@@ -264,3 +264,4 @@ def svmd(
         u_hat_out[:, li] = np.fft.fftshift(np.fft.fft(u[li, :]))
 
     return u, u_hat_out, omega_sorted
+

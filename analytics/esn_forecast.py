@@ -1,19 +1,4 @@
 #!/usr/bin/env python3
-"""Echo State Network forecaster (reservoir dynamics, ridge readout).
-
-ESNs (Jaeger 2001) are the cheap dynamical-systems answer to bursty
-regimes: a fixed random reservoir expands [cpu, rps] history into a rich
-nonlinear state; only a Ridge readout is fitted (train rows only, no leak).
-Literature reports strong performance on chaotic/bursting systems with
-little data (Vlachas, Hassanzadeh, Chattopadhyay) — worth testing where
-backprop nets overfit the train regime.
-
-Scored with the same cold-transition metric (level-implied jumps).
-
-Run from repo root:
-    python analytics/esn_forecast.py --csv <tier0.csv> \\
-        --out analytics/data/transitions/esn.json
-"""
 
 import argparse
 import json
@@ -56,7 +41,6 @@ def main():
     rng = np.random.default_rng(args.seed)
 
     df = pd.read_csv(args.csv, parse_dates=["timestamp"])
-    # train-zone input scaling per service (leak-free)
     P = {"jump": [], "truth": [], "last": []}
     for svc, g in df.groupby("msname"):
         g = g.reset_index(drop=True)
@@ -68,7 +52,6 @@ def main():
         ntr = int(n * 0.70)
         mu, sd = raw[:ntr].mean(axis=0), raw[:ntr].std(axis=0) + 1e-12
         U = (raw - mu) / sd
-        # fixed reservoir (no fitting -> no leak possible here)
         Win = rng.uniform(-1, 1, (args.units, 2)) * 0.5
         W = rng.uniform(-1, 1, (args.units, args.units))
         W[rng.random((args.units, args.units)) > args.density] = 0.0
@@ -125,3 +108,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

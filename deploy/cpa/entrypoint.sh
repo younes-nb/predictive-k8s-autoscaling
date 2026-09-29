@@ -25,3 +25,4 @@ interval: ${INTERVAL_MS}
 EOF
 
 exec /custom-pod-autoscaler "$@"
+

@@ -23,3 +23,4 @@ class LinearRegression(nn.Module):
         if self.num_targets > 1:
             return out.view(batch, self.pred_horizon, self.num_targets)
         return out
+

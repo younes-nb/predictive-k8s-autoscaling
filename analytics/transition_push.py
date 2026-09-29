@@ -1,24 +1,4 @@
 #!/usr/bin/env python3
-"""Push battery: improve transition prediction until it works.
-
-Fixes for the diagnosed failures, tested in order (each layer stacks):
-  V1 apps-only + absolute labels (drop DB storage engines: different physics;
-      drop dead rows with replicas==0: predicting into a void).
-  V2 + relative labels (jump >= max(0.15, 2*train_std_service)): a 0.2 jump
-      at cpu 5.0 is noise, at cpu 0.1 is a 3x spike. Same delta for all was
-      mislabeling both tails.
-  V3 + lag features (lags 0/3/6/12 of 14 key signals; snapshots miss
-      dynamics the snapshot+slopes only approximate).
-  V4 + recent-train ([40,70%) instead of [0,70%)): nonstationarity test. If
-      recent beats old, the regime drifts and deployment needs rolling refit.
-  V5 ensemble: rank-average(V4 HGB, BOCPD mass, velocity).
-
-Horizons H=6 (60s, sweet spot) and H=12. TEST = rows [80%,100%), frozen.
-No leak: all features trailing, all fits on train rows, stats train-zone.
-
-Run from repo root:
-    python analytics/transition_push.py --csv <10s-tier0> --out-dir analytics/data/push
-"""
 
 import argparse
 import json
@@ -99,7 +79,6 @@ def analyze(csv_path, out_dir):
     os.makedirs(out_dir, exist_ok=True)
     df = pd.read_csv(csv_path, parse_dates=["timestamp"])
     base_cols = [c for c in df.columns if c not in ("timestamp", "msname")]
-    # apps only, replicas > 0 rows only
     svcs = [s for s in sorted(df.msname.unique())
             if not any(p in s for p in DB_PAT) and s != "ts-voucher-service"]
     log(f"apps services: {len(svcs)}")
@@ -112,7 +91,6 @@ def analyze(csv_path, out_dir):
         per[svc] = (g, alive)
     log(f"kept {len(per)} services with live rows")
 
-    # per-service train std for relative labels (train zone only)
     rel_delta = {}
     for svc, (g, alive) in per.items():
         n = len(g)
@@ -122,7 +100,6 @@ def analyze(csv_path, out_dir):
     log("rel_delta range: %.3f .. %.3f" % (min(rel_delta.values()),
                                            max(rel_delta.values())))
 
-    # BOCPD masses (causal, full series ok)
     BC = {}
     for svc, (g, alive) in per.items():
         cpu = g["cpu_utilization"].ffill().bfill().to_numpy(float)
@@ -191,7 +168,6 @@ def analyze(csv_path, out_dir):
                 Xtr, ytr = np.concatenate(Xtr_l), np.concatenate(ytr_l)
                 Xte, yte = np.concatenate(Xte_l), np.concatenate(yte_l)
                 bcte = np.concatenate(bc_te)
-                # velocity baseline on test
                 if yte.sum() < 10 or ytr.sum() < 10:
                     results.append(dict(H=H, kind=kind, mode=mode,
                                         n_test=len(yte),
@@ -210,7 +186,6 @@ def analyze(csv_path, out_dir):
                            base=round(float(yte.mean()), 5),
                            pr_auc=round(ap, 4), p_at_r50=p50, p_at_r80=p80)
                 if mode == "ens":
-                    # rank-average HGB + BOCPD mass
                     r1 = pd.Series(pr).rank(pct=True).to_numpy()
                     r2 = pd.Series(bcte).rank(pct=True).to_numpy()
                     ape, p5e, p8e = pr_full(yte, (r1 + r2) / 2)
@@ -235,3 +210,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

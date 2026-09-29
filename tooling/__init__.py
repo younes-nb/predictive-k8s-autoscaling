@@ -6,3 +6,4 @@ __all__ = [
     "hist_update",
     "hist_quantile",
 ]
+

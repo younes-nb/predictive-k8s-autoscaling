@@ -1,23 +1,4 @@
 #!/usr/bin/env python3
-"""Autoencoder anomaly detector baseline (rare-event reactor, learned).
-
-Trains an MLP autoencoder on NORMAL train-zone windows only (any window
-whose next-H cpu jump exceeds +-delta is excluded from training), then
-scores test windows by reconstruction error. Detection frame, same as
-analytics/bocpd_baseline.py: label = onset in the trailing H steps.
-
-Question under test: does a learned normal-manifold beat BOCPD's Gaussian
-run-length test at reacting to transitions? (Forecasting with
-reconstruction error is circular — the error is only defined with
-hindsight — so no forecast variant is attempted.)
-
-No leak: train windows come from rows [0,70%), test from [80%,100%);
-frozen weights score test.
-
-Run from repo root:
-    python analytics/ae_detector.py --csv <std-tier0.csv> \\
-        --out analytics/data/transitions/ae.json
-"""
 
 import argparse
 import json
@@ -97,9 +78,6 @@ def main():
                 Xtr.append(A[s:s + L])
         for s in range(nte, n - L - H + 1, args.stride):
             Xte.append(A[s:s + L])
-            # A-labels: jump from last input row to horizon end (same
-            # definition as transition_metric.py, so AE detection PR is
-            # directly comparable to forecaster PR).
             j = cpu[s + L + H - 1] - cpu[s + L - 1]
             LBLspike.append(int(j >= args.delta))
             LBLdrop.append(int(j <= -args.delta))
@@ -156,3 +134,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

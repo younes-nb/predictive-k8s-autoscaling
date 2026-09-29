@@ -1,7 +1,4 @@
 #!/bin/bash
-# k6 frontend-only train-ticket load.
-# Same inputs: MCR curve slice paced across the VU pool through the frontend.
-# Metrics stream to Mimir via experimental-prometheus-rw (port-forward below).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
@@ -39,3 +36,4 @@ USER_POOL="$USER_POOL" SEED_FILE="$SEED_FILE" START_MIN="$START_MIN" \
 TEST_MIN="$TEST_MIN" "$K6_BIN" run \
   -o experimental-prometheus-rw \
   load_testing/k6/trainticket.js
+

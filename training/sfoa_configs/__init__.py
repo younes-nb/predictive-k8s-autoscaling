@@ -32,3 +32,4 @@ def get_config(model_type):
         DEFAULTS=defaults,
         build_model=build_fn,
     )
+

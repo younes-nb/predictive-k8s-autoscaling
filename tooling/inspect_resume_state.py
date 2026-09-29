@@ -1,5 +1,3 @@
-"""Inspect and print the contents of the training resume state file."""
-
 import argparse
 import importlib.util
 import os
@@ -214,3 +212,4 @@ def main(argv=None):
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

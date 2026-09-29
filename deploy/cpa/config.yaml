@@ -12,3 +12,4 @@ metric:
     command: ["/app/metric.py"]
 runMode: "per-resource"
 interval: 300000
+

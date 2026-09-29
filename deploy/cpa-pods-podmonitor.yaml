@@ -16,3 +16,4 @@ spec:
   namespaceSelector:
     matchNames:
     - online-boutique
+

@@ -324,8 +324,6 @@ def train(args):
         f"(Global: {batch_size * accelerator.num_processes})"
     )
     optimal_workers = getattr(args, "num_workers", TRAINING.NUM_WORKERS)
-    # On Windows, local functions can't be pickled for DataLoader workers
-    # Use num_workers=0 to avoid multiprocessing issues, or define worker_init_fn at module level
     if os.name == "nt":
         optimal_workers = 0
     log_info(f"num_workers: {optimal_workers}")
@@ -392,10 +390,6 @@ def train(args):
         log_info("AMP (FP16 mixed precision) enabled via Accelerate")
 
     def _compute_loss(model, preds, y, x=None):
-        # Contract: (B, H, T). Single-target linear models (linearreg,
-        # dlinear) return 2D (B, H); without promotion the [..., -1:, :]
-        # slice below would silently select the last BATCH row instead of
-        # the last horizon step (broadcasting then hides it completely).
         if preds.dim() == 2:
             preds = preds.unsqueeze(-1)
         if y.dim() == 2:
@@ -440,10 +434,6 @@ def train(args):
                     + lam * (_focal_bce(logits[..., 0:1], spike_t)
                              + _focal_bce(logits[..., 1:2], drop_t)) / 2.0)
         elif args.loss_mode == "lds_mse":
-            # Imbalanced-regression weighting (LDS spirit, Yang et al. 2021):
-            # weight each sample by the inverse SQRT of the Gaussian-smoothed
-            # train density of its jump magnitude. Rare-magnitude samples
-            # count more; no resampling, no synthetic data.
             if getattr(args, "preprocess_approach", "none") != "none":
                 raise RuntimeError("lds_mse requires --preprocess_approach none")
             from shared.features import feature_names_for_feature_set
@@ -476,8 +466,6 @@ def train(args):
             loss = per_target_loss(preds, y, mem_mode=mem_mode)
         return loss
 
-    # LDS jump-density table (train rows only — no leak): one pass over the
-    # train loader collecting last-step jumps, histogrammed and smoothed.
     lds_edges, lds_w = None, None
     if getattr(args, "loss_mode", "") == "lds_mse":
         from shared.features import feature_names_for_feature_set
@@ -758,3 +746,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

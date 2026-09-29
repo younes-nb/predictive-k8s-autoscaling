@@ -1,13 +1,4 @@
 #!/usr/bin/env python3
-"""Per-edge RPS export (dynamic call-graph weights for graph models).
-
-One query: reporter="source" rates by (source_workload, destination_workload).
-Output: timestamp, src, dst, rps. Same grid convention as export_hpa.py.
-
-Run from repo root:
-    python analytics/export_edges.py --start "2026-09-23 12:07:53" \\
-        --end "2026-09-25 12:08:13" --step 10 --out /tmp/opencode/full48/edges_10s.csv
-"""
 
 import argparse
 import os
@@ -95,3 +86,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

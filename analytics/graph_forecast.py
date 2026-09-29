@@ -1,27 +1,4 @@
 #!/usr/bin/env python3
-"""Temporal graph forecast over the service call graph (graph approach).
-
-Nodes = 10 boutique services, time-aligned 10s windows (grids verified
-identical). Static topology from TRAIN-zone edges; dynamic edge weights =
-current per-edge RPS. Per-node GRU encoder -> rate-weighted graph attention
-(message passing) -> shared horizon head. Ablation `--no-graph` disables
-message passing (same encoder/head) to isolate graph value.
-
-Honest scope: propagation here is ms-scale, so no multi-step lead is
-expected from topology alone; the test is whether joint graph reasoning
-(smoothing, backpressure direction, shared regime) beats pooled models on
-cold transitions. True request-path (trace-ID) prediction is impossible:
-no tracing stack exists in the cluster (checked).
-
-No leak: static edges from train zone only; edge weights + features are
-current/trailing values; temporal 70/80 splits; standardization stats are
-train-zone (use the *_std.csv).
-
-Run from repo root:
-    python analytics/graph_forecast.py --csv .../hpa_48h_10s_std.csv \\
-        --edges .../edges_10s.csv --out analytics/data/graph/gnn.json
-    python analytics/graph_forecast.py --no-graph ... (ablation)
-"""
 
 import argparse
 import json
@@ -53,20 +30,17 @@ class GraphForecaster(nn.Module):
         self.head = nn.Linear(hid, horizon)
 
     def forward(self, x, adj, w):
-        # x: (B, V, L, C); adj: (V, V) binary src->dst mask;
-        # w: (B, V, V) current edge rates src->dst.
         B, V, _, _ = x.shape
         h = self.enc(x.reshape(B * V, L, -1))[1].squeeze(0)
         h = h.view(B, V, -1)
         if self.use_graph:
             Wh = h
-            # attention over in-neighbours, biased by log-rate weight
-            hi = Wh.unsqueeze(2).expand(B, V, V, -1)   # dst
-            hj = Wh.unsqueeze(1).expand(B, V, V, -1)   # src
+            hi = Wh.unsqueeze(2).expand(B, V, V, -1)
+            hj = Wh.unsqueeze(1).expand(B, V, V, -1)
             e = self.attn(torch.cat([hi, hj], dim=-1)).squeeze(-1)
             e = e + torch.log1p(w)
             e = e.masked_fill(adj.unsqueeze(0) == 0, float("-inf"))
-            a = torch.softmax(e, dim=1)  # over src for each dst
+            a = torch.softmax(e, dim=1)
             a = torch.nan_to_num(a, nan=0.0)
             m = torch.einsum("bdS,bSh->bdh", a, Wh)
             h = torch.relu(self.mix(torch.cat([h, m], dim=-1)))
@@ -110,7 +84,6 @@ def main():
     Craw = None
     log(f"nodes={V} rows/service={n} channels={len(feat)}")
     ed = pd.read_csv(args.edges, parse_dates=["timestamp"])
-    # edge-rate tensor aligned to the service grid
     grid = df[df.msname == svcs[0]].reset_index(drop=True)["timestamp"]
     E = np.zeros((len(grid), V, V), dtype=np.float32)
     for (t, s, d), gr in ed.groupby(["timestamp", "src", "dst"]):
@@ -119,12 +92,10 @@ def main():
             if 0 <= j < len(grid) and grid.iloc[j] == pd.Timestamp(t):
                 E[j, si[s], si[d]] = float(gr["rps"].max())
     E = np.nan_to_num(E)
-    # static topology from TRAIN zone only
     ntr = int(len(grid) * 0.70)
     adj = (E[:ntr].max(axis=0) > 1e-9).astype(np.float32)
     np.fill_diagonal(adj, 0.0)
     log(f"static edges (train zone): {int(adj.sum())} directed")
-    # raw cpu for labels (standardized units would distort delta)
     Craw = A[:, :, ci]
 
     starts = list(range(0, n - L - H + 1, STRIDE))
@@ -203,3 +174,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

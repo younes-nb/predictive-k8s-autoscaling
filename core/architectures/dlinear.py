@@ -83,3 +83,4 @@ class DLinear(nn.Module):
         if self.num_targets == 1:
             return out[..., 0]
         return out
+

@@ -1,16 +1,4 @@
 #!/usr/bin/env python3
-"""Plot transition prediction: PR curves + test timeline with alarm track.
-
-Trains the two best configs (absolute labels, all services, snapshot +
-lags 3/6/12 of 14 key signals): spike H=6, drop H=12. Dumps test scores,
-then plots (1) PR curves vs BOCPD/velocity baselines, (2) twin-axis
-timeline (cpu + alarm score) with event markers for the top services,
-(3) zoom on the biggest test transition.
-
-Run from repo root:
-    python analytics/plot_transitions.py --csv <10s-tier0> \\
-        --out-dir analytics/data/plots
-"""
 
 import argparse
 import os
@@ -125,14 +113,12 @@ def main():
             min_samples_leaf=100, class_weight="balanced", random_state=42)
         clf.fit(Xtr, ytr)
         pr = clf.predict_proba(Xte)[:, 1]
-        # baselines on test rows (velocity needs cpu history: rebuild per svc)
         dump[(kind, H)] = (yte, pr, meta)
 
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    # --- PR curves ---
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
     for ax, (kind, H) in zip(axes, cfgs):
         yte, pr, _ = dump[(kind, H)]
@@ -148,8 +134,6 @@ def main():
     fig.savefig(f"{args.out_dir}/pr_curves.png", dpi=120)
     log("saved pr_curves.png")
 
-    # --- timelines: top services by test events ---
-    # zoom: biggest test jump among app services
     best = None
     for svc, g in df.groupby("msname"):
         if any(p in svc for p in ("mongo", "mysql")) or svc == "ts-voucher-service":
@@ -179,10 +163,6 @@ def main():
     fig.savefig(f"{args.out_dir}/zoom_transition.png", dpi=130)
     log(f"saved zoom_transition.png ({svc} +{amp:.2f})")
 
-    # --- twin-axis: cpu + alarm score around the zoom ---
-    # rebuild spike-H6 scores per row for this service (cheap: reuse dump
-    # is pooled; instead plot pooled alarm quantiles is overkill — plot the
-    # service cpu with event markers from labels)
     n = len(g)
     cpu = g["cpu_utilization"].to_numpy(float)
     H = 6
@@ -205,3 +185,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

@@ -1,12 +1,4 @@
 #!/usr/bin/env python
-"""Replay a deployment trace through a trained forecaster.
-
-Loads a checkpoint, walks an HPA-logs CSV for one deployment in 1-minute steps,
-feeds each sliding window to the model, and records predictions.
-
-Online conformal prediction: frozen quantile model + adaptive conformal state.
-Horizon-offset feedback: actual y(t+5) updates conformal state 5 steps later.
-"""
 
 import argparse
 import os
@@ -52,7 +44,7 @@ BUILDER_TYPES = ("cnn_bilstm", "dpam", "tcn", "tcn_dual", "quantile_ensemble")
 DEFAULT_CSV = "/proj/k8sautoscaledl-PG0/hpa_historical_logs.csv"
 DEFAULT_PLOTS_DIR = "/proj/k8sautoscaledl-PG0/analytics_out"
 TARGET_COLS = ("cpu_utilization", "memory_utilization")
-SPIKE_THRESHOLD_TRAIN = 0.6099  # Q0.95 of CPU t+5 targets from training
+SPIKE_THRESHOLD_TRAIN = 0.6099
 
 
 def parse_args():
@@ -208,7 +200,7 @@ def _apply_swt_per_window(raw_feat, feature_set, input_len, swt_level=None, mem_
     from dataclasses import replace
     spec = get_feature_set(feature_set)
     feature_names = spec["features"]
-    
+
     feature_cfgs = []
     for f in feature_names:
         lvl = swt_level if swt_level is not None else SWT_CFG.SWT_LEVEL
@@ -259,12 +251,10 @@ def replay(df, model, meta, raw_feat, model_feat, device,
     else:
         model_feat_windows = model_feat
 
-    # Warmup
     warmup = torch.tensor(model_feat_windows[0], dtype=torch.float32, device=device).unsqueeze(0)
     with torch.no_grad():
         model(warmup)
 
-    # Initialize conformal state (CPU-only for scaling)
     adaptive_cal = AdaptiveUpperConformalPerTarget(
         num_targets=num_targets,
         window_size=adaptive_window,
@@ -274,7 +264,6 @@ def replay(df, model, meta, raw_feat, model_feat, device,
         alpha_max=0.20,
     ) if use_conformal and CONFORMAL_AVAILABLE else None
 
-    # Pending queue for horizon-offset feedback
     pending = []
 
     rows = []
@@ -301,7 +290,6 @@ def replay(df, model, meta, raw_feat, model_feat, device,
             q50 = preds[0, -1, :, 1].cpu().numpy()
             q95 = preds[0, -1, :, 2].cpu().numpy()
         else:
-            # preds: (batch, horizon, targets) or (batch, targets)
             if preds.dim() == 3:
                 p = torch.round(preds[0, -1] * 100) / 100
             else:
@@ -324,14 +312,12 @@ def replay(df, model, meta, raw_feat, model_feat, device,
         cpu_actual = float(raw_feat[idx, 0])
         mem_actual = float(raw_feat[idx, 1]) if num_targets > 1 else 0.0
 
-        # Warmup phase: fill conformal buffers (no metrics, just update state)
         if in_warmup and warmup_count < warmup_windows:
             if adaptive_cal is not None:
                 adaptive_cal.states["cpu"].update(float(cpu_actual), float(q10[0]), float(q95[0]))
                 if num_targets > 1:
                     adaptive_cal.states["memory"].update(float(mem_actual), float(q10[1]), float(q95[1]))
             warmup_count += 1
-            # Still record for completeness but mark as warmup
             def to_scalar(x, target_idx=0):
                 if isinstance(x, (np.ndarray, list)):
                     arr = np.asarray(x)
@@ -352,16 +338,10 @@ def replay(df, model, meta, raw_feat, model_feat, device,
             res = pd.DataFrame(rows, columns=cols)
             continue
 
-        # After warmup: horizon-offset feedback
         if in_warmup and warmup_count >= warmup_windows:
             in_warmup = False
             print(f"[INFO] Warmup complete ({warmup_windows} windows). Starting online test.")
 
-        # Horizon-offset: actual y(t+5) updates conformal state
-        # At step idx (time t), we predict for t+5.
-        # The actual for t+5 arrives at idx+5, so we store current pred
-        # and update state when we reach idx+5.
-        # For online test: store pending prediction
         if not in_warmup:
             pending.append({
                 "idx": idx,
@@ -371,8 +351,6 @@ def replay(df, model, meta, raw_feat, model_feat, device,
                 "q95": q95.copy(),
             })
 
-        # Update conformal state from matured pending predictions
-        # (actuals that are now 5 steps old)
         matured = [p for p in pending if p["idx"] <= idx - pred_horizon]
         if matured and adaptive_cal is not None:
             for p in matured:
@@ -385,13 +363,12 @@ def replay(df, model, meta, raw_feat, model_feat, device,
                         adaptive_cal.states["memory"].update(act_mem, p["q10"][1], p["q95"][1])
             pending = [p for p in pending if p["idx"] > idx - pred_horizon]
 
-        # Extract scalars for storage (arrays have shape (num_targets,))
         def to_scalar(x, target_idx=0):
             if isinstance(x, (np.ndarray, list)):
                 arr = np.asarray(x)
                 return float(arr.flat[target_idx]) if arr.size > target_idx else float("nan")
             return float(x)
-        
+
         lower_cpu_scalar = to_scalar(lower_cpu, 0)
         upper_cpu_scalar = to_scalar(upper_cpu, 0)
         lower_mem_scalar = to_scalar(lower_mem, 1) if num_targets > 1 else float("nan")
@@ -415,7 +392,6 @@ def print_metrics(res, pred_horizon, spike_threshold=0.6099):
     print("REPLAY METRICS (pred[t] vs actual[t+%d])" % pred_horizon)
     print("-" * 60)
 
-    # Skip warmup rows
     if "warmup" in res.columns:
         test_res = res[res["warmup"] == False].copy()
         n_warmup = int((res["warmup"] == True).sum())
@@ -447,7 +423,6 @@ def print_metrics(res, pred_horizon, spike_threshold=0.6099):
 
         mse = float(((y_arr - pred_arr) ** 2).mean())
         mae = float(np.abs(y_arr - pred_arr).mean())
-        # Naive baseline: y(t+H) = y(t)
         naive_mae = float(np.abs(y_arr - test_res[acol].iloc[:-pred_horizon].values).mean())
         d = (mae - naive_mae) / naive_mae * 100 if naive_mae > 0 else float("nan")
         print(f"{label:5s}  MSE {mse:.5f}  MAE {mae:.5f} ({mae*100:.2f}%)  naive MAE {naive_mae:.4f}  delta {d:+.1f}%")
@@ -610,7 +585,6 @@ def main():
             f"Use later --start_hour or more --hours."
         )
 
-    # Filter test rows (after warmup)
     if "warmup" in res.columns:
         test_res = res[res["warmup"] == False]
     else:

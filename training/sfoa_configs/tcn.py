@@ -35,3 +35,4 @@ def build_dual_model(hyperparams, input_size, args, num_targets, device):
         horizon=args.pred_horizon,
         num_targets=num_targets,
     ).to(device)
+

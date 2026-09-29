@@ -411,7 +411,7 @@ class SFOAOptimizer:
                     * (self.BOUNDS_HIGH - self.BOUNDS_LOW)
                     + self.BOUNDS_LOW
                 )
-                initial_state = None  # shape mismatch: treat as fresh run
+                initial_state = None
         else:
             X = (
                 self.rng.random((self.N, self.D)) * (self.BOUNDS_HIGH - self.BOUNDS_LOW)
@@ -656,13 +656,13 @@ def run_sfoa_search(
     rank = accelerator.process_index if (is_distributed and accelerator is not None) else 0
 
     logging.info("[SFOA-R%d] GPU health check starting...", rank)
-    
+
     if len(train_ds) > 0:
         first_x, *_ = train_ds[0]
         input_size = first_x.shape[-1]
     else:
         raise RuntimeError("[SFOA] train_ds is empty — cannot derive input_size.")
-        
+
     if torch.cuda.is_available():
         try:
             props = torch.cuda.get_device_properties(0)
@@ -795,7 +795,7 @@ def run_sfoa_search(
 
         try:
             model = config.build_model(hyperparams, input_size, args, num_targets, eval_device)
-            
+
             optimizer = torch.optim.Adam(
                 model.parameters(),
                 lr=hyperparams["lr"],
@@ -866,7 +866,7 @@ def run_sfoa_search(
                         candidate_idx, eval_device, avg_val,
                     )
                 return float(avg_val)
-            
+
             for epoch in range(resume_epoch, TRAINING.SFOA_EVAL_EPOCHS):
                 model.train()
                 epoch_loss_sum = 0.0
@@ -962,7 +962,7 @@ def run_sfoa_search(
     logging.info(
         "[SFOA] Evaluating candidates in parallel across ranks (DDP all_gather)",
     )
-    
+
     sfoa = SFOAOptimizer(
         eval_fn=eval_fn,
         N=TRAINING.SFOA_POPULATION,
@@ -996,10 +996,6 @@ def run_sfoa_search(
             "[SFOA] resume=False — ignoring any saved sfoa_state and starting fresh."
         )
 
-    # Keys that belong exclusively to the main training loop.
-    # They must not survive in RESUME_STATE_FILE while SFOA is still running
-    # or has just completed, because a subsequent --resume_training would
-    # misinterpret stale epoch / model / log-path data from a prior run.
     _STALE_TRAINING_KEYS = (
         "epoch",
         "model_state_dict",
@@ -1013,21 +1009,12 @@ def run_sfoa_search(
     )
 
     def _sfoa_checkpoint(sfoa_interim_state: dict) -> None:
-        """
-        Called by SFOAOptimizer.optimize() during population/candidate evaluation.
-        Writes a partial sfoa_state so the run can be resumed if interrupted.
-        Sets sfoa_done=False to prevent train.py from skipping SFOA on resume.
-        Purges all stale main-training-loop keys from the file so that a
-        --resume_training after an interrupt cannot accidentally pick up old
-        epoch / model / log-path data.
-        Only rank 0 writes; non-main ranks return immediately.
-        """
         if is_distributed and not accelerator.is_local_main_process:
             return
         try:
             existing = load_resume_state(PATHS.RESUME_STATE_FILE) or {}
             existing["sfoa_state"]           = sfoa_interim_state
-            existing["sfoa_done"]            = False   # still in progress
+            existing["sfoa_done"]            = False
             existing["hyperparam_optimizer"] = "sfoa"
             for _k in _STALE_TRAINING_KEYS:
                 existing.pop(_k, None)
@@ -1044,12 +1031,6 @@ def run_sfoa_search(
         except Exception as _exc:
             logging.warning("[SFOA] Mid-search checkpoint write failed: %s", _exc)
 
-    # In a multi-rank run, only rank 0 has read the resume state from disk.
-    # Broadcast it so every rank constructs its SFOAOptimizer with the same
-    # `X` / cached `fitness` / `T`. Without this, ranks 1..N-1 would treat
-    # the run as fresh (full ~15h initial re-eval on random X) and the
-    # round-robin `_evaluate_all` would mix correct and garbage candidate
-    # fitnesses into one incoherent global vector.
     if is_distributed and initial_state is not None:
         if accelerator.is_local_main_process:
             _payload = [initial_state]
@@ -1069,9 +1050,6 @@ def run_sfoa_search(
 
     try:
         if is_distributed:
-            # Make sure all ranks have finished calling optimize() before any
-            # rank touches the resume file. Only rank 0 reads-modifies-writes
-            # so we don't race-clobber a half-written state.
             dist.barrier()
             if accelerator.is_local_main_process:
                 existing = load_resume_state(PATHS.RESUME_STATE_FILE) or {}
@@ -1114,3 +1092,4 @@ def run_sfoa_search(
         best_hp = best_hp_list[0]
 
     return best_hp
+

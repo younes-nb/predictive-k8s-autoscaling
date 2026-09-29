@@ -6,3 +6,4 @@ from core.architectures.tcn import TCNForecaster
 
 __all__ = ["CnnBiLSTM", "DLinear", "DualPathAnchorMixer", "LinearRegression",
            "TCNForecaster"]
+

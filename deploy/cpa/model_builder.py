@@ -255,3 +255,4 @@ def build_model(checkpoint, model_type):
                 inject_mask[0] = True
         model = ChangeHeadForecaster(model, inject_mask)
     return model
+

@@ -142,7 +142,6 @@ def _compute_avg_instances_chunk(
     chunk_msnames: list,
     parquet_pattern: str,
 ) -> Dict[str, float]:
-    """Worker: compute avg instances per timestamp for a chunk of msnames."""
     t_worker_start = time.time()
     con = duckdb.connect()
     con.execute("SET threads TO 4")
@@ -212,7 +211,6 @@ def main():
     log(f"Parquet pattern: {parquet_pattern}")
     log(f"Bins: {n_bins}, Workers: {args.num_workers}, Cache: {'ON' if use_cache else 'OFF'}")
 
-    # ---- Scan 1/4: Histograms + globals ----
     log("=" * 60)
     log("Scan 1/4: CPU/memory histograms and global averages...")
     t_scan = time.time()
@@ -294,7 +292,6 @@ def main():
     t_elapsed = time.time() - t_scan
     log(f"Scan 1/4 done in {_fmt_duration(t_elapsed)}")
 
-    # ---- Scan 2/4: Per-MS max/min ----
     log("=" * 60)
     log("Scan 2/4: Per-microservice max/min...")
     t_scan = time.time()
@@ -337,7 +334,6 @@ def main():
     t_elapsed = time.time() - t_scan
     log(f"Scan 2/4 done in {_fmt_duration(t_elapsed)}: {n_ms} unique microservices")
 
-    # ---- Scan 3/4: Avg instances per timestamp (parallel) ----
     log("=" * 60)
     log("Scan 3/4: Avg instances per timestamp per microservice (parallel)...")
     t_scan = time.time()
@@ -375,7 +371,6 @@ def main():
     t_elapsed = time.time() - t_scan
     log(f"Scan 3/4 done in {_fmt_duration(t_elapsed)}")
 
-    # ---- Scan 4/4: Total unique instances ----
     log("=" * 60)
     log("Scan 4/4: Total unique instances per microservice...")
     t_scan = time.time()
@@ -405,7 +400,6 @@ def main():
     t_elapsed = time.time() - t_scan
     log(f"Scan 4/4 done in {_fmt_duration(t_elapsed)}")
 
-    # ---- Aggregation + Summary ----
     log("=" * 60)
     log("Aggregating results...")
     t_agg = time.time()
@@ -463,7 +457,6 @@ def main():
     print(f"  Average min memory:           {avg_min_mem:.6f}")
     print("=" * 60 + "\n")
 
-    # ---- Plots ----
     log("Generating plots...")
     t_plots = time.time()
 
@@ -539,3 +532,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

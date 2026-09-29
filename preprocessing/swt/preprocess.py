@@ -55,12 +55,6 @@ def setup_logging(out_dir: str) -> None:
 
 
 def _chunk_and_per_worker_mem(input_len, total_channels, budget=0.9e9):
-    """Pick a per-worker processing chunk so RAM stays bounded (~budget bytes).
-
-    Each window costs `input_len * (n_in + n_out) * 4` bytes while a chunk is
-    being decomposed (input slice + 12-channel output buffer), plus base
-    interpreter overhead (~250MB).
-    """
     per_window = input_len * (2 + total_channels) * 4
     chunk = max(20_000, min(500_000, int(budget // max(per_window, 1))))
     per_worker = chunk * per_window + 250e6
@@ -68,7 +62,6 @@ def _chunk_and_per_worker_mem(input_len, total_channels, budget=0.9e9):
 
 
 def _memory_aware_workers(requested, per_worker, max_fraction=0.8):
-    """Cap workers so total peak RSS stays under ~max_fraction of free RAM."""
     avail = None
     try:
         with open("/proc/meminfo") as f:
@@ -90,7 +83,6 @@ def _decompose_shard(task, windows_done, shards_done, cur_shard_idx):
 
     t0 = time.time()
 
-    # Progress objects are passed as arguments (works with spawn on Windows)
     cur_shard_idx.value = shard_idx
 
     X = np.load(shard_x_path, mmap_mode="r")
@@ -98,10 +90,8 @@ def _decompose_shard(task, windows_done, shards_done, cur_shard_idx):
     S = np.load(shard_y_path.replace("_y_", "_sid_"))
     N, input_len, n_input_features = X.shape
 
-    # Extract last values for target features
     last_vals = np.asarray(X[:, -1, target_indices], dtype=np.float16)
 
-    # Compute channel counts per feature
     n_channels_per_feat = [cfg.SWT_LEVEL + 1 for cfg in feature_cfgs]
     total_channels = sum(n_channels_per_feat)
 
@@ -110,7 +100,6 @@ def _decompose_shard(task, windows_done, shards_done, cur_shard_idx):
 
     chunk_size, _ = _chunk_and_per_worker_mem(input_len, total_channels)
 
-    # Stream X_dec into a full-size memmap. All windows are kept.
     tmp_x = shard_out_x_path + ".tmp"
     out_mmap = np.lib.format.open_memmap(
         tmp_x, mode="w+", dtype="float16",
@@ -139,9 +128,6 @@ def _decompose_shard(task, windows_done, shards_done, cur_shard_idx):
     del out_mmap
     os.replace(tmp_x, shard_out_x_path)
 
-    # Slice Y to only include the target features for this feature set.
-    # Y_full has shape (N, pred_horizon, num_targets_total); we take the first
-    # len(target_indices) targets, which matches the order of target_features.
     num_targets = len(target_indices)
     Y_subset = Y_full[..., :num_targets].astype(np.float16)
 
@@ -184,7 +170,6 @@ def main() -> None:
 
     extra_swt_level = args.extra_swt_level if args.extra_swt_level is not None else args.swt_level
 
-    # Build config for each feature
     feature_cfgs = []
     for feat in feature_names:
         if feat == "cpu_utilization":
@@ -212,7 +197,6 @@ def main() -> None:
         )
     num_workers = capped
 
-    # Write metadata file describing channel structure
     meta = {
         "feature_set": args.feature_set,
         "features": feature_names,
@@ -262,13 +246,10 @@ def main() -> None:
         logging.info("No shards to process")
         return
 
-    # Total windows across all shards, read from .npy headers only (cheap).
     total_windows = 0
     for t in shard_tasks:
         total_windows += np.load(t[0], mmap_mode="r").shape[0]
 
-    # Shared progress state: workers update these (inherited at fork), a monitor
-    # thread in the parent renders them.
     manager = mp.Manager()
     windows_done = manager.Value(ctypes.c_longlong, 0)
     shards_done = manager.Value(ctypes.c_longlong, 0)
@@ -340,3 +321,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

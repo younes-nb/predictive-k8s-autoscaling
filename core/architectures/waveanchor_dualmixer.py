@@ -231,3 +231,4 @@ class DualPathAnchorMixer(nn.Module):
         mem_out = self.mem_mixer(x_mem.permute(0, 2, 1))
 
         return torch.stack([cpu_out, mem_out], dim=-1)
+

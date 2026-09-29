@@ -56,3 +56,4 @@ def build_model(hyperparams, input_size, args, num_targets, device):
         cpu_recon=cpu_recon,
         mem_disable_drift=mem_disable_drift,
     ).to(device)
+

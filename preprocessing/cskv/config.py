@@ -1,4 +1,3 @@
-
 import random
 
 import numpy as np
@@ -44,3 +43,4 @@ class CskvConfig:
     VMD_TOL: float = 1e-7
 
 CFG = CskvConfig()
+

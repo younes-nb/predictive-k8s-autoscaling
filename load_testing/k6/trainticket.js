@@ -1,13 +1,3 @@
-// Train-ticket frontend-only k6 load.
-//
-// Every request goes to the frontend (HOST) with relative /api/* paths;
-// ts-ui-dashboard proxies to backends. Pacing: per-minute request counts
-// from the MCR curve (v/peak * MAX_REQUESTS), spread evenly across the VU pool.
-//
-// Env: HOST, MCR_CSV (abs), MAX_REQUESTS, USER_POOL, SEED_FILE (abs),
-//      START_MIN, TEST_MIN, PW (seed password, default loadtest123).
-// Metrics: k6 -o experimental-prometheus-rw -> Mimir.
-
 import http from 'k6/http';
 import { check, sleep } from 'k6';
 import { SharedArray } from 'k6/data';
@@ -17,7 +7,7 @@ const HOST = __ENV.HOST || 'https://train-ticket.younesnb.linkpc.net';
 const MAXR = parseInt(__ENV.MAX_REQUESTS || '5000', 10);
 const POOL = parseInt(__ENV.USER_POOL || '500', 10);
 const START_MIN = parseInt(__ENV.START_MIN || '0', 10);
-const TEST_MIN = parseInt(__ENV.TEST_MIN || '0', 10); // 0 = whole curve
+const TEST_MIN = parseInt(__ENV.TEST_MIN || '0', 10);
 const PW = __ENV.PW || 'loadtest123';
 
 const MCR = new SharedArray('mcr', function () {
@@ -39,8 +29,8 @@ const NMIN = TEST_MIN > 0 ? TEST_MIN : MCR.length;
 export const options = {
   vus: POOL,
   duration: `${NMIN}m`,
-  // Drop high-cardinality system tags (full URLs with IDs would create
-  // unbounded series in Mimir); `name` carries the endpoint template.
+
+
   systemTags: ['proto', 'status', 'method', 'name', 'group', 'check', 'error', 'error_code', 'tls_version'],
   thresholds: {
     http_req_failed: ['rate<0.35'],
@@ -65,7 +55,7 @@ function login(st) {
       const d = r.json().data;
       st.token = d.token; st.account = d.userId;
       return true;
-    } catch (e) { /* fallthrough */ }
+    } catch (e) {  }
   }
   return false;
 }
@@ -145,7 +135,7 @@ function a_orders(st) {
     try {
       const data = r.json().data || [];
       data.slice(0, 3).forEach((o) => { if (o && o.id) st.orders.push(o.id); });
-    } catch (e) { /* ignore */ }
+    } catch (e) {  }
   }
 }
 function a_preserve(st) {
@@ -163,7 +153,7 @@ function a_pay(st) {
   const oid = pick(st.orders);
   let price = '100.0';
   const pr = get(`/api/v1/orderservice/order/price/${oid}`, st);
-  if (pr.status === 200) { try { price = String(pr.json().data || price); } catch (e) { /* ignore */ } }
+  if (pr.status === 200) { try { price = String(pr.json().data || price); } catch (e) {  } }
   post('/api/v1/inside_pay_service/inside_payment', { userId: st.account, orderId: oid, tripId: pick(TRIPS.slice(0, 3)), price }, st);
   get(`/api/v1/executeservice/execute/collected/${oid}`, st);
   get(`/api/v1/executeservice/execute/execute/${oid}`, st);

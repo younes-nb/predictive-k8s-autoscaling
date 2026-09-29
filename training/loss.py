@@ -12,15 +12,6 @@ def per_target_huber_loss(
     rel_w: float = 0.0,
     rel_eps: float = 1e-6,
 ):
-    """Per-target weighted Huber loss for beating the naive CPU/memory forecaster.
-
-    preds/target: (B, H, T). T==2 assumes [cpu, mem] ordering.
-    Both CPU and memory use Huber (smooth L1) with independent betas: errors
-    below beta are MSE-like (scaled quadratic), errors above beta are MAE-like
-    (linear). beta is the MSE<->MAE balance knob per branch. An optional
-    relative (MAPE) term for memory is available but off by default.
-    Returns lambda_cpu*CPU_loss + lambda_mem*mem_loss (default 0.5/0.5).
-    """
     t = preds.shape[-1]
     if t == 1:
         return nn.functional.mse_loss(preds, target)
@@ -37,12 +28,6 @@ def per_target_huber_loss(
 
 
 def per_target_loss(preds, target, mem_mode="mse"):
-    """Per-target loss so the memory head gets full gradient signal.
-
-    preds/target: (B, H, T). T==2 assumes [cpu, mem] ordering.
-    CPU is always MSE; memory uses `mem_mode` ("mse" or "l1").
-    Returns CPU_loss + mem_loss (equal weight).
-    """
     t = preds.shape[-1]
     if t == 1:
         return nn.functional.mse_loss(preds, target)
@@ -66,29 +51,17 @@ def asymmetric_huber_loss(
     rel_w: float = 0.0,
     rel_eps: float = 1e-6,
 ):
-    """Asymmetric Huber loss that penalizes underprediction more heavily.
-
-    For HPA: underprediction (pred < target) causes premature scale-down,
-    which is dangerous. Overprediction is safe (proactive scale-up).
-
-    Args:
-        under_weight_cpu: Multiplier for CPU underprediction errors (default 3.0)
-        under_weight_mem: Multiplier for memory underprediction errors (default 1.0)
-    """
     t = preds.shape[-1]
     if t == 1:
         return nn.functional.smooth_l1_loss(preds, target, beta=cpu_beta)
 
-    # CPU branch
     cpu_pred = preds[..., 0]
     cpu_target = target[..., 0]
-    cpu_error = cpu_target - cpu_pred  # positive = underprediction
+    cpu_error = cpu_target - cpu_pred
     cpu_huber = nn.functional.smooth_l1_loss(cpu_pred, cpu_target, beta=cpu_beta, reduction='none')
-    # Weight underprediction more heavily
     cpu_weight = torch.where(cpu_error > 0, under_weight_cpu, 1.0)
     cpu_loss = (cpu_huber * cpu_weight).mean()
 
-    # Memory branch
     p_mem = preds[..., 1]
     t_mem = target[..., 1]
     mem_error = t_mem - p_mem
@@ -101,3 +74,4 @@ def asymmetric_huber_loss(
         mem_loss = mem_loss + rel_w * rel.mean()
 
     return lambda_cpu * cpu_loss + lambda_mem * mem_loss
+

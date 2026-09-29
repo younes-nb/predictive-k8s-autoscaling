@@ -23,3 +23,4 @@ def build_model(hyperparams, input_size, args, num_targets, device):
         bidirectional=True,
         num_targets=num_targets,
     ).to(device)
+

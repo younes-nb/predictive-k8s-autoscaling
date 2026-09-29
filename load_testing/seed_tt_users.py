@@ -1,16 +1,4 @@
 #!/usr/bin/env python3
-"""Pre-seed train-ticket load users: register + login + contacts.
-
-Writes JSON [{username, password, accountId, token, contactsId}] for the
-k6 VU pool (avoids the on-start registration herd that timeouts auth).
-Run from repo root (needs cluster access for the service URLs? No - it
-writes the script; execute via a k8s Job or port-forward). Default simply
-prints the kubectl job manifest.
-
-Usage:
-    python load_testing/seed_tt_users.py --count 120 --out /tmp/tt_users.json
-    # then: kubectl -n loadgen create configmap tt-users --from-file=users.json=...
-"""
 import argparse
 import json
 import random
@@ -66,3 +54,4 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
+

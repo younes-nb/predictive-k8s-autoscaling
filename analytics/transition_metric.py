@@ -1,27 +1,4 @@
 #!/usr/bin/env python3
-"""Cold-transition metric for CPU forecasts (cheat-proof by construction).
-
-For each test window, the model forecasts the level at horizon H. A cold
-transition is defined on the TRUE series as |y[t+H] - y[t]| >= delta
-(spike: +, drop: -), where y[t] is the last observed input value (known to
-every method at predict time — no leak).
-
-Reported per task (spike / drop), TEST split only:
-  - PR-AUC and precision@recall>=0.5 over the predicted jump
-    (pred[t+H] - y[t]). Ranking-based: any monotone score qualifies.
-  - transition MAE: MAE on event samples, model vs persistence, + ratio.
-  - global MAE ratio vs persistence (GUARD: must be <= 1.0).
-  - cheater audit: a constant "+C always" predictor is scored too — it gets
-    recall 1.0 but base-rate precision and catastrophic global MAE, i.e. the
-    metric visibly disqualifies the overpredict-everything strategy.
-
-Baselines scored identically: persistence (jump 0 -> detection N/A, shown
-for magnitude), momentum (extrapolated recent velocity), rps-slope.
-
-Run from repo root:
-    python analytics/transition_metric.py --checkpoint <model.pt> \\
-        --windows_dir <windows> --out analytics/data/transitions/a0.json
-"""
 
 import argparse
 import json
@@ -75,7 +52,6 @@ def pr_at_recall(y_true, scores, target_recall=0.5):
     rec = tp / max(1, y_true.sum())
     prec = tp / (np.arange(len(y_true)) + 1)
     pm = prec[rec >= target_recall]
-    # average precision (PR-AUC summary)
     ap = float(np.sum((rec[1:] - rec[:-1]) * prec[1:])) if len(rec) > 1 else 0.0
     return ap, (round(float(pm.max()), 4) if len(pm) else 0.0)
 
@@ -175,8 +151,6 @@ def main():
            "services_note": "pooled over services (csv windows carry no sid)",
            "has_event_head": bool(hasattr(model, "event_logits"))}
     if hasattr(model, "event_logits"):
-        # supervised event heads (e.g. tcn_focal): score their probabilities
-        # directly — same labels, same test rows as the level scores above.
         EP = []
         with torch.no_grad():
             for batch in loader:
@@ -195,13 +169,10 @@ def main():
     res["drop"] = evaluate_task("drop", drop, -jump_pred, pred, last, truth)
     res["spike_vel"] = evaluate_task("spike_vel", spike, vel, last + vel, last, truth)
     if rps_idx is not None and slope_idx is not None:
-        # rps-slope is a detection score only (different units); its
-        # magnitude reference is persistence by definition.
         rslope = np.concatenate(R)
         r = evaluate_task("spike_rpsslope", spike, rslope, last, last, truth)
         r["mae_ratio"] = 1.0
         res["spike_rpsslope"] = r
-    # global calibration guard + cheater audit
     mae_m = float(np.abs(pred - truth).mean())
     mae_p = float(np.abs(last - truth).mean())
     res["guard"] = {"mae_model": round(mae_m, 5),
@@ -209,7 +180,7 @@ def main():
                     "mae_ratio": round(mae_m / (mae_p + 1e-12), 4),
                     "bias": round(float((pred - truth).mean()), 5),
                     "pass": bool(mae_m <= mae_p)}
-    cheat = np.full(n, last + 1.0)  # overpredict everything by +1.0
+    cheat = np.full(n, last + 1.0)
     res["cheater"] = {
         "spike_recall": round(float(((cheat - last) >= args.delta)[spike == 1].mean())
                               if spike.sum() else 0.0, 4),
@@ -244,3 +215,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

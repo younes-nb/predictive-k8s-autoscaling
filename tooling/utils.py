@@ -41,3 +41,4 @@ def hist_quantile(hist, tau: float) -> float:
     target = tau * total
     bin_idx = np.searchsorted(cdf, target, side="left")
     return float(bin_idx / (len(hist) - 1))
+

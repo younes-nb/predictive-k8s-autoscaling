@@ -22,18 +22,6 @@ def get_env(
     is_list: bool = False,
     is_dict: bool = False,
 ) -> Any:
-    """Read environment variable with type casting and logging.
-
-    Args:
-        key: Environment variable name (uppercase)
-        default: Default value if env var not set
-        type_cast: Type to cast the value to (str, int, float, bool)
-        is_list: If True, parse as JSON list/array
-        is_dict: If True, parse as JSON object/dict
-
-    Returns:
-        Parsed value or default
-    """
     val = os.getenv(key)
     if val is None:
         return default

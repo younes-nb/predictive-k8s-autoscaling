@@ -22,7 +22,7 @@ if ! kubectl apply -f "${SCRIPT_DIR}/cpa-pods-podmonitor.yaml"; then
 fi
 
 for DEPLOYMENT in $(kubectl get deployments -n $NAMESPACE -o jsonpath='{.items[*].metadata.name}'); do
-    
+
     if [ "$DEPLOYMENT" == "loadgenerator" ] || [ "$DEPLOYMENT" == "redis-cart" ]; then
         continue
     fi
@@ -111,3 +111,4 @@ spec:
       value: "3"
 EOF
 done
+

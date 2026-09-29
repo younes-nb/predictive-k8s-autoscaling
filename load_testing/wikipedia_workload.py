@@ -1,41 +1,4 @@
 #!/usr/bin/env python3
-"""Generate a predictable per-minute http_mcr workload from Wikipedia pageviews.
-
-Downloads the lightweight per-project aggregate files
-(`projectviews-YYYYMMDD-HH0000`, ~22 KB each — NOT the ~50 MB per-article
-pageviews dumps) from https://dumps.wikimedia.org/other/pageviews/ into
-DATA_DIR (cached on disk), sums the English-Wikipedia all-access traffic
-(domain codes `en` + `en.m`) into per-1-hour buckets, upsamples to per-1-minute
-resolution, normalizes to [0,1] (peak = 1.0), and writes a CSV with columns
-msname,timestamp,http_mcr — the exact format consumed by
-load_testing/run_test.sh (k6).
-
-The default window (Mon 2024-04-08 + 14 days = two full Mon-Sun weeks) shows a
-genuine diurnal + weekend pattern: night trough vs. midday peak each day with
-lower weekend traffic.
-
-Predictability check: prints the autocorrelation of the emitted curve at lag 60
-(1 hour) and lag 1440 (1 day), the peak |autocorr| over lags 1..2880, and the
-mean day-over-day Pearson correlation of hourly profiles.
-
-Notes on the source data:
-  * One projectviews file per UTC hour; the hour in the filename is the END of
-    the aggregation period (consistent with pagecounts-raw), so
-    projectviews-20240101-010000 covers 00:00-01:00 UTC and its counts are
-    attributed to minute timestamps starting at 00:00 UTC.
-  * Line format is `<domain_code> - <count_views> 0`, e.g. `en - 2592893 0`
-    (desktop) and `en.m - 9375445 0` (mobile). `en` + `en.m` cover >99% of
-    English-Wikipedia traffic (the residual `en.d`/`en.m.d` zero-rated and
-    sister-project `en.b`/`en.q`/… lines are excluded).
-  * Raw granularity is hourly, so per-minute values are upsampled: `linear`
-    (default) linearly interpolates between consecutive hourly totals for a
-    smooth curve; `flat` repeats the hour's normalized total across its 60
-    minutes (hourly steps).
-
-Reference:
-  Wikimedia Foundation Analytics, "Pageviews" dumps,
-  https://dumps.wikimedia.org/other/pageviews/ (data since May 2015, CC0).
-"""
 
 import argparse
 import os
@@ -47,11 +10,8 @@ MIN_PER_HOUR = 60
 MIN_PER_DAY = 1440
 
 BASE_URL = "https://dumps.wikimedia.org/other/pageviews"
-# Contact-style User-Agent per the Wikimedia Foundation User-Agent policy
-# (https://foundation.wikimedia.org/wiki/Policy:Wikimedia_Foundation_User-Agent_Policy).
 USER_AGENT = "predictive-k8s-autoscaling-loadtest/1.0 (research workload generator)"
 
-# English-Wikipedia all-access (desktop + mobile, >99% of en.wikipedia traffic).
 DOMAIN_CODES = ("en", "en.m")
 
 
@@ -60,12 +20,6 @@ def log(msg: str) -> None:
 
 
 def hour_file_names(start_date: str, days: int) -> list[tuple[str, str]]:
-    """Return [(utc_hour_start, file_name)] for `days` days from `start_date`.
-
-    start_date is YYYYMMDD (a UTC calendar day); the first hour starts at 00:00
-    UTC that day. The filename hour is the END of the period, i.e. one hour
-    after the period start.
-    """
     try:
         day0 = datetime.strptime(start_date, "%Y%m%d").replace(tzinfo=timezone.utc)
     except ValueError:
@@ -80,8 +34,6 @@ def hour_file_names(start_date: str, days: int) -> list[tuple[str, str]]:
 
 
 def download(hours: list[tuple[str, str]], data_dir: str) -> list[str]:
-    """Download (cached) the projectviews file for each hour. Returns paths
-    (None for hours that failed after retries)."""
     os.makedirs(data_dir, exist_ok=True)
     paths: list[str] = []
     missing = 0
@@ -107,7 +59,6 @@ def download(hours: list[tuple[str, str]], data_dir: str) -> list[str]:
             paths.append(None)
         else:
             paths.append(path)
-        # Be polite to the dumps host (rate limited, max 3 conns/IP).
         time.sleep(0.2)
     if missing:
         log(f"Downloaded {len(paths) - missing}/{len(paths)} hourly files "
@@ -118,7 +69,6 @@ def download(hours: list[tuple[str, str]], data_dir: str) -> list[str]:
 
 
 def count_hour(path: str) -> int:
-    """Sum en.wikipedia all-access views in one projectviews file."""
     total = 0
     with open(path, "r", encoding="ascii", errors="replace") as f:
         for line in f:
@@ -134,8 +84,6 @@ def count_hour(path: str) -> int:
 
 
 def fill_gaps(hourly: list) -> list[int]:
-    """Fill None (missing-file) hours by linear interpolation; exit if the
-    window is unusable."""
     n = len(hourly)
     known = [i for i, v in enumerate(hourly) if v is not None]
     if not known:
@@ -164,13 +112,12 @@ def fill_gaps(hourly: list) -> list[int]:
 
 
 def upsample(hourly: list[int], mode: str) -> list[float]:
-    """Expand hourly totals to per-minute values (still in raw view counts)."""
     minutes: list[float] = []
     n = len(hourly)
     for h, value in enumerate(hourly):
         if mode == "flat" or h == n - 1:
             minutes.extend([float(value)] * MIN_PER_HOUR)
-        else:  # linear: blend from this hour's total to the next
+        else:
             nxt = hourly[h + 1]
             for k in range(MIN_PER_HOUR):
                 minutes.append(value + (nxt - value) * (k / MIN_PER_HOUR))
@@ -178,7 +125,6 @@ def upsample(hourly: list[int], mode: str) -> list[float]:
 
 
 def predictability_report(mcr) -> None:
-    """Autocorrelation + day-over-day alignment of the emitted curve."""
     try:
         import numpy as np
     except ImportError:
@@ -260,7 +206,6 @@ def main():
     peak = max(minutes)
     mcr = [v / peak for v in minutes]
 
-    # Minute timestamps in ms epoch UTC (period starts are UTC-aware).
     t0_ms = int(hours[0][0].timestamp() * 1000)
     timestamps = [t0_ms + i * 60000 for i in range(len(mcr))]
 
@@ -277,3 +222,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

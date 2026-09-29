@@ -1,25 +1,4 @@
 #!/usr/bin/env python3
-"""Onset-event evaluation for transition alarms (the metric that can't lie).
-
-Per-row PR overcounts: consecutive rows of one excursion score as many
-independent wins. Here an EVENT is one onset (first qualifying row, 30-step
-refractory). A HIT is an alarm inside [onset-H, onset). Reported:
-recall over events, precision over alarms, median lead time, false alarms
-per hour. A constant-alarm cheater scores precision = base rate visibly.
-
-Also trains the FINAL pooled model: HGB-balanced on the 4 working
-families (workload, saturation, queues, request-flow) + dynamics, with
-isotonic calibration fitted on a validation zone (train [0,70%),
-calibrate [70,80%), test [80,100%)).
-
-Trees suit this data (heterogeneous scales, sparse queue gauges,
-heavy tails need no scaling); balanced weights handle 1-2% base rates;
-calibration fixes the probability distortion for operating points.
-
-Run from repo root:
-    python analytics/transition_event.py --csv <10s-tier0> \\
-        --out-dir analytics/data/event
-"""
 
 import argparse
 import json
@@ -65,8 +44,6 @@ def onset_events(cpu, delta, H, refractory=30):
 
 
 def score_alarms(scores, onsets, n, H, step_s=10):
-    """Event-based scoring (vectorized). Onsets: sorted row indices.
-    Hit = alarm inside [onset-H, onset]."""
     onsets = np.asarray(sorted(onsets), dtype=int)
     E = len(onsets)
     hours = n * step_s / 3600.0
@@ -130,7 +107,6 @@ def main():
     feat4 = [c for c in WORKLOAD + SAT + QUEUE + FLOW + DYN if c in df.columns]
     log(f"4-family features: {len(feat4)}")
 
-    # per-service matrices with lags; pooled train/cal/test
     Xtr_l, ytr_l, Xca_l, yca_l, Xte_l, meta = [], [], [], [], [], []
     for svc, g in df.groupby("msname"):
         g = g.reset_index(drop=True)
@@ -173,7 +149,6 @@ def main():
     p_raw = clf.predict_proba(Xte)[:, 1]
     p_calib = iso.predict(p_raw)
 
-    # onset-event scoring per service, then pooled micro-average
     res = {}
     for name, scores in (("raw", p_raw), ("calibrated", p_calib)):
         all_r, all_p, all_fa, all_l = [], [], [], []
@@ -186,14 +161,12 @@ def main():
             r = score_alarms(s, sorted(back[o] for o in ons if o in back),
                              m, H)
             off += m
-            # NOTE: onsets indexed in row space; restrict to test rows
             ev_total += r["n_events"]
             for k in ("pr_auc", "p_at_r50", "p_at_r80",
                       "fa_per_h_at_r50", "fa_per_h_at_r80"):
                 all_r.append(r.get(k, 0) if "pr" in k or "p_at" in k else 0)
             detail[svc] = r
         res[name] = {"n_events": ev_total, "detail": detail}
-    # pooled scoring (single operating curve over all test rows)
     pooled = {}
     for name, scores in (("raw", p_raw), ("calibrated", p_calib)):
         off = 0
@@ -202,7 +175,6 @@ def main():
             m = len(idx)
             s = scores[off:off + m]
             off += m
-            # labels for test rows
             g = df[df.msname == svc].reset_index(drop=True)
             cpu = g["cpu_utilization"].to_numpy(float)
             lab = np.zeros(len(g), dtype=int)
@@ -211,8 +183,6 @@ def main():
             s_all.append(s)
         y_all = np.concatenate(y_all)
         s_all = np.concatenate(s_all)
-        # event-based: rebuild onsets on pooled timeline per service is
-        # complex; use onset list from meta mapped to pooled positions
         po, pl = [], []
         off = 0
         for (svc, idx, ons, n) in meta:
@@ -228,7 +198,6 @@ def main():
     with open(f"{args.out_dir}/event_scores.json", "w") as f:
         json.dump({"pooled": pooled}, f, indent=2)
     log(f"wrote -> {args.out_dir}/event_scores.json")
-    # diagnostics bundle for shuffle-control / single-feature / lead audit
     try:
         np.savez_compressed(
             f"{args.out_dir}/event_diag.npz",
@@ -242,3 +211,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

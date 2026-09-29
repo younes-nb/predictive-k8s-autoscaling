@@ -48,7 +48,6 @@ class SwtDataset(Dataset):
         self.input_len = input_len
         self.pred_horizon = pred_horizon
 
-        # Load metadata from preprocessing
         meta = _load_meta(preprocess_dir)
         self.features = meta["features"]
         self.target_features = meta["target_features"]
@@ -176,3 +175,4 @@ if __name__ == "__main__":
     _smoke_check(args.preprocess_dir, args.split,
                  feature_set=args.feature_set, swt_level=args.swt_level,
                  mem_swt_level=args.mem_swt_level)
+

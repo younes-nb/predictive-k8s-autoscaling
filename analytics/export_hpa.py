@@ -23,8 +23,6 @@ NAMESPACE = "train-ticket"
 
 HPA_TARGET = 0.80
 
-# Rate windows assume the cluster-wide 10s scrape cadence; safe for any
-# --step >= 10s.
 def build_queries(ns, cf):
     return {
     "replicas": {
@@ -116,8 +114,6 @@ def build_queries(ns, cf):
         "labels": ["destination_workload"],
         "extra_labels": ["source_workload"],
     },
-    # Envoy queue gauges (need proxyStatsMatcher widening on the mesh;
-    # silently empty until then — assembly fills 0).
     "Q_ACTIVE_IN": {
         "query": 'sum(envoy_cluster_upstream_rq_active{cluster_name=~"inbound.*"}) by (pod)',
         "labels": ["pod"],
@@ -136,8 +132,6 @@ def build_queries(ns, cf):
     },
 }
 
-# Column names match shared/features.py + build_windows._CSV_COLUMN_MAP
-# identity entries so this CSV feeds --csv_path directly.
 FINAL_COLUMNS = ["timestamp", "msname", "cpu_utilization", "memory_utilization",
                  "replicas", "desired_replicas", "unavailable", "restart_rate",
                  "http_mcr", "providerrpc_mcr", "rps_total", "caller_rps_max",
@@ -190,7 +184,6 @@ def pod_to_deployment(pod):
 
 
 def fetch_range(mimir_url, query, start_ts, end_ts, step_sec):
-    """query_range with chunking (Prometheus caps at 11,000 points/series)."""
     out = {}
     chunk = 10000 * step_sec
     s = int(start_ts)
@@ -242,7 +235,6 @@ def fetch_metric_data(metric_name, query_info, start_ts, end_ts, prom_url):
 
         cols = ["ts"] + query_info["labels"] + extra + [metric_name]
         df = pd.DataFrame(rows, columns=cols)
-        # remote-write retries can deliver the same sample twice; keep last.
         df = df.sort_values("ts").drop_duplicates(
             subset=["ts"] + query_info["labels"] + extra, keep="last")
         if "pod" in query_info["labels"]:
@@ -332,7 +324,6 @@ def fetch_and_process_data(start_ts, end_ts, prom_url, out_path,
         def zeros():
             return pd.Series(0.0, index=idx)
 
-        # per-dep inbound edge series: {dep: {src: series}}
         edge_map = {}
         if "source_workload" in raw["EDGES"].columns:
             for dep, gdep in raw["EDGES"].groupby("entity"):
@@ -393,9 +384,6 @@ def fetch_and_process_data(start_ts, end_ts, prom_url, out_path,
             pb = get(raw["RESP_BYTES"], dep, "RESP_BYTES", fill=0.0)
             full["req_byte_rate"] = rb
             full["resp_byte_rate"] = pb
-            # per-request sizes are meaningless when ~no requests flow
-            # (12% of rows sit below 0.1 rps); mask them to 0 instead of
-            # emitting denominator-blowup values that destabilize training.
             tiny = full["rps_total"] < 0.1
             full["req_bytes_per_req"] = (rb / full["rps_total"].replace(0.0, np.nan)).mask(tiny, 0.0).fillna(0.0).clip(upper=1e6)
             full["resp_bytes_per_req"] = (pb / full["rps_total"].replace(0.0, np.nan)).mask(tiny, 0.0).fillna(0.0).clip(upper=1e6)
@@ -409,7 +397,6 @@ def fetch_and_process_data(start_ts, end_ts, prom_url, out_path,
             full["active_in"] = get(raw["Q_ACTIVE_IN"], dep, "Q_ACTIVE_IN", fill=0.0)
             full["queue_for"] = get(raw["Q_PENDING_OUT"], dep, "Q_PENDING_OUT", fill=0.0)
             full["active_for"] = get(raw["Q_ACTIVE_OUT"], dep, "Q_ACTIVE_OUT", fill=0.0)
-            # call-graph pressure from reporter="source" edges
             inbound = edge_map.get(dep, {})
             if inbound:
                 mat = pd.DataFrame(inbound).fillna(0.0)
@@ -417,10 +404,6 @@ def fetch_and_process_data(start_ts, end_ts, prom_url, out_path,
                 full["caller_rps_max"] = mat.max(axis=1)
                 full["upstream_rps_sum"] = full["caller_sum"]
                 full["n_callers"] = (mat > 1e-9).sum(axis=1).astype(float)
-                # Frontend entry point: legacy "frontend" workload name or the
-                # real ts-ui-dashboard (all external load enters through it;
-                # ingress routes everything to the dashboard since the
-                # frontend-only rewiring).
                 fe_cols = [c for c in ("frontend", "ts-ui-dashboard") if c in mat]
                 full["from_frontend"] = mat[fe_cols].sum(axis=1) if fe_cols else 0.0
             else:
@@ -429,12 +412,10 @@ def fetch_and_process_data(start_ts, end_ts, prom_url, out_path,
                 full["upstream_rps_sum"] = 0.0
                 full["n_callers"] = 0.0
                 full["from_frontend"] = 0.0
-            # time-of-day from the grid (Tehran wall clock)
             minute_of_day = (full.index.tz_convert(tehran_tz).hour * 60
                              + full.index.tz_convert(tehran_tz).minute).to_numpy()
             full["tod_sin"] = np.sin(2 * np.pi * minute_of_day / 1440.0)
             full["tod_cos"] = np.cos(2 * np.pi * minute_of_day / 1440.0)
-            # engineered dynamics (trailing time windows, step-invariant)
             full["rps_slope5"] = slope_last(full["rps_total"], n_slope)
             full["cpu_slope3"] = slope_last(full["cpu_utilization"], n_slope)
             full["mem_delta5"] = full["memory_utilization"].diff(n_slope)
@@ -455,7 +436,6 @@ def fetch_and_process_data(start_ts, end_ts, prom_url, out_path,
         if not base:
             raise SystemExit("No service frames could be assembled.")
 
-        # pass 2: mesh-global broadcasts + neighbour features
         mesh_rps = sum(f["rps_total"].fillna(0.0) for f in base.values())
         fe_name = next((c for c in ("frontend", "ts-ui-dashboard") if c in base), None)
         fe_rps = base[fe_name]["rps_total"].fillna(0.0) if fe_name else mesh_rps * 0.0
@@ -482,13 +462,9 @@ def fetch_and_process_data(start_ts, end_ts, prom_url, out_path,
                         "neigh_rps_z30_mean", "neigh_rps_slope5_mean"):
                 full[_nc] = full[_nc].fillna(0.0)
             full["p99_latency"] = full["p99_latency"].ffill(limit=n_z).fillna(0.0)
-            # every frame carries every FINAL column (missing query -> 0.0)
-            # so window builders never see NaN from absent series.
             for _c in FINAL_COLUMNS:
                 if _c not in ("timestamp", "msname") and _c not in full.columns:
                     full[_c] = 0.0
-            # drop the leading history gap: trailing-window features
-            # (slopes/z/vol/ewma/deltas) are NaN until their window fills.
             hist_cols = ["rps_slope5", "cpu_slope3", "mem_delta5", "rps_z30",
                          "ewma_gap", "vol_rps", "vol_cpu"]
             first_valid = max(full[_c].first_valid_index() for _c in hist_cols)
@@ -664,3 +640,4 @@ if __name__ == "__main__":
 
     fetch_and_process_data(start_timestamp, end_timestamp, args.mimir_url, args.out,
                            args.namespace, args.container_filter)
+

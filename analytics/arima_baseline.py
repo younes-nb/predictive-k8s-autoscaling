@@ -63,14 +63,6 @@ def _parse_order(value):
 
 
 def _near_constant_mask(block, cfg, idx_val, N):
-    """Per-position mask matching training/evaluate.py::_near_constant_valid_indices.
-
-    Position t is kept iff:
-      1. t >= input_len  -- the input window [idx_val+t-input_len, idx_val+t) lies
-         fully inside the test split, exactly like the windows evaluate.py scores
-         (earlier positions have no evaluate.py counterpart), and
-      2. every target channel has std >= NEAR_CONSTANT_STD over that window.
-    """
     input_len = cfg["input_len"]
     keep = np.ones(N, dtype=bool)
     min_t = input_len
@@ -86,7 +78,6 @@ def _near_constant_mask(block, cfg, idx_val, N):
 
 
 def _forecast_channel(series, cfg):
-    """Fit ARIMA on one target channel and multi-step forecast its test segment."""
     H = cfg["horizon"]
     n = int(series.shape[0])
     idx_tr = int(n * cfg["train_frac"])
@@ -141,12 +132,6 @@ def _forecast_channel(series, cfg):
 
 
 def _forecast_target(block, cfg):
-    """Forecast every target channel of one service, dropping near-constant
-    positions (same filter as training/evaluate.py for none/smoothing/swt/cskv).
-
-    Returns (results, n_removed) where results maps target name -> masked
-    (preds, truths, y_last), or (None, n_removed) if nothing was kept.
-    """
     H = cfg["horizon"]
     n = int(block.shape[0])
     idx_tr = int(n * cfg["train_frac"])
@@ -341,3 +326,4 @@ def _worker_init(big):
 
 if __name__ == "__main__":
     main()
+

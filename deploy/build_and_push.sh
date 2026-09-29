@@ -43,3 +43,4 @@ else
     echo -e "${RED}Failed to push image. Are you logged in to the registry?${NC}"
     exit 1
 fi
+

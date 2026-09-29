@@ -61,3 +61,4 @@ if __name__ == "__main__":
     print(f"Reconstruction max error: {rec_error:.6f}")
 
     print("\nAll decomposition smoke checks passed!")
+

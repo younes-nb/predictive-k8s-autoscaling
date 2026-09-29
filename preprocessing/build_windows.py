@@ -56,7 +56,6 @@ _CSV_COLUMN_MAP = {
     "http_mcr": "http_mcr",
     "providerrpc_mcr": "providerrpc_mcr",
     "replicas": "replicas",
-    # Older export columns (previously unused by any csv feature set).
     "p99_latency": "p99_latency",
     "throttle_ratio": "throttle_ratio",
     "net_rx": "net_rx",
@@ -69,8 +68,6 @@ _CSV_COLUMN_MAP = {
     "ewma_gap": "ewma_gap",
     "cpu_slope3": "cpu_slope3",
     "mem_delta5": "mem_delta5",
-    # Infra-native export columns (analytics/export_hpa.py), identity-mapped
-    # for the cpu_ms_infra feature set.
     "desired_replicas": "desired_replicas",
     "unavailable": "unavailable",
     "restart_rate": "restart_rate",
@@ -100,7 +97,6 @@ _CSV_COLUMN_MAP = {
     "node_load_mean": "node_load_mean",
     "node_load_max": "node_load_max",
     "node_cpu_mean": "node_cpu_mean",
-    # Tier-0 spike features (analytics/export_hpa.py), identity-mapped.
     "from_frontend": "from_frontend",
     "frontend_rps": "frontend_rps",
     "mesh_rps": "mesh_rps",
@@ -148,15 +144,10 @@ def _scale_csv_column(values, col, col_stats):
 
 def save_chunk(out_dir, shard_idx, chunk_idx, shard_data, sync=False,
                quantize_cols=None):
-    # shard_data: {split: (Xs, Ys, Ss, Ls)} lists; Ls holds the last observed
-    # target value(s) per window (exact for any stride/split, used by
-    # evaluate for targets outside the model inputs).
     base_name = f"part-{shard_idx:04d}_chunk-{chunk_idx:04d}"
     saved_any = False
 
     try:
-        # Stage in out_dir (same filesystem): the move below becomes an atomic
-        # rename, and we avoid filling /dev/shm when 57 workers write concurrently.
         with tempfile.TemporaryDirectory(dir=out_dir) as tmp_dir:
             tmp_base = os.path.join(tmp_dir, base_name)
 
@@ -164,10 +155,6 @@ def save_chunk(out_dir, shard_idx, chunk_idx, shard_data, sync=False,
                 if Xs:
                     x_arr = np.concatenate(Xs)
                     y_arr = np.concatenate(Ys)
-                    # Round utilization to 1e-2 and store as float16 when every
-                    # channel is a [0,1]-bounded resource feature; mixed feature
-                    # sets (unbounded call-rate columns) stay float32 to avoid
-                    # float16 overflow.
                     if quantize_cols is not None and len(quantize_cols) >= x_arr.shape[-1]:
                         x_arr = _quantize_windows(x_arr)
                     if quantize_cols is not None:
@@ -197,12 +184,6 @@ def save_chunk(out_dir, shard_idx, chunk_idx, shard_data, sync=False,
 
 
 def _part_agg_plan(table_exprs, table_name, time_col):
-    """Return (per-part agg exprs, fold exprs, final exprs) for exact per-part aggregation.
-
-    Per-part frames keep intermediate columns (_s/_c/_l/_t). The fold merge re-aggregates
-    them incrementally (associative for mean/sum/max), keeping at most two part frames in
-    memory; final exprs project the intermediate columns to the real feature names.
-    """
     part_exprs = []
     fold_exprs = []
     final_exprs = []
@@ -263,8 +244,6 @@ def _process_service_group(group_idx, service_ids, args_dict, big, index, target
         return (group_idx, 0, 0.0, True)
 
     t0 = time.time()
-    # arrays = ctx.get("service_arrays")  # not used anymore
-    # big and index are passed as parameters
 
     shard_data = {"train": ([], [], [], []), "val": ([], [], [], []),
                   "test": ([], [], [], [])}
@@ -277,7 +256,6 @@ def _process_service_group(group_idx, service_ids, args_dict, big, index, target
                 continue
             feat_raw = big[pos[0]:pos[0] + pos[1]]
         else:
-            # This branch shouldn't be reached with the new approach
             continue
 
         n = len(feat_raw)
@@ -302,8 +280,6 @@ def _process_service_group(group_idx, service_ids, args_dict, big, index, target
                 ("test", idx_val, n),
             ]
 
-        # Model inputs are the leading input_channels columns; any trailing
-        # target-only channels feed y only and never enter X.
         n_input = args_dict.get("input_channels") or feat_raw.shape[1]
 
         for split_name, start, end in split_configs:
@@ -321,9 +297,6 @@ def _process_service_group(group_idx, service_ids, args_dict, big, index, target
             )
 
             if Xs.size > 0:
-                # Last observed target per window (exact for any stride): window
-                # j starts at starts[j], so its last input minute holds the
-                # persistence reference. Mirrors windowize_multivariate's loop.
                 starts = list(range(0, len(sub_feat) - args_dict["input_len"]
                                     - args_dict["pred_horizon"] + 1,
                                     args_dict["stride"]))
@@ -362,8 +335,6 @@ def _csv_fingerprint(csv_path):
 
 
 def _freq_seconds(freq):
-    """Parse a polars duration string like '1m'/'60s'/'2h' into seconds, or
-    None if it can't be parsed (gap check is then disabled)."""
     if not freq:
         return None
     unit = freq[-1].lower()
@@ -377,10 +348,6 @@ def _freq_seconds(freq):
 
 
 def _split_params(args):
-    """Return split-mode keys for args_dict. With any --*_hours flag set the
-    split is done by hours (each service's rows [0, train_hours), then
-    val_hours, then test_hours; the remainder falls to test); otherwise the
-    classic per-service train/val fractions apply."""
     hours = [args.train_hours, args.val_hours, args.test_hours]
     if any(h is not None for h in hours):
         if args.train_hours is None or args.train_hours <= 0:
@@ -423,15 +390,9 @@ def _arrays_signature(args, base_table):
         "pred_horizon": args.pred_horizon,
         "max_services": args.max_services,
         "subset_seed": args.subset_seed,
-        # A single-service cache is useless for another service: changing
-        # --msname must re-aggregate instead of silently reusing stale arrays.
         "msname": getattr(args, "msname", None),
         "features": list(get_feature_set(args.feature_set)["features"]),
-        # A set redefinition with the same name but different targets must
-        # not reuse stale arrays (e.g. http_time retargeted at cpu).
         "targets": list(get_feature_set(args.feature_set)["targets"]),
-        # Row-order fix: pre-ORDER_V caches hold block-scrambled series from
-        # the streaming join; force one rebuild so windows are time-ordered.
         "order_v": 2,
         "base_parts": fp,
     }
@@ -463,12 +424,6 @@ def _save_service_arrays(service_arrays, arrays_path, index_path, signature,
         off += len(a)
     np.save(arrays_path, big)
     with open(index_path, "w") as f:
-        # Channel order == feature_names order; the simulator maps its
-        # requested features by name instead of assuming a fixed layout.
-        # normalize_mcr records whether train windows were built from
-        # per-service [0,1]-normalized MCR channels (the file itself always
-        # holds raw values); the simulator mirrors the transform so it feeds
-        # the model the same scale it was trained on.
         json.dump({"signature": signature, "index": index,
                    "features": list(feature_names) if feature_names else None,
                    "normalize_mcr": bool(normalize_mcr)}, f)
@@ -481,13 +436,6 @@ def _save_service_arrays(service_arrays, arrays_path, index_path, signature,
 
 def _load_csv_service_arrays(csv_path, feature_names, time_col, id_col,
                              tz_name, input_len, pred_horizon, freq):
-    """Load per-service feature arrays from an HPA-logs CSV.
-
-    Each feature is resolved to a CSV column via _CSV_COLUMN_MAP. Rows are
-    ordered by timestamp (parsed as tz-aware then epoch), and a service is
-    skipped if its timestamps have gaps or duplicates (windowize is positional
-    and would silently misalign rows otherwise).
-    """
     df = pl.read_csv(csv_path)
     df_cols = set(df.columns)
     if time_col not in df_cols or id_col not in df_cols:
@@ -575,8 +523,6 @@ def _load_csv_service_arrays(csv_path, feature_names, time_col, id_col,
 
 def _run_csv_source(args, spec, feature_names, target_indices,
                     resource_indices, num_workers):
-    """CSV-source build: build service arrays from the CSV, then reuse the
-    exact same windows phase as the parquet path."""
     csv_path = args.csv_path
     if not os.path.exists(csv_path):
         raise SystemExit(f"CSV path not found: {csv_path}")
@@ -659,8 +605,6 @@ def _run_csv_source(args, spec, feature_names, target_indices,
             print("No services with enough data in CSV; nothing to do.")
             return
         all_services_list = sorted(service_arrays.keys())
-        # CSV path: _phase_windows never applies --normalize_mcr here (its
-        # args_dict omits the key; CSV MCR columns are pre-scaled at load).
         _save_service_arrays(service_arrays, arrays_path, index_path, signature,
                              feature_names=feature_names, normalize_mcr=False)
 
@@ -702,8 +646,6 @@ def _run_csv_source(args, spec, feature_names, target_indices,
 
 
 def _reexec():
-    """Re-exec a fresh interpreter so the ~50GB aggregation memory is reclaimed
-    (polars/mimalloc arenas are NOT returned to the OS on del/gc)."""
     tail = []
     skip_next = False
     for a in sys.argv[1:]:
@@ -809,16 +751,8 @@ def main():
     spec = get_feature_set(args.feature_set)
     feature_names = list(spec["features"])
     target_features = list(spec["targets"])
-    # Service-array channel order: model inputs first, then any target-only
-    # extras (targets outside the inputs, e.g. cpu for http_time). Windows X
-    # is sliced to the input channels; y comes from target_indices.
     array_features = feature_names + [t for t in target_features if t not in feature_names]
     target_indices = [array_features.index(f) for f in target_features]
-    # Channels stored as float16 rounded to 1e-2: ONLY the raw utilization
-    # levels. Derived dynamics (slopes/deltas/volatility/z-scores/gaps)
-    # carry their signal in small magnitudes that 1e-2 rounding would
-    # destroy, so they are excluded even though their names contain
-    # cpu/mem/rps substrings.
     _DERIVED_SUBSTR = ("slope", "delta", "vel", "acc", "vol", "z30", "gap",
                        "concurrency", "recency")
     resource_indices = [
@@ -921,9 +855,6 @@ def main():
         "feature_set": args.feature_set,
         "resource_indices": resource_indices,
         "normalize_mcr": getattr(args, "normalize_mcr", False),
-        # Model-input width: service arrays may carry extra trailing
-        # target-only channels (targets outside the inputs); X windows use
-        # only these leading input channels. Equals full width normally.
         "input_channels": len(feature_names),
     }
     args_dict.update(_split_params(args))
@@ -936,10 +867,6 @@ def main():
                        groups_to_run, group_size, num_workers,
                        arrays_path, index_path)
     else:
-        # NOTE: array_features (inputs + target-only extras) is passed as the
-        # channel list so target columns are aggregated, stacked, null-dropped
-        # and recorded; X windows are still sliced to the input width inside
-        # _process_service_group via args_dict["input_channels"].
         _phase_aggregate(args, args_dict, target_indices, array_features,
                          table_parts, needed_tables, table_exprs, base_table,
                          effective_id_cols, all_services_list,
@@ -1011,9 +938,6 @@ def _phase_aggregate(args, args_dict, target_indices, feature_names,
         join_on = ["_t"] + join_keys.get(t, [])
         joined = joined.join(t_frame.lazy(), on=join_on, how="left")
 
-    # Derived calendar features (minute/hour/day) come from the truncated
-    # timestamp _t, not from any parquet column. _t is epoch-relative
-    # (t=0 is 00:00 of day 0), so components are exact integer arithmetic.
     derived = [f for f in feature_names if is_derived_feature(f)]
     if derived:
         epoch_ms = pl.col("_t").dt.epoch(time_unit="ms")
@@ -1033,12 +957,6 @@ def _phase_aggregate(args, args_dict, target_indices, feature_names,
         joined = joined.with_columns(derived_exprs)
 
     joined_df = joined.drop_nulls(feature_names).collect(engine="streaming")
-    # The streaming-engine left join above does NOT preserve row order (each
-    # input table is sorted, but the join output is block-scrambled).
-    # Windows/splits are positional, so re-sort by (service, time) here;
-    # group_by(maintain_order=True) below then yields time-ordered series.
-    # NOTE: this changes every window built from joined tables; ORDER_V in
-    # the signature forces a rebuild of pre-fix caches.
     group_cols = [c for c in effective_id_cols if c in joined_df.columns]
     joined_df = joined_df.sort(group_cols + ["_t"])
     print(f"Joined/clean table: {joined_df.height} rows "
@@ -1075,7 +993,6 @@ def _phase_aggregate(args, args_dict, target_indices, feature_names,
         print("No services with enough data after filtering; nothing to do.")
         return
 
-    # Free the big aggregated frames before writing the cache file.
     del agg_frames
     del joined
     gc.collect()
@@ -1095,11 +1012,6 @@ def _phase_windows(args, args_dict, target_indices, all_services_list,
     print(f"Loaded service arrays (mmap): {big.shape[0]} rows x {big.shape[1]} ch, "
           f"{len(index)} services", flush=True)
 
-    # Services shorter than input_len+pred_horizon are dropped during
-    # aggregation, so the discovery list (all parquet services) is normally
-    # a superset of the cache index. Skip those silently-skipped services
-    # here (mirrors _process_service_group's `pos is None: continue`).
-    # Only an explicit --msname miss is fatal (stale cache / wrong service).
     missing = [s for s in all_services_list if s not in index]
     if missing:
         if getattr(args, "msname", None) is not None and args.msname in missing:
@@ -1116,17 +1028,12 @@ def _phase_windows(args, args_dict, target_indices, all_services_list,
 
     feature_names = list(get_feature_set(args_dict["feature_set"])["features"])
     mcr_cols = _mcr_cols_of(feature_names)
-    # Effective scope for the shards built below. CSV input never applies
-    # windows-phase normalization (its MCR columns are pre-scaled at load).
     if getattr(args, "csv_path", None):
         effective_scope = "none"
     elif args_dict.get("normalize_mcr"):
         effective_scope = "per_service"
     else:
         effective_scope = "global"
-    # The scope describes how the shards were scaled; the simulator reads it
-    # back so inference sees the training scale. Persist it whenever shards
-    # are (re)built.
     if mcr_cols and data.get("mcr_norm_scope") != effective_scope:
         data["mcr_norm_scope"] = effective_scope
         with open(index_path, "w") as f:
@@ -1185,9 +1092,6 @@ def _phase_windows(args, args_dict, target_indices, all_services_list,
                                    args_dict["resource_indices"], args.sync, args.out_dir)
             pbar.update(1)
     else:
-        # Retry loop: groups are idempotent (done-marker guarded), so if the pool
-        # breaks (worker OOM-killed/terminated), recreate it and re-run leftovers.
-        # Give up loudly only if the pool breaks 3x with no progress (livelock).
         remaining = {gi: ids for gi, ids in tasks}
         last_progress = len(remaining)
         consecutive_breaks = 0
@@ -1224,3 +1128,4 @@ def _phase_windows(args, args_dict, target_indices, all_services_list,
 
 if __name__ == "__main__":
     main()
+

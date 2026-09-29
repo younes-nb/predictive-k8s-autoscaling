@@ -21,3 +21,4 @@ def build_model(hyperparams, input_size, args, num_targets, device):
         individual=hyperparams.get("individual", False),
         num_targets=num_targets,
     ).to(device)
+

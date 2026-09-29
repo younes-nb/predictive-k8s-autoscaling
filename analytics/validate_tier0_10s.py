@@ -1,23 +1,4 @@
 #!/usr/bin/env python3
-"""Validate Tier-0/Tier-1 features for CPU-transition prediction.
-
-Input: Tier-0 CSV from analytics/export_hpa.py (52 cols, 10s step).
-Per service:
-  A. CCF of every candidate vs cpu at lags 0..60 (does anything lead,
-     especially queue_active/pending?).
-  B. strict spike-precursor test (quiet-then-cross in the 2 min before a
-     CPU spike onset).
-  C. Ridge horizon sweep (10s..10min): persistence vs cpu-history vs
-     +all Tier-0 vs +queue-only ablation — the direct test of whether the
-     Envoy queue gauges unlock prediction.
-  D. spike-onset classifier (logistic, blocked split): PR-AUC +
-     precision@recall>=0.5 with and without queue features.
-
-Run from repo root:
-    python analytics/validate_tier0_10s.py \\
-        --csv /tmp/opencode/newtest/hpa_new_10s.csv \\
-        --out-dir analytics/data/tier0_validate
-"""
 
 import argparse
 import os
@@ -124,7 +105,6 @@ def analyze(csv_path, out_dir):
             for h in (1, 3, 6, 12, 30):
                 row[f"lead_{h}"] = round(cc[h], 3)
             ccf_rows.append(row)
-        # B: strict precursors
         ons = onsets_of(pd.Series(cpu).ffill().bfill().to_numpy())
         for cand in cands:
             xs = pd.Series(g[cand].to_numpy(float)).ffill().bfill()
@@ -144,7 +124,6 @@ def analyze(csv_path, out_dir):
                 service=svc, candidate=cand, n_events=len(ons),
                 hit_rate=round(hits / max(1, len(ons)), 3),
                 median_lead=round(float(np.median(leads)), 1) if leads else None))
-        # C: horizon sweep with queue ablation
         variants = {
             "persist": None,
             "cpu": ["cpu_utilization"],
@@ -179,7 +158,6 @@ def analyze(csv_path, out_dir):
                     float(1 - ((yt - p) ** 2).sum() / ss), 4)
             res["n_test"] = cut
             hor_rows.append(res)
-        # D: spike classifier with/without queue
         if len(ons) < 5:
             continue
         qcols = [c for c in avail_groups.get("queue", [])
@@ -243,3 +221,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

@@ -1,8 +1,4 @@
 #!/bin/bash
-# Train-ticket frontend-only load test (k6).
-#
-# Every request enters through ts-ui-dashboard (the Gateway `/` route);
-# the dashboard fans out to backends. Thin wrapper over load_testing/k6/.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -16,3 +12,4 @@ TEST_MIN="${TEST_MIN:-0}"
 
 export TARGET_URL MCR_CSV MAX_REQUESTS USER_POOL SEED_FILE START_MIN TEST_MIN
 exec bash load_testing/k6/run_k6.sh
+

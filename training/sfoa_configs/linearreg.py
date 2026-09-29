@@ -15,3 +15,4 @@ def build_model(hyperparams, input_size, args, num_targets, device):
         pred_horizon=args.pred_horizon,
         num_targets=num_targets,
     ).to(device)
+

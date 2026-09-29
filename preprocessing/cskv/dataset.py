@@ -21,15 +21,6 @@ MAX_IMFS = 3
 
 
 class CskvDataset(Dataset):
-    """Multi-channel dataset: stacks all Co-IMFs + VMD modes into one input matrix.
-
-    Input shape:  (num_samples, input_len, total_channels)
-    Target shape: (num_samples, pred_horizon)   <-- raw workload signal
-    Last shape:   (num_samples,)                <-- last observed raw value
-
-    Channel layout:
-      [VMD mode 0, ..., VMD mode K-1, Co-IMF 1 (Medium), Co-IMF 2 (Low)]
-    """
 
     def __init__(
         self,
@@ -147,3 +138,4 @@ if __name__ == "__main__":
     ap.add_argument("--split", choices=("train", "val", "test"), default="train")
     args = ap.parse_args()
     _smoke_check(args.preprocess_dir, args.split)
+

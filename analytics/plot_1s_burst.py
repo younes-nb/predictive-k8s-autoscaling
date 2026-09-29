@@ -1,15 +1,4 @@
 #!/usr/bin/env python3
-"""1s burst zoom plot: CPU + deployment MCR + upper-services MCR (no prediction).
-
-Captures live 1s-step Prometheus data (requires 1s scrape on kubelet +
-istio-dataplane), aggregates per DEPLOYMENT (pod->deployment strip, same as
-export_hpa), finds the biggest CPU transition, and draws the same 3-panel
-layout as the 10s report WITHOUT the predicted line, with 1s steps visible.
-
-Run from repo root:
-    python analytics/plot_1s_burst.py --minutes 15 \\
-        --out /tmp/opencode/report10s/plots/burst_1s_zoom_<svc>.png
-"""
 
 import argparse
 import os
@@ -73,7 +62,6 @@ def fetch_range(prom, query, start_ts, end_ts, step="1s"):
 
 
 def frame_by_label(results, label):
-    """{entity: Series indexed by epoch seconds}."""
     out = {}
     for res in results:
         ent = res["metric"].get(label, "")
@@ -116,7 +104,6 @@ def main():
 
     grid = np.arange(int(start), int(end) + 1)
 
-    # per-deployment CPU
     dep_cpu = {}
     for pod, num in cpu_num.items():
         den = cpu_den.get(pod)
@@ -129,14 +116,12 @@ def main():
         dep_cpu.setdefault(dep, []).append(cpu)
     dep_cpu = {d: pd.concat(v, axis=1).mean(axis=1) for d, v in dep_cpu.items() if v}
 
-    # per-workload RPS
     wl_rps = {}
     for wl in set(http) | set(grpc):
         h = http.get(wl, pd.Series(dtype=float)).reindex(grid).fillna(0.0)
         gr = grpc.get(wl, pd.Series(dtype=float)).reindex(grid).fillna(0.0)
         wl_rps[wl] = (h + gr).fillna(0.0)
 
-    # upstream sums per destination workload
     up = {}
     for res in edges:
         dst = res["metric"].get("destination_workload", "")
@@ -150,7 +135,6 @@ def main():
     overlap = sorted(set(dep_cpu) & set(wl_rps))
     log("cpu+rps overlap=%d e.g. %s" % (len(overlap), overlap[:5]))
 
-    # biggest transition over 1s grid (jump_win-second jump)
     JW = args.jump_win
     best = (0.0, None, -1)
     for dep in overlap:
@@ -216,3 +200,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

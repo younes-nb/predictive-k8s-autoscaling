@@ -173,8 +173,6 @@ def _pearson(a, b):
 
 
 def compute_persistence_diagnostics(y_pred_last, y_true_last, y_last, log_info, target_name=None):
-    """Compare the horizon-ahead forecast against the persistence baseline
-    (predicting the current load for the future)."""
     y_pred_last = np.asarray(y_pred_last, dtype=float).ravel()
     y_true_last = np.asarray(y_true_last, dtype=float).ravel()
     y_last = np.asarray(y_last, dtype=float).ravel()
@@ -219,3 +217,4 @@ def compute_persistence_diagnostics(y_pred_last, y_true_last, y_last, log_info, 
         "beat_persistence": beat_persistence,
         "mae_vs_persistence": mae_vs_persistence,
     }
+

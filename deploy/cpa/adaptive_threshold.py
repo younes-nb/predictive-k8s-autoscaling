@@ -123,3 +123,4 @@ def get_adaptive_threshold():
         "bias_mem": bias_mem,
     }
     return threshold, info
+

@@ -14,3 +14,4 @@ def run(cmd, title: str, env: dict | None = None):
     elapsed = time.time() - start
     print(f"=== {title} completed in {elapsed:.2f}s ===")
     return elapsed
+

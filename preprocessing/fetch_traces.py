@@ -59,8 +59,6 @@ _mmap = __import__("mmap")
 
 
 def _odirect_write_stream(proc, csv_path):
-    """Write proc.stdout (decompressed CSV stream) to csv_path using O_DIRECT
-    aligned writes. Returns bytes written or raises on error."""
     BLK = 4 * 1024 * 1024
     fd = os.open(csv_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_DIRECT, 0o644)
     total = 0
@@ -92,7 +90,6 @@ def _odirect_write_stream(proc, csv_path):
 
 def _pool_extract_one(args):
     tar_path, raw_dir, idx, use_pigz, odirect = args
-    # Derive expected CSV name from table prefix (supports Node/MSMetrics/CallGraph)
     table = os.path.basename(raw_dir.rstrip("/"))
     try:
         from config.defaults import DATASET_TABLES as _DT
@@ -104,7 +101,6 @@ def _pool_extract_one(args):
     member = f"{_base}_{idx}.csv"
     try:
         if odirect:
-            # member already set from _base above
             cmd = ["tar", "-xOzf", tar_path, member] if not use_pigz else \
                   ["tar", "-xO", "--use-compress-program=pigz", "-f", tar_path, member]
             stderr_path = csv_path + ".err"
@@ -799,8 +795,6 @@ def main():
         print(f"\n--- Phase 1: Download ---")
         phase1_download(args, needed_tables, all_indices)
 
-    # Ingest any already-extracted CSVs FIRST to free disk space, then the
-    # extract+live-ingest pass handles the rest (batched, deleting CSVs).
     if not args.skip_ingest and not args.skip_extract:
         print(f"\n--- Phase 0: Ingest existing CSVs first ---")
         phase3_ingest(args, needed_tables, all_indices)
@@ -821,3 +815,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

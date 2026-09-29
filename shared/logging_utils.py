@@ -68,3 +68,4 @@ def setup_logging(mode="train", log_path=None, log_dir=None):
     logging.info(f"Log file: {log_path}")
     logging.info(f"Timestamp: {now}")
     return log_path
+

@@ -1,15 +1,4 @@
 #!/usr/bin/env python3
-"""10s BiLSTM report: inference + honest plots/metrics (per deployment).
-
-Runs AFTER training/train.py. Loads the checkpoint, rebuilds the
-per-deployment test series from the raw Tier-0 CSV with the same global
-http/providerrpc scaling as build_windows, runs sliding-window inference,
-picks the deployment with the most test-set transitions
-(|cpu[t+H]-cpu[t]| >= delta), and writes two 3-panel images plus REPORT.md.
-
-All series are per DEPLOYMENT (export_hpa.py maps pod->deployment and
-groupby-means to deployment; CSV msname == deployment).
-"""
 
 import argparse
 import json
@@ -117,8 +106,6 @@ def main():
     H, delta = args.pred_horizon, args.delta
     feat_names = feature_names_for_feature_set(args.feature_set)
 
-    # Exact model inputs: the service-array cache windows were built from
-    # (standardized CSV -> global http/providerrpc [0,1] already applied).
     arr_path = os.path.join(args.windows_dir, "_service_arrays.npy")
     idx_path = os.path.join(args.windows_dir, "_service_index.json")
     big = np.load(arr_path, mmap_mode="r")
@@ -135,9 +122,6 @@ def main():
         log("  feature '%s': %s" % (must, "PRESENT" if must in feat_names else "MISSING!!"))
 
     df = pd.read_csv(args.csv, parse_dates=["timestamp"])
-    # DB/backing services are excluded from HPAs (see AGENTS.md) and their
-    # CPU oscillates at base rates that make jump-label PR meaningless --
-    # restrict the plot selection to autoscalable app deployments.
     EXCLUDE = ("mongo", "mysql", "redis", "rabbit", "postgres", "memcached",
                "elasticsearch", "rabbitmq")
     df = df[~df["msname"].str.lower().str.contains("|".join(EXCLUDE))].copy()
@@ -154,8 +138,6 @@ def main():
             glo[c] = (float(df[c].min()), float(df[c].max()))
 
     def model_matrix(svc, n_expect):
-        # exact training-scale inputs from the cache; alignment to the raw
-        # per-service row order is verified by length + endpoint timestamps
         pos = index.get(svc)
         if pos is None:
             return None
@@ -406,4 +388,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 

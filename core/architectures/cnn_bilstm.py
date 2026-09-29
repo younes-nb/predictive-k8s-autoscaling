@@ -70,3 +70,4 @@ class CnnBiLSTM(nn.Module):
         if self.num_targets > 1:
             return out.view(-1, self.pred_horizon, self.num_targets)
         return out
+

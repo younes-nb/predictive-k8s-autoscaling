@@ -1,18 +1,4 @@
 #!/usr/bin/env python3
-"""Standardize wide-dynamic-range CSV features with train-zone stats.
-
-cpu_ms_infra channels span 1e-4..6e4 (byte rates vs utils) and blow up
-unnormalized LSTM training (NaN loss). This maps every numeric column
-except targets/counts/phases to per-service z-scores fitted on rows
-[0, train_frac) ONLY (no leak: test rows use train params). Stats saved
-beside the output for production reuse.
-
-Kept raw: timestamp, msname, cpu_utilization, memory_utilization
-(targets), replicas, desired_replicas (small ints), tod_sin/cos (phases).
-
-Run from repo root:
-    python analytics/standardize_csv.py --csv in.csv --out out_std.csv
-"""
 
 import argparse
 import json
@@ -65,3 +51,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

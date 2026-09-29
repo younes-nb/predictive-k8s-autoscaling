@@ -1,17 +1,4 @@
 #!/usr/bin/env python
-"""
-EnbPI Training Pipeline
-
-Trains a quantile ensemble forecaster and calibrates it using EnbPI (Ensemble Batch Prediction Intervals)
-from tsbootstrap for distribution-free prediction intervals on time series.
-
-Usage:
-    python training/enbpi_train.py --windows_dir /proj/k8sautoscaledl-PG0/windows \
-        --checkpoint_path /proj/k8sautoscaledl-PG0/models/enbpi_model.pt \
-        --feature_set cpu_mem_http_rpc_replicas --preprocess_approach swt \
-        --input_len 128 --pred_horizon 5 --ensemble_size 5 --n_bootstraps 999 \
-        --cpu --epochs 100 --batch_size 4096
-"""
 
 import os
 import sys
@@ -117,21 +104,17 @@ def _build_model(model_type, input_size, args, num_targets, hyperparams, device)
 
 
 def _compute_quantile_loss(model, preds, y, quantile_weights=None):
-    """Weighted pinball loss for quantile regression."""
-    # preds: (B, H, num_targets, num_quantiles)
-    # y: (B, H, num_targets)
     if preds.dim() == 3:
-        # Single quantile case
         return F.mse_loss(preds, y)
-    
+
     quantiles = torch.tensor(model.quantiles, device=preds.device, dtype=preds.dtype)
-    errors = y.unsqueeze(-1) - preds  # (B, H, T, Q)
+    errors = y.unsqueeze(-1) - preds
     loss = torch.max(quantiles * errors, (quantiles - 1) * errors)
-    
+
     if quantile_weights is not None:
         weights = torch.tensor(quantile_weights, device=preds.device, dtype=preds.dtype)
         loss = loss * weights.view(1, 1, 1, -1)
-    
+
     return loss.mean()
 
 
@@ -251,7 +234,7 @@ def train(args):
             optimizer.zero_grad()
 
             with accelerator.autocast():
-                preds = model(x)  # (B, H, T, Q)
+                preds = model(x)
                 loss = _compute_quantile_loss(model, preds, y, hyperparams.get("quantile_weights"))
 
             accelerator.backward(loss)
@@ -326,14 +309,12 @@ def train(args):
     log_info(f"\nTraining Completed. Best Val Loss: {best_val_loss:.6f}")
     log_info(f"Model Saved to: {args.checkpoint_path}")
 
-    # Fit CQR calibrator on validation residuals (t+5 only)
     if accelerator.is_local_main_process:
         log_info("\n--- Fitting CQR Calibrator (t+5 horizon) ---")
         cqr_calibrators = _fit_cqr_calibrator(
             args, accelerator, best_model_state, val_ds, device, log_info
         )
-        
-        # Save calibrators in checkpoint
+
         if cqr_calibrators:
             best_model_state["cqr_calibrators"] = cqr_calibrators
             best_model_state["cqr_alpha"] = 0.1
@@ -342,12 +323,10 @@ def train(args):
 
 
 def _fit_cqr_calibrator(args, accelerator, best_model_state, val_ds, device, log_info):
-    """Fit CQR (Conformalized Quantile Regression) calibrator on validation residuals for t+5 horizon."""
     if best_model_state is None:
         log_info("No best model state found, skipping CQR calibration")
         return None
 
-    # Load best model
     hyperparams = best_model_state["hyperparams"]
     num_targets = len(target_features_for_feature_set(args.feature_set))
     model = QuantileEnsembleForecaster(
@@ -363,7 +342,6 @@ def _fit_cqr_calibrator(args, accelerator, best_model_state, val_ds, device, log
     model.load_state_dict(best_model_state["model_state_dict"])
     model.eval()
 
-    # Get validation predictions and targets
     val_loader = DataLoader(
         val_ds, batch_size=args.batch_size, shuffle=False,
         num_workers=0 if os.name == "nt" else min(12, os.cpu_count() or 1),
@@ -374,43 +352,40 @@ def _fit_cqr_calibrator(args, accelerator, best_model_state, val_ds, device, log
     with torch.no_grad():
         for x, y, _ in val_loader:
             x = x.to(device).float()
-            preds = model(x)  # (B, H, T, Q)
-            all_q10.append(preds[:, :, :, 0].cpu())   # q0.10
-            all_q50.append(preds[:, :, :, 1].cpu())   # q0.50
-            all_q95.append(preds[:, :, :, 2].cpu())   # q0.95
+            preds = model(x)
+            all_q10.append(preds[:, :, :, 0].cpu())
+            all_q50.append(preds[:, :, :, 1].cpu())
+            all_q95.append(preds[:, :, :, 2].cpu())
             all_y.append(y)
 
-    q10 = torch.cat(all_q10).numpy()   # (N, H, T)
+    q10 = torch.cat(all_q10).numpy()
     q50 = torch.cat(all_q50).numpy()
     q95 = torch.cat(all_q95).numpy()
     y   = torch.cat(all_y).numpy()
 
     log_info(f"Calibration data: {q10.shape[0]} samples")
 
-    # CQR calibration for t+5 only (horizon index 4, 0-indexed)
-    horizon_idx = args.pred_horizon - 1  # t+5 is index 4
-    alpha = 0.1  # 90% coverage
+    horizon_idx = args.pred_horizon - 1
+    alpha = 0.1
 
     calibrators = {}
     for t_idx in range(num_targets):
         target_name = target_features_for_feature_set(args.feature_set)[t_idx]
         log_info(f"Fitting CQR for {target_name} at horizon t+{args.pred_horizon}...")
 
-        # CQR conformity scores: max(0, q10 - y, y - q95)
         scores = np.maximum(0, np.maximum(
             q10[:, horizon_idx, t_idx] - y[:, horizon_idx, t_idx],
             y[:, horizon_idx, t_idx] - q95[:, horizon_idx, t_idx]
         ))
-        
-        # Conformal quantile (using 'higher' for conservative coverage)
+
         q_conf = float(np.quantile(scores, 1 - alpha, method='higher'))
-        
+
         calibrators[t_idx] = {
             'q_conf': q_conf,
             'horizon': args.pred_horizon,
             'alpha': alpha,
         }
-        
+
         log_info(f"  {target_name}: q_conf = {q_conf:.4f}")
 
     return calibrators

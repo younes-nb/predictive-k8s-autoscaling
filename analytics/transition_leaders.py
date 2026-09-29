@@ -1,21 +1,4 @@
 #!/usr/bin/env python3
-"""What leads big transitions? Spike-triggered-average analysis.
-
-For each large cpu jump (|jump over H steps| >= BIG), align all events at
-onset t=0 and average each feature's z-scored trajectory over [-60, +10]
-steps (spike-triggered average, STA). Features that ramp/dip BEFORE t=0
-are leaders; coincident movers peak at 0; laggards after.
-
-Also per feature: quiet-then-cross hit rate, median lead, and alarm
-precision (crossing -> P(event within 12 steps)).
-
-No models, no labels to fit — pure measurement. Answers "what leads"
-before any new model is built.
-
-Run from repo root:
-    python analytics/transition_leaders.py --csv <10s-tier0> \\
-        --out-dir analytics/data/leaders
-"""
 
 import argparse
 import os
@@ -53,7 +36,6 @@ def main():
     df = pd.read_csv(args.csv, parse_dates=["timestamp"])
     feats = [c for c in CANDS if c in df.columns]
 
-    # event scan at several thresholds (pooled app services)
     app = df[~df.msname.str.contains("mongo|mysql")
              & (df.msname != "ts-voucher-service")].reset_index(drop=True)
     counts = {}
@@ -68,10 +50,7 @@ def main():
               default=max(BIG_CANDIDATES))
     log(f"selected BIG={big}")
 
-    # NOTE: STA is descriptive statistics (no model is fit), so events come
-    # from the FULL window — no train/test split needed, no leak possible.
 
-    # collect aligned windows per event (spike + drop separately)
     STA, META = {"spike": {}, "drop": {}}, []
     for svc, g in app.groupby("msname"):
         g = g.reset_index(drop=True)
@@ -86,7 +65,6 @@ def main():
         for direction, cond in (("spike", cpu[H:] - cpu[:-H] >= big),
                                 ("drop", cpu[H:] - cpu[:-H] <= -big)):
             onsets = np.nonzero(cond)[0]
-            # refractory: keep onsets 30+ apart, margins for the window
             keep = []
             last = -10 ** 9
             for o in onsets:
@@ -106,7 +84,7 @@ def main():
 
     rows = []
     for direction in ("spike", "drop"):
-        Z = STA[direction]["zs"]  # (E, PRE+POST, F)
+        Z = STA[direction]["zs"]
         E = Z.shape[0]
         if E < 10:
             continue
@@ -114,12 +92,9 @@ def main():
             curve = np.nanmean(Z[:, :, j], axis=0)
             se = np.nanstd(Z[:, :, j], axis=0) / np.sqrt(max(1, E))
             pre = curve[:PRE]
-            # leader score: max |mean| in [-30, -2] vs null band
             lead_win = np.abs(pre[-30:-2])
             lead_score = float(lead_win.max())
-            lead_at = int(np.argmax(np.abs(pre[-30:-2])) - 30)  # rel to onset
-            # quiet-then-cross: fraction with |z|>2 first crossing in [-24,-1]
-            # after quiet [-48,-24]
+            lead_at = int(np.argmax(np.abs(pre[-30:-2])) - 30)
             hits, leads = 0, []
             for e in range(E):
                 z = Z[e, :, j]
@@ -140,7 +115,6 @@ def main():
     res = pd.DataFrame(rows)
     res.to_csv(f"{args.out_dir}/leaders.csv", index=False)
 
-    # alarm precision: crossings -> event within 12 (pooled, per feature)
     prec_rows = []
     for direction in ("spike", "drop"):
         for j, name in enumerate(feats):
@@ -178,7 +152,6 @@ def main():
                 f"med_lead={row['median_lead']} onset={row['at_onset']:.2f}")
     log(f"wrote -> {args.out_dir}")
 
-    # STA plot data + figure
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -212,3 +185,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

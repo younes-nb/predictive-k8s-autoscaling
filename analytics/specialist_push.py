@@ -1,21 +1,4 @@
 #!/usr/bin/env python3
-"""Specialist push: per-service HGB + control-plane features.
-
-Two changes at once (both with mechanism):
-1. Per-service specialists for the top transition services (pooled models
-   dilute service-specific dynamics; DB/app mixture already showed this).
-2. Control-plane features (replicas, time-since-scale, scale direction,
-   demand=cpu*replicas, demand slope): the zoom shows rectangular
-   scaling-driven excursions; demand is smooth where per-pod mean jumps,
-   letting the model separate artifact moves from load moves. All causal
-   (current/past values only) — no leak.
-
-Compared apples-to-apples: same test rows, pooled-model scores restricted
-to that service vs specialist scores.
-
-Run from repo root:
-    python analytics/specialist_push.py --csv <10s-tier0> --out analytics/data/special
-"""
 
 import argparse
 import os
@@ -50,7 +33,6 @@ def pr_full(y_true, scores):
 
 
 def add_cp_features(g):
-    """Control-plane features, all causal. Returns DataFrame."""
     g = g.copy()
     rep = g["replicas"].to_numpy(float)
     chg = np.nonzero(np.diff(rep) != 0)[0]
@@ -88,7 +70,6 @@ def main():
     cp_cols = ["replicas", "time_since_scale", "scale_dir", "demand",
                "demand_slope"]
 
-    # rank app services by test spike events (H=6)
     counts = []
     per = {}
     for svc, g in df.groupby("msname"):
@@ -153,3 +134,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

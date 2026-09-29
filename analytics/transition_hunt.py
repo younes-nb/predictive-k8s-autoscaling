@@ -1,26 +1,4 @@
 #!/usr/bin/env python3
-"""Full-test transition hunt: analyze the window, then predict transitions.
-
-Part 1 (analysis): per-service inventory — rows, cpu stats, saturation
-    time, spike/drop counts, threshold crossings, scaling events,
-    throttle/queue/error activity, peak RPS (MAX estimate).
-Part 2 (prediction battery, TEST split only, no-leak discipline):
-    labels: spike/drop jumps (delta=0.2) at H in {3,6,12} + threshold
-        exceedance (cpu[t+H]>=0.8 up / <=0.3 down).
-    features: Tier-0 snapshot (all trailing) as base; +bocpd variant adds
-        the causal BOCPD changepoint mass (unsupervised filter, no leak);
-        +gmm adds regime-state posteriors (GMM fitted on TRAIN only).
-    models: balanced HGB event classifiers (pooled + frontend-only).
-    baselines: BOCPD mass alone, velocity extrapolation, cheater audit.
-    operating points: precision at recall {0.5, 0.8} + full PR-AUC.
-
-Success bar (pre-registered): spike recall>=0.8 with precision>=0.15, or
-PR-AUC >= 2x the BOCPD reactor with P@R50>=0.2.
-
-Run from repo root:
-    python analytics/transition_hunt.py --csv <full_10s.csv> \\
-        --out-dir analytics/data/fulltest
-"""
 
 import argparse
 import json
@@ -55,7 +33,6 @@ def pr_full(y_true, scores):
 
 
 def bocpd_mass(x, var, h, hazard=1.0 / 250.0, mu0=None, cap=600):
-    """P(changepoint within last h steps), causal BOCPD (Adams & MacKay)."""
     x = np.asarray(x, float)
     n = len(x)
     if mu0 is None or not np.isfinite(mu0):
@@ -100,7 +77,6 @@ def analyze(csv_path, out_dir):
     log(f"window: {df.timestamp.min()} .. {df.timestamp.max()}")
 
     feat_all = [c for c in df.columns if c not in ("timestamp", "msname")]
-    # ---- Part 1: inventory ----
     inv = []
     for svc, g in df.groupby("msname"):
         g = g.reset_index(drop=True)
@@ -124,7 +100,6 @@ def analyze(csv_path, out_dir):
             replicas=sorted(map(float, np.unique(rep))).copy(),
             n_scales=int((np.diff(rep) != 0).sum()),
         ))
-        # transitions counted on the same grid the models will use
         for h in HS:
             j = cpu[h:] - cpu[:-h]
             inv[-1][f"spike_h{h}"] = int((j >= DELTA).sum())
@@ -139,7 +114,6 @@ def analyze(csv_path, out_dir):
             f"maxrps={r['max_rps']} maxthr={r['max_thr']} "
             f"maxqin={r['max_qin']} maxact={r['max_actin']} rep={r['replicas']}")
 
-    # ---- Part 2: battery ----
     per_svc = {}
     for svc, g in df.groupby("msname"):
         g = g.reset_index(drop=True)
@@ -153,8 +127,6 @@ def analyze(csv_path, out_dir):
         ZF[svc] = (np.arange(n) < int(n * 0.70),
                    np.arange(n) >= int(n * 0.80))
 
-    # BOCPD masses per service/H (causal filter over the FULL series:
-    # unsupervised, uses only past at each t -> no leak).
     log("BOCPD masses ...")
     BC = {}
     for svc, g in per_svc.items():
@@ -164,7 +136,6 @@ def analyze(csv_path, out_dir):
         var = float((1.4826 * np.median(np.abs(np.diff(tr)))) ** 2) + 1e-10
         BC[svc] = {h: bocpd_mass(cpu, var, h) for h in HS}
 
-    # GMM regime states on [cpu, active_in, throttle] (fit TRAIN only).
     log("GMM regimes ...")
     GM = {}
     for svc, g in per_svc.items():
@@ -218,7 +189,6 @@ def analyze(csv_path, out_dir):
                             F = np.concatenate([F, GM[svc]], axis=1)
                         ok = np.isfinite(F).all(axis=1)
                         lab = labels(g, kind, H)
-                        # labels align to rows t with target t+H < n
                         m = np.arange(n - H)
                         tri = m[trm[:n - H]]
                         tei = m[tem[:n - H]]
@@ -251,7 +221,6 @@ def analyze(csv_path, out_dir):
                         f"ev={int(yte.sum())} base={yte.mean():.4f} "
                         f"PR={ap:.3f} P@R50={p50:.3f} P@R80={p80:.3f} "
                         f"({time.time()-t0:.0f}s)")
-    # baselines: BOCPD mass + velocity, pooled, per H/kind
     for H in HS:
         for kind in ("spike", "drop"):
             ys, ss, vs = [], [], []
@@ -280,7 +249,6 @@ def analyze(csv_path, out_dir):
                                     p_at_r50=p50, p_at_r80=p80))
                 log(f"[pooled H={H} {kind:6} {nm:6}] ev={int(y.sum())} "
                     f"PR={ap:.3f} P@R50={p50:.3f} P@R80={p80:.3f}")
-    # cheater audit on pooled spike H=5-ish: constant alarm
     pd.DataFrame(results).to_csv(f"{out_dir}/hunt.csv", index=False)
     log(f"wrote -> {out_dir}/hunt.csv")
 
@@ -295,3 +263,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

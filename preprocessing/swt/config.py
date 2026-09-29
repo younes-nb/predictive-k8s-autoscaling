@@ -16,3 +16,4 @@ def channel_dirs_for(swt_level: int, prefix: str = "") -> List[str]:
     for lv in range(swt_level, 0, -1):
         dirs.append(f"{prefix}D{lv}")
     return dirs
+

@@ -3,7 +3,6 @@ import torch.nn as nn
 
 
 class CausalBlock(nn.Module):
-    """Single causal dilated residual block (edge-preserving: no future leak)."""
 
     def __init__(self, channels, kernel_size=3, dilation=1, dropout=0.1):
         super().__init__()
@@ -14,20 +13,12 @@ class CausalBlock(nn.Module):
         self.drop = nn.Dropout(dropout)
 
     def forward(self, x):
-        # x: (B, C, L); causal left pad so output[t] sees only inputs <= t.
         xp = nn.functional.pad(x, (self.pad, 0))
         out = self.drop(self.relu(self.conv(xp)))
         return out + x
 
 
 class TCNDualHead(nn.Module):
-    """TCN with a level head plus spike/drop event heads (focal training).
-
-    forward(x) -> level forecast (B, H[, T]) exactly like TCNForecaster,
-    so checkpoints stay compatible with level-only scoring.
-    event_logits(x) -> (B, H, 2) raw logits [spike, drop] for the event
-    that the TRUE jump over the input window exceeds +-event_delta.
-    """
 
     def __init__(
         self,
@@ -72,12 +63,6 @@ class TCNDualHead(nn.Module):
 
 
 class TCNForecaster(nn.Module):
-    """Temporal-conv forecaster aimed at cold transitions.
-
-    Dilated causal convolutions give multi-scale edge detectors (sharp
-    level changes surface in early layers) without recurrent state that
-    smooths them away. Head reads the last-step embedding.
-    """
 
     def __init__(
         self,
@@ -112,3 +97,4 @@ class TCNForecaster(nn.Module):
         if self.num_targets > 1:
             return out.view(out.size(0), self.horizon, self.num_targets)
         return out
+
