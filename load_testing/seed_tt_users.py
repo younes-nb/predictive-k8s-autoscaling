@@ -2,7 +2,7 @@
 """Pre-seed train-ticket load users: register + login + contacts.
 
 Writes JSON [{username, password, accountId, token, contactsId}] for the
-locust pool (avoids the on-start registration herd that timeouts auth).
+k6 VU pool (avoids the on-start registration herd that timeouts auth).
 Run from repo root (needs cluster access for the service URLs? No - it
 writes the script; execute via a k8s Job or port-forward). Default simply
 prints the kubectl job manifest.

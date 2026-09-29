@@ -392,7 +392,7 @@ def main():
     L.append("## Workload driver\n")
     L.append("- `nasa_jul13_curve.png`: the NASA Jul-13 24h input curve "
              "(`http_mcr_NASA_jul95.csv`, first 1440 1-min steps, mean 0.23) that paces "
-             "the locust generator (`MAX 5000`, 500 users). The deployment-MCR panels "
+             "the k6 generator (`MAX 5000`, 500 VUs). The deployment-MCR panels "
              "above are the cluster-measured realization of this driver.")
     L.append("## Honest reading\n")
     L.append("- If MAE-ratio >= 1 or event P@R80 ~= base rate, the model adds nothing over "

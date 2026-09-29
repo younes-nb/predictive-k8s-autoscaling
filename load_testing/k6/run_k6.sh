@@ -1,5 +1,5 @@
 #!/bin/bash
-# k6 frontend-only train-ticket load (replaces locust run_test.sh).
+# k6 frontend-only train-ticket load.
 # Same inputs: MCR curve slice paced across the VU pool through the frontend.
 # Metrics stream to Mimir via experimental-prometheus-rw (port-forward below).
 set -euo pipefail

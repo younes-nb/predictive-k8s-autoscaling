@@ -1,7 +1,7 @@
 #!/bin/bash
-# Train-ticket frontend-only load test (k6; replaces the locust driver).
+# Train-ticket frontend-only load test (k6).
 #
-# Every request enters through ts-ui-dashboard (the ingress `/` catch-all);
+# Every request enters through ts-ui-dashboard (the Gateway `/` route);
 # the dashboard fans out to backends. Thin wrapper over load_testing/k6/.
 set -euo pipefail
 cd "$(dirname "$0")/.."

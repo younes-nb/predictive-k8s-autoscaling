@@ -1,9 +1,8 @@
-// Train-ticket frontend-only load (k6 port of trainticket_locustfile.py).
+// Train-ticket frontend-only k6 load.
 //
 // Every request goes to the frontend (HOST) with relative /api/* paths;
-// ts-ui-dashboard proxies to backends. Pacing mirrors the locust driver:
-// per-minute request counts from the MCR curve (v/peak * MAX_REQUESTS),
-// spread evenly across the VU pool.
+// ts-ui-dashboard proxies to backends. Pacing: per-minute request counts
+// from the MCR curve (v/peak * MAX_REQUESTS), spread evenly across the VU pool.
 //
 // Env: HOST, MCR_CSV (abs), MAX_REQUESTS, USER_POOL, SEED_FILE (abs),
 //      START_MIN, TEST_MIN, PW (seed password, default loadtest123).
