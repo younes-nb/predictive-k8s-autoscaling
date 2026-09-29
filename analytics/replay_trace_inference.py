@@ -21,14 +21,6 @@ REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, os.pardir))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-try:
-    from analytics.adaptive_conformal import AdaptiveUpperConformalPerTarget
-    from analytics.spike_metrics import compute_spike_metrics, print_spike_metrics
-    CONFORMAL_AVAILABLE = True
-except ImportError:
-    CONFORMAL_AVAILABLE = False
-    print("Warning: conformal modules not available")
-
 from core.models import RNNForecaster
 from shared.features import (
     feature_names_for_feature_set,
@@ -40,11 +32,10 @@ from preprocessing.swt.decomposition import decompose_window
 from preprocessing.swt.config import CFG as SWT_CFG
 
 RNN_TYPES = ("lstm", "gru", "bilstm", "bigrue")
-BUILDER_TYPES = ("cnn_bilstm", "dpam", "tcn", "tcn_dual", "quantile_ensemble")
+BUILDER_TYPES = ("cnn_bilstm", "dpam", "quantile_ensemble")
 DEFAULT_CSV = "/proj/k8sautoscaledl-PG0/hpa_historical_logs.csv"
 DEFAULT_PLOTS_DIR = "/proj/k8sautoscaledl-PG0/analytics_out"
 TARGET_COLS = ("cpu_utilization", "memory_utilization")
-SPIKE_THRESHOLD_TRAIN = 0.6099
 
 
 def parse_args():
@@ -67,16 +58,6 @@ def parse_args():
                     help="torch device (default: cuda if available else cpu)")
     ap.add_argument("--plots_dir", default=DEFAULT_PLOTS_DIR,
                     help="Directory for plots (default: %(default)s)")
-    ap.add_argument("--adaptive_conformal", action="store_true",
-                    help="Enable online adaptive conformal (upper/lower bounds)")
-    ap.add_argument("--warmup_windows", type=int, default=500,
-                    help="Number of warmup windows to fill conformal buffers (default: %(default)s)")
-    ap.add_argument("--adaptive_window", type=int, default=500,
-                    help="Rolling window size for adaptive conformal (default: %(default)s)")
-    ap.add_argument("--adaptive_eta", type=float, default=0.01,
-                    help="Learning rate for adaptive alpha (default: %(default)s)")
-    ap.add_argument("--spike_threshold", type=float, default=SPIKE_THRESHOLD_TRAIN,
-                    help=f"Spike threshold (default: {SPIKE_THRESHOLD_TRAIN} = train Q0.95)")
     return ap.parse_args()
 
 
@@ -229,9 +210,7 @@ def _apply_swt_per_window(raw_feat, feature_set, input_len, swt_level=None, mem_
 
 def replay(df, model, meta, raw_feat, model_feat, device,
            start_ts=None, end_ts=None, simulate_live=False,
-           use_conformal=False, warmup_windows=500,
-           adaptive_window=500, adaptive_eta=0.01,
-           spike_threshold=0.6099, checkpoint_path=None):
+           checkpoint_path=None):
     input_len = meta["input_len"]
     pred_horizon = meta["pred_horizon"]
     num_targets = meta["num_targets"]
@@ -255,21 +234,8 @@ def replay(df, model, meta, raw_feat, model_feat, device,
     with torch.no_grad():
         model(warmup)
 
-    adaptive_cal = AdaptiveUpperConformalPerTarget(
-        num_targets=num_targets,
-        window_size=adaptive_window,
-        alpha=0.05,
-        eta=adaptive_eta,
-        alpha_min=0.01,
-        alpha_max=0.20,
-    ) if use_conformal and CONFORMAL_AVAILABLE else None
-
-    pending = []
-
     rows = []
     t_total0 = time.perf_counter()
-    warmup_count = 0
-    in_warmup = use_conformal and (warmup_windows > 0)
 
     for idx in range(input_len - 1, n):
         if start_ts is not None and ts[idx] < start_ts:
@@ -286,82 +252,22 @@ def replay(df, model, meta, raw_feat, model_feat, device,
         dt = time.perf_counter() - t0
 
         if preds.dim() == 4:
-            q10 = preds[0, -1, :, 0].cpu().numpy()
             q50 = preds[0, -1, :, 1].cpu().numpy()
-            q95 = preds[0, -1, :, 2].cpu().numpy()
         else:
             if preds.dim() == 3:
                 p = torch.round(preds[0, -1] * 100) / 100
             else:
                 p = torch.round(preds[0] * 100) / 100
             q50 = p.cpu().numpy()
-            q10 = q50.copy()
-            q95 = q50.copy()
 
         pred_cpu = float(np.round(q50[0] * 100) / 100)
         pred_mem = float(np.round(q50[1] * 100) / 100) if num_targets > 1 else float("nan")
 
         lower_cpu, upper_cpu = pred_cpu, pred_cpu
         lower_mem, upper_mem = pred_mem, pred_mem
-        if adaptive_cal is not None:
-            lower_cpu, upper_cpu = adaptive_cal.get_interval(q10, q95)
-            if num_targets > 1:
-                lower_mem, upper_mem = adaptive_cal.get_interval(q10, q95)
 
-        now_ts = pd.Timestamp(ts[idx]).timestamp()
         cpu_actual = float(raw_feat[idx, 0])
         mem_actual = float(raw_feat[idx, 1]) if num_targets > 1 else 0.0
-
-        if in_warmup and warmup_count < warmup_windows:
-            if adaptive_cal is not None:
-                adaptive_cal.states["cpu"].update(float(cpu_actual), float(q10[0]), float(q95[0]))
-                if num_targets > 1:
-                    adaptive_cal.states["memory"].update(float(mem_actual), float(q10[1]), float(q95[1]))
-            warmup_count += 1
-            def to_scalar(x, target_idx=0):
-                if isinstance(x, (np.ndarray, list)):
-                    arr = np.asarray(x)
-                    return float(arr.flat[target_idx]) if arr.size > target_idx else float("nan")
-                return float(x)
-            lc_scalar = to_scalar(lower_cpu, 0)
-            uc_scalar = to_scalar(upper_cpu, 0)
-            lm_scalar = to_scalar(lower_mem, 1) if num_targets > 1 else float("nan")
-            um_scalar = to_scalar(upper_mem, 1) if num_targets > 1 else float("nan")
-            rows.append((ts[idx], cpu_actual, mem_actual, pred_cpu, pred_mem,
-                        lc_scalar, uc_scalar, lm_scalar, um_scalar, dt, True))
-            if simulate_live:
-                time.sleep(max(0.0, 60.0 - dt))
-            t_total = time.perf_counter() - t_total0
-            cols = ["timestamp", "cpu", "memory", "pred_cpu", "pred_mem",
-                    "lower_cpu", "upper_cpu", "lower_mem", "upper_mem",
-                    "inference_time_s", "warmup"]
-            res = pd.DataFrame(rows, columns=cols)
-            continue
-
-        if in_warmup and warmup_count >= warmup_windows:
-            in_warmup = False
-            print(f"[INFO] Warmup complete ({warmup_windows} windows). Starting online test.")
-
-        if not in_warmup:
-            pending.append({
-                "idx": idx,
-                "ts": now_ts,
-                "q10": q10.copy(),
-                "q50": q50.copy(),
-                "q95": q95.copy(),
-            })
-
-        matured = [p for p in pending if p["idx"] <= idx - pred_horizon]
-        if matured and adaptive_cal is not None:
-            for p in matured:
-                actual_idx = int(p["idx"] + pred_horizon)
-                if actual_idx < n:
-                    act_cpu = float(raw_feat[actual_idx, 0])
-                    act_mem = float(raw_feat[actual_idx, 1]) if num_targets > 1 else 0.0
-                    adaptive_cal.states["cpu"].update(act_cpu, p["q10"][0], p["q95"][0])
-                    if num_targets > 1:
-                        adaptive_cal.states["memory"].update(act_mem, p["q10"][1], p["q95"][1])
-            pending = [p for p in pending if p["idx"] > idx - pred_horizon]
 
         def to_scalar(x, target_idx=0):
             if isinstance(x, (np.ndarray, list)):
@@ -375,37 +281,28 @@ def replay(df, model, meta, raw_feat, model_feat, device,
         upper_mem_scalar = to_scalar(upper_mem, 1) if num_targets > 1 else float("nan")
 
         rows.append((ts[idx], cpu_actual, mem_actual, pred_cpu, pred_mem,
-                     lower_cpu_scalar, upper_cpu_scalar, lower_mem_scalar, upper_mem_scalar, dt, False))
+                     lower_cpu_scalar, upper_cpu_scalar, lower_mem_scalar, upper_mem_scalar, dt))
         if simulate_live:
             time.sleep(max(0.0, 60.0 - dt))
     t_total = time.perf_counter() - t_total0
 
     cols = ["timestamp", "cpu", "memory", "pred_cpu", "pred_mem",
             "lower_cpu", "upper_cpu", "lower_mem", "upper_mem",
-            "inference_time_s", "warmup"]
+            "inference_time_s"]
     res = pd.DataFrame(rows, columns=cols)
-    return res, t_total, adaptive_cal
+    return res, t_total
 
 
-def print_metrics(res, pred_horizon, spike_threshold=0.6099):
+def print_metrics(res, pred_horizon):
     print("\n" + "=" * 60)
     print("REPLAY METRICS (pred[t] vs actual[t+%d])" % pred_horizon)
     print("-" * 60)
 
-    if "warmup" in res.columns:
-        test_res = res[res["warmup"] == False].copy()
-        n_warmup = int((res["warmup"] == True).sum())
-        print(f"[INFO] Skipped {n_warmup} warmup windows")
-    else:
-        test_res = res.copy()
+    test_res = res.copy()
 
-    has_conformal = ("lower_cpu" in test_res.columns and 
-                     "upper_cpu" in test_res.columns and 
-                     float((test_res["upper_cpu"] - test_res["lower_cpu"]).abs().sum()) > 0)
-
-    for i, (label, acol, pcol, lcol, ucol) in enumerate([
-        ("CPU", "cpu", "pred_cpu", "lower_cpu", "upper_cpu"),
-        ("Mem", "memory", "pred_mem", "lower_mem", "upper_mem"),
+    for i, (label, acol, pcol) in enumerate([
+        ("CPU", "cpu", "pred_cpu"),
+        ("Mem", "memory", "pred_mem"),
     ]):
         if "pred_mem" not in test_res.columns and i > 0:
             continue
@@ -415,8 +312,6 @@ def print_metrics(res, pred_horizon, spike_threshold=0.6099):
 
         y_arr = test_res[acol].iloc[pred_horizon:].values
         pred_arr = test_res[pcol].iloc[:-pred_horizon].values
-        lower = test_res[lcol].iloc[:-pred_horizon].values
-        upper = test_res[ucol].iloc[:-pred_horizon].values
 
         if len(y_arr) == 0:
             continue
@@ -427,23 +322,9 @@ def print_metrics(res, pred_horizon, spike_threshold=0.6099):
         d = (mae - naive_mae) / naive_mae * 100 if naive_mae > 0 else float("nan")
         print(f"{label:5s}  MSE {mse:.5f}  MAE {mae:.5f} ({mae*100:.2f}%)  naive MAE {naive_mae:.4f}  delta {d:+.1f}%")
 
-        if has_conformal and i == 0:
-            in_interval = (y_arr >= lower) & (y_arr <= upper)
-            picp = float(in_interval.mean())
-            mpiw = float((upper - lower).mean())
-            print(f"{label:5s}  PICP: {picp:.2%}  MPIW: {mpiw:.4f}")
-
-            if CONFORMAL_AVAILABLE:
-                try:
-                    metrics_cpu = compute_spike_metrics(y_arr, lower, upper,
-                                                        spike_threshold=spike_threshold)
-                    print_spike_metrics(metrics_cpu, target_name="CPU(Conformal)")
-                except Exception as e:
-                    print(f"  Spike metrics error: {e}")
-
     inf = test_res["inference_time_s"]
     print("-" * 60)
-    print(f"Test windows: {len(test_res)} (warmup: {n_warmup if 'warmup' in res.columns else 0})")
+    print(f"Test windows: {len(test_res)}")
     print(f"Windows: {len(res)}  |  avg inference {inf.mean()*1e3:.2f} ms  "
           f"|  p95 inference {inf.quantile(0.95)*1e3:.2f} ms")
     print("=" * 60)
@@ -459,43 +340,31 @@ def _style_time_axis(ax, span_hours):
     plt.setp(ax.get_xticklabels(), rotation=30, ha="right")
 
 
-def plot_predictions(res, deployment, pred_horizon, plots_dir, num_targets, use_conformal=False):
+def plot_predictions(res, deployment, pred_horizon, plots_dir, num_targets):
     span_hours = (res["timestamp"].iloc[-1] - res["timestamp"].iloc[0]).total_seconds() / 3600.0
 
     panels = []
     if num_targets > 1:
         panels = [
-            ("CPU", "cpu", "pred_cpu", "lower_cpu", "upper_cpu", "CPU Utilization (fraction of core)"),
-            ("Memory", "memory", "pred_mem", "lower_mem", "upper_mem", "Memory Utilization (fraction of request)"),
+            ("CPU", "cpu", "pred_cpu", "CPU Utilization (fraction of core)"),
+            ("Memory", "memory", "pred_mem", "Memory Utilization (fraction of request)"),
         ]
     else:
-        panels = [("CPU", "cpu", "pred_cpu", "lower_cpu", "upper_cpu", "CPU Utilization (fraction of core)")]
+        panels = [("CPU", "cpu", "pred_cpu", "CPU Utilization (fraction of core)")]
 
     fig, axes = plt.subplots(len(panels), 1, figsize=(18, 6 * len(panels)), sharex=True)
     axes = [axes] if len(panels) == 1 else list(axes)
 
-    for ax, (title, acol, pcol, lcol, ucol, ylabel) in zip(axes, panels):
+    for ax, (title, acol, pcol, ylabel) in zip(axes, panels):
         actual = np.array(res[acol], dtype=float)
         pred = np.array(res[pcol], dtype=float)
-        lower = np.array(res[lcol], dtype=float)
-        upper = np.array(res[ucol], dtype=float)
         pred[~np.isfinite(pred)] = np.nan
 
         ax.plot(res["timestamp"], actual, label="Actual", color="blue", alpha=0.6)
         ax.plot(res["timestamp"], pd.Series(pred).shift(pred_horizon).to_numpy(),
                 label="Predicted (t+%d)" % pred_horizon, color="orange", linestyle="-", alpha=0.9)
-        ax.fill_between(res["timestamp"],
-                        pd.Series(lower).shift(pred_horizon).to_numpy(),
-                        pd.Series(upper).shift(pred_horizon).to_numpy(),
-                        color="gray", alpha=0.2, label="Conformal Interval")
 
-        if "warmup" in res.columns:
-            warmup_mask = res["warmup"].values
-            if warmup_mask.any():
-                ax.axvspan(res["timestamp"].iloc[0], res["timestamp"][warmup_mask].iloc[-1],
-                           alpha=0.1, color="yellow", label="Warmup")
-
-        vmax = max(np.nanmax(actual), np.nanmax(pred), np.nanmax(upper))
+        vmax = max(np.nanmax(actual), np.nanmax(pred))
         ax.set_ylim(0, max(1.0, vmax * 1.1))
         ax.set_title(f"Deployment: {deployment} — {title}", fontweight="bold")
         ax.set_ylabel(ylabel)
@@ -503,7 +372,7 @@ def plot_predictions(res, deployment, pred_horizon, plots_dir, num_targets, use_
         ax.legend(loc="upper left")
         _style_time_axis(ax, span_hours)
 
-    fig.suptitle(f"Replay inference — {deployment} ({res['timestamp'].iloc[0]} to {res['timestamp'].iloc[-1]}) | {'Adaptive Conformal' if use_conformal else 'Raw'}",
+    fig.suptitle(f"Replay inference — {deployment} ({res['timestamp'].iloc[0]} to {res['timestamp'].iloc[-1]}) | Raw",
                  fontsize=14, fontweight="bold")
     fig.tight_layout(rect=[0, 0, 1, 0.96])
 
@@ -566,15 +435,10 @@ def main():
         print(f"Raw feature shape: {feat_raw.shape} (no SWT preprocessing)")
         model_feat = feat_raw
 
-    res, t_total, conformal_state = replay(
+    res, t_total = replay(
         sub, model, meta, feat_raw, model_feat, device,
         start_ts=t_start, end_ts=t_end,
         simulate_live=args.simulate_live,
-        use_conformal=args.adaptive_conformal,
-        warmup_windows=args.warmup_windows if args.adaptive_conformal else 0,
-        adaptive_window=args.adaptive_window,
-        adaptive_eta=args.adaptive_eta,
-        spike_threshold=args.spike_threshold,
         checkpoint_path=args.checkpoint,
     )
     if res.empty:
@@ -585,17 +449,14 @@ def main():
             f"Use later --start_hour or more --hours."
         )
 
-    if "warmup" in res.columns:
-        test_res = res[res["warmup"] == False]
-    else:
-        test_res = res
+    test_res = res
 
     if not test_res.empty:
-        print_metrics(res, meta["pred_horizon"], spike_threshold=args.spike_threshold)
+        print_metrics(res, meta["pred_horizon"])
     print(f"\nReplay wall time: {t_total:.2f}s "
           f"({'real-time' if args.simulate_live else 'fast-forward (add --simulate_live for 1-min pacing)'})")
 
-    plot_predictions(res, args.deployment, meta["pred_horizon"], args.plots_dir, meta["num_targets"], use_conformal=args.adaptive_conformal)
+    plot_predictions(res, args.deployment, meta["pred_horizon"], args.plots_dir, meta["num_targets"])
 
 
 if __name__ == "__main__":

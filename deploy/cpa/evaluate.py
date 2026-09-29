@@ -63,8 +63,6 @@ def main():
         if real_replicas is not None:
             current_replicas = int(real_replicas)
         state = utils.load_state()
-        state.pop("conformal", None)
-        state.pop("conformal_pending", None)
         rec_history = state["history"]
         now = time.time()
         mode = "Reactive"

@@ -22,13 +22,6 @@ REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, os.pardir))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-try:
-    from analytics.adaptive_conformal import AdaptiveUpperConformalPerTarget
-    CONFORMAL_AVAILABLE = True
-except ImportError:
-    CONFORMAL_AVAILABLE = False
-    print("Warning: conformal modules not available")
-
 from core.models import RNNForecaster
 from shared.features import (
     FEATURES,
@@ -44,7 +37,7 @@ from preprocessing.swt.decomposition import decompose_window
 from preprocessing.swt.config import CFG as SWT_CFG
 
 RNN_TYPES = ("lstm", "gru", "bilstm", "bigrue")
-BUILDER_TYPES = ("cnn_bilstm", "dpam", "tcn", "tcn_dual", "quantile_ensemble", "linearreg", "dlinear")
+BUILDER_TYPES = ("cnn_bilstm", "dpam", "quantile_ensemble", "linearreg", "dlinear")
 
 DEFAULT_PLOTS_DIR = "/proj/k8sautoscaledl-PG0/analytics_out"
 DEFAULT_PARQUET_ROOT = "/dataset/parquet"
@@ -69,11 +62,6 @@ def parse_args():
     ap.add_argument("--input_len", type=int, default=None)
     ap.add_argument("--device", default=None)
     ap.add_argument("--plots_dir", default=DEFAULT_PLOTS_DIR)
-    ap.add_argument("--adaptive_conformal", action="store_true")
-    ap.add_argument("--calibration_minutes", type=int, default=200,
-                    help="Minutes before evaluation used for online conformal calibration")
-    ap.add_argument("--adaptive_window", type=int, default=500)
-    ap.add_argument("--adaptive_eta", type=float, default=0.01)
     ap.add_argument("--threshold", type=float, default=BASE_THRESHOLD)
     ap.add_argument("--train_frac", type=float, default=TRAIN_FRAC)
     ap.add_argument("--val_frac", type=float, default=VAL_FRAC)
@@ -509,83 +497,10 @@ def _target_actual_lookup(meta, tgt_actual):
     return tgt_chan, tgt_vec, mem_chan
 
 
-def _run_calibration(raw_feat, model_feat, model, meta, device,
-                     calibration_start, calibration_minutes,
-                     num_targets, adaptive_window, adaptive_eta,
-                     tgt_actual=None):
-    input_len = meta["input_len"]
-    pred_horizon = meta["pred_horizon"]
-    tgt_chan, tgt_vec, mem_chan = _target_actual_lookup(meta, tgt_actual)
-
-    if model_feat.ndim == 2:
-        n_samp = model_feat.shape[0]
-        n_win = n_samp - input_len + 1
-        mw = np.zeros((n_win, input_len, model_feat.shape[1]), dtype=np.float32)
-        for i in range(n_win):
-            mw[i] = model_feat[i:i + input_len]
-    else:
-        mw = model_feat
-
-    cal = AdaptiveUpperConformalPerTarget(
-        num_targets=num_targets, window_size=adaptive_window,
-        alpha=0.05, eta=adaptive_eta, alpha_min=0.01, alpha_max=0.20,
-    )
-
-    pending = []
-    n = raw_feat.shape[0]
-    end_idx = min(calibration_start + calibration_minutes, n)
-
-    for idx in range(calibration_start, end_idx):
-        widx = idx - input_len + 1
-        if widx < 0 or widx >= len(mw):
-            continue
-
-        window = torch.tensor(mw[widx], dtype=torch.float32, device=device).unsqueeze(0)
-        with torch.no_grad():
-            out = model(window)
-        preds = out[0] if isinstance(out, tuple) else out
-
-        if preds.dim() == 4:
-            q10 = preds[0, -1, :, 0].cpu().numpy()
-            q95 = preds[0, -1, :, 2].cpu().numpy()
-        elif preds.dim() == 3:
-            p = torch.round(preds[0, -1] * 100) / 100
-            q10 = p.cpu().numpy()
-            q95 = q10.copy()
-        else:
-            p = torch.round(preds[0] * 100) / 100
-            q10 = p.cpu().numpy().ravel()
-            q95 = q10.copy()
-
-        cpu_actual = float(tgt_vec[idx]) if tgt_vec is not None else float(raw_feat[idx, tgt_chan])
-        mem_actual = float(raw_feat[idx, mem_chan]) if mem_chan is not None else 0.0
-
-        cal.states["cpu"].update(cpu_actual, float(q10[0]), float(q95[0]))
-        if num_targets > 1:
-            cal.states["memory"].update(mem_actual, float(q10[1]), float(q95[1]))
-
-        pending.append({"idx": idx, "q10": q10.copy(), "q95": q95.copy()})
-        matured = [p for p in pending if p["idx"] <= idx - pred_horizon]
-        for p in matured:
-            aidx = int(p["idx"] + pred_horizon)
-            if aidx < n:
-                ac = float(tgt_vec[aidx]) if tgt_vec is not None else float(raw_feat[aidx, tgt_chan])
-                am = float(raw_feat[aidx, mem_chan]) if mem_chan is not None else 0.0
-                cal.states["cpu"].update(ac, p["q10"][0], p["q95"][0])
-                if num_targets > 1:
-                    cal.states["memory"].update(am, p["q10"][1], p["q95"][1])
-        pending = [p for p in pending if p["idx"] > idx - pred_horizon]
-
-    print(f"[INFO] Conformal calibration complete ({end_idx - calibration_start} min)")
-    return cal
-
-
 def simulate_trace(raw_feat, model_feat, model, meta, device,
                    start_idx, n_minutes,
                    threshold=BASE_THRESHOLD,
                    num_targets=2,
-                   adaptive_cal=None,
-                   adaptive_window=500, adaptive_eta=0.01,
                    timestamps=None, tgt_actual=None):
     input_len = meta["input_len"]
     pred_horizon = meta["pred_horizon"]
@@ -604,7 +519,6 @@ def simulate_trace(raw_feat, model_feat, model, meta, device,
     with torch.no_grad():
         model(wt)
 
-    pending = []
     n = raw_feat.shape[0]
     end_idx = min(start_idx + n_minutes, n)
     results = []
@@ -639,27 +553,9 @@ def simulate_trace(raw_feat, model_feat, model, meta, device,
 
         lower_cpu, upper_cpu = pred_cpu, pred_cpu
         lower_mem, upper_mem = pred_mem, pred_mem
-        if adaptive_cal is not None:
-            la, ua = adaptive_cal.get_interval(q10, q95)
-            lower_cpu, upper_cpu = float(la[0]), float(ua[0])
-            if num_targets > 1:
-                lower_mem, upper_mem = float(la[1]), float(ua[1])
 
         cpu_actual = float(tgt_vec[idx]) if tgt_vec is not None else float(raw_feat[idx, tgt_chan])
         mem_actual = float(raw_feat[idx, mem_chan]) if mem_chan is not None else 0.0
-
-        if adaptive_cal is not None:
-            pending.append({"idx": idx, "q10": q10.copy(), "q95": q95.copy()})
-            matured = [p for p in pending if p["idx"] <= idx - pred_horizon]
-            for p in matured:
-                aidx = int(p["idx"] + pred_horizon)
-                if aidx < n:
-                    ac = float(tgt_vec[aidx]) if tgt_vec is not None else float(raw_feat[aidx, tgt_chan])
-                    am = float(raw_feat[aidx, mem_chan]) if mem_chan is not None else 0.0
-                    adaptive_cal.states["cpu"].update(ac, p["q10"][0], p["q95"][0])
-                    if num_targets > 1:
-                        adaptive_cal.states["memory"].update(am, p["q10"][1], p["q95"][1])
-            pending = [p for p in pending if p["idx"] > idx - pred_horizon]
 
         ts_val = pd.Timestamp(timestamps[idx]) if timestamps is not None else None
         results.append({
@@ -779,7 +675,7 @@ def _report_entries(target_features=None):
     return entries
 
 
-def compute_metrics(results, pred_horizon, threshold, use_conformal=False,
+def compute_metrics(results, pred_horizon, threshold,
                     target_features=None):
     df = pd.DataFrame(results)
     if df.empty:
@@ -792,10 +688,7 @@ def compute_metrics(results, pred_horizon, threshold, use_conformal=False,
     for target_name, col_act, col_pred, col_lo, col_hi in _report_entries(target_features):
         actual_all = df[col_act].values.astype(float)
 
-        if use_conformal and col_hi in df.columns:
-            model_pred_all = np.roll(df[col_hi].values.astype(float), pred_horizon)
-        else:
-            model_pred_all = np.roll(df[col_pred].values.astype(float), pred_horizon)
+        model_pred_all = np.roll(df[col_pred].values.astype(float), pred_horizon)
 
         naive_pred_all = actual_all.copy()
 
@@ -872,21 +765,6 @@ def compute_metrics(results, pred_horizon, threshold, use_conformal=False,
         print(f"    Beat-persistence (%)  {beat_persistence:>10.2f}")
         print(f"    MAE vs persistence    {mae_vs_persistence:>10.4f}")
 
-    if use_conformal and "upper_cpu" in df.columns:
-        print(f"\n--- Conformal Interval Quality ---")
-        for tname, col_act, col_lo, col_hi in [
-            (e[0], e[1], e[3], e[4]) for e in _report_entries(target_features)
-        ]:
-            a = df[col_act].values.astype(float)
-            lo = df[col_lo].values.astype(float)
-            hi = df[col_hi].values.astype(float)
-            in_interval = (a >= lo) & (a <= hi)
-            picp = float(np.mean(in_interval))
-            mpiw = float(np.mean(hi - lo))
-            m[f"{tname}_picp"] = picp
-            m[f"{tname}_mpiw"] = mpiw
-            print(f"  {tname.upper()} PICP: {picp:.1%}   MPIW: {mpiw:.6f}")
-
     m["n_evaluation_minutes"] = len(df)
     return m
 
@@ -917,7 +795,7 @@ def _target_display_name(feature_name):
     return feature_name.replace("_", " ").upper()
 
 
-def plot_results(results, msname, plots_dir, pred_horizon, use_conformal, threshold,
+def plot_results(results, msname, plots_dir, pred_horizon, threshold,
                   num_targets=2, raw_feat=None, feature_names=None, start_idx=0,
                   target_features=None):
     df = pd.DataFrame(results)
@@ -1169,27 +1047,6 @@ def main():
 
     timestamps = None
     eval_minutes = n_minutes
-    cal_minutes = args.calibration_minutes if args.adaptive_conformal else 0
-
-    if args.adaptive_conformal:
-        cal_start = test_start - cal_minutes
-        if cal_start < meta["input_len"]:
-            raise SystemExit(
-                f"Not enough data for calibration: test_start={test_start}, "
-                f"calibration_minutes={cal_minutes}, input_len={meta['input_len']}"
-            )
-        print(f"\nCalibration phase: {cal_minutes} min "
-              f"[{cal_start}:{test_start}]")
-        adaptive_cal = _run_calibration(
-            raw_feat, model_feat, model, meta, device,
-            calibration_start=cal_start, calibration_minutes=cal_minutes,
-            num_targets=meta["num_targets"],
-            adaptive_window=args.adaptive_window,
-            adaptive_eta=args.adaptive_eta,
-            tgt_actual=tgt_actual,
-        )
-    else:
-        adaptive_cal = None
 
     print(f"Evaluation phase: {args.hours}h ({eval_minutes} min) "
           f"[{test_start}:{test_start + eval_minutes}]")
@@ -1198,9 +1055,6 @@ def main():
         start_idx=test_start, n_minutes=eval_minutes,
         threshold=args.threshold,
         num_targets=meta["num_targets"],
-        adaptive_cal=adaptive_cal,
-        adaptive_window=args.adaptive_window,
-        adaptive_eta=args.adaptive_eta,
         timestamps=timestamps,
         tgt_actual=tgt_actual,
     )
@@ -1210,7 +1064,6 @@ def main():
 
     report_targets = target_features_for_feature_set(meta["feature_set"])
     metrics = compute_metrics(results, meta["pred_horizon"], args.threshold,
-                              use_conformal=args.adaptive_conformal,
                               target_features=report_targets)
 
     print("\n" + "=" * 72)
@@ -1218,11 +1071,6 @@ def main():
     print("=" * 72)
     print(f"Service: {msname}")
     print(f"Checkpoint: {args.checkpoint}")
-    if args.adaptive_conformal:
-        print(f"Conformal: Yes (calibration={cal_minutes} min, "
-              f"eval={eval_minutes} min)")
-    else:
-        print(f"Conformal: No")
     print(f"Evaluation: {args.hours}h ({metrics.get('n_evaluation_minutes', 0)} min)")
     print("=" * 72)
 
@@ -1232,11 +1080,6 @@ def main():
         print(f"  R² (naive):          {metrics.get(f'{tgt}_R²_naive', 0):>10.4f}")
         print(f"  Beat-persistence:    {metrics.get(f'{tgt}_beat_persistence', 0):>10.2f}%")
         print(f"  ρ(pred, truth):      {metrics.get(f'{tgt}_corr_pred_true', 0):>10.4f}")
-    if args.adaptive_conformal:
-        for tgt, _, _, _, _ in _report_entries(report_targets):
-            if metrics.get(f"{tgt}_picp") is not None:
-                print(f"  {tgt.upper()} PICP: {metrics.get(f'{tgt}_picp', 0):.1%}   "
-                      f"MPIW: {metrics.get(f'{tgt}_mpiw', 0):.6f}")
     print("=" * 72)
 
     os.makedirs(args.plots_dir, exist_ok=True)
@@ -1247,7 +1090,7 @@ def main():
     pd.DataFrame(results).to_csv(csv_path, index=False)
     metrics.update({
         "msname": msname, "checkpoint": args.checkpoint, "hours": args.hours,
-        "threshold": args.threshold, "use_conformal": args.adaptive_conformal,
+        "threshold": args.threshold,
     })
     with open(json_path, "w") as f:
         json.dump(metrics, f, indent=2, default=str)
@@ -1257,7 +1100,7 @@ def main():
 
     feature_names = feature_names_for_feature_set(meta["feature_set"])
     plot_results(results, msname, args.plots_dir, meta["pred_horizon"],
-                 args.adaptive_conformal, args.threshold,
+                 args.threshold,
                  num_targets=meta["num_targets"],
                  raw_feat=raw_feat, feature_names=feature_names,
                  start_idx=test_start, target_features=report_targets)

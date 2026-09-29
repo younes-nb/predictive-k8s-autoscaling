@@ -37,7 +37,7 @@ from training.sfoa_search import run_sfoa_search
 from training.sfoa_configs import get_config
 
 
-MODEL_TYPES = ("lstm", "gru", "bilstm", "bigrue", "cnn_bilstm", "dlinear", "dpam", "linearreg", "tcn", "tcn_focal")
+MODEL_TYPES = ("lstm", "gru", "bilstm", "bigrue", "cnn_bilstm", "dlinear", "dpam", "linearreg")
 PREPROCESS_APPROACHES = ("none", "smoothing", "swt", "cskv")
 
 
@@ -403,36 +403,6 @@ def train(args):
                 f"{tuple(y.shape)}. Check model output dims for "
                 f"feature_set={getattr(args, 'feature_set', '?')}."
             )
-        elif args.loss_mode == "focal_event":
-            if getattr(args, "preprocess_approach", "none") != "none":
-                raise RuntimeError("focal_event requires --preprocess_approach none")
-            from shared.features import feature_names_for_feature_set
-            cpu_idx = feature_names_for_feature_set(args.feature_set).index(
-                "cpu_utilization")
-            x_last = x[:, -1:, cpu_idx:cpu_idx + 1].float()
-            jump = y.float() - x_last
-            delta = float(getattr(args, "event_delta", 0.2))
-            spike_t = (jump >= delta).float()
-            drop_t = (jump <= -delta).float()
-            logits = model.event_logits(x.float())
-            if logits.dim() == 2:
-                logits = logits.unsqueeze(-1).expand(-1, -1, 2)
-            if args.last_step_only:
-                logits = logits[:, -1:, :]
-            alpha = float(getattr(args, "focal_alpha", 0.25))
-            gamma = float(getattr(args, "focal_gamma", 2.0))
-            lam = float(getattr(args, "focal_weight", 1.0))
-
-            def _focal_bce(logit, target):
-                bce = nn.functional.binary_cross_entropy_with_logits(
-                    logit, target, reduction="none")
-                pt = torch.exp(-bce)
-                at = alpha * target + (1 - alpha) * (1 - target)
-                return (at * (1 - pt) ** gamma * bce).mean()
-
-            loss = (nn.functional.mse_loss(preds, y)
-                    + lam * (_focal_bce(logits[..., 0:1], spike_t)
-                             + _focal_bce(logits[..., 1:2], drop_t)) / 2.0)
         elif args.loss_mode == "lds_mse":
             if getattr(args, "preprocess_approach", "none") != "none":
                 raise RuntimeError("lds_mse requires --preprocess_approach none")
@@ -654,22 +624,12 @@ def main():
                    help="Multiplier for CPU underprediction penalty in asymmetric_huber (default 3.0)")
     p.add_argument("--under_weight_mem", type=float, default=1.0,
                    help="Multiplier for memory underprediction penalty in asymmetric_huber (default 1.0)")
-    p.add_argument("--focal_alpha", type=float, default=0.25,
-                   help="Focal-loss class balance for focal_event (default 0.25)")
-    p.add_argument("--focal_gamma", type=float, default=2.0,
-                   help="Focal-loss focusing parameter for focal_event (default 2.0)")
-    p.add_argument("--focal_weight", type=float, default=1.0,
-                   help="Weight of the focal event term in focal_event (default 1.0)")
-    p.add_argument("--event_delta", type=float, default=0.2,
-                   help="Absolute cpu jump defining spike/drop event labels "
-                        "in focal_event (default 0.2)")
     p.add_argument(
         "--loss_mode",
         default="per_target_mse",
-        choices=["joint_mse", "per_target_mse", "per_target_mae", "per_target_huber", "asymmetric_huber", "focal_event", "lds_mse"],
+        choices=["joint_mse", "per_target_mse", "per_target_mae", "per_target_huber", "asymmetric_huber", "lds_mse"],
         help="joint_mse: MSE over all targets. per_target_*: equal-weight per target; "
-             "per_target_mae uses L1 for the memory target. asymmetric_huber penalizes underprediction more. "
-             "focal_event: MSE level loss + focal BCE on spike/drop event heads (tcn_focal).",
+             "per_target_mae uses L1 for the memory target. asymmetric_huber penalizes underprediction more. ",
     )
     p.add_argument("--last_step_only", action=argparse.BooleanOptionalAction, default=True,
                    help="Compute loss only on the final horizon step (H-1); use --no-last_step_only "

@@ -118,50 +118,6 @@ def build_dpam(checkpoint, model_type):
     )
 
 
-def build_tcn(checkpoint, model_type):
-    from core.architectures.tcn import TCNForecaster
-
-    ckpt_args = checkpoint.get("args", {}) or {}
-    hyperparams = checkpoint.get("hyperparams", {}) or {}
-    num_targets = ckpt_args.get("num_targets", config.NUM_TARGETS)
-
-    num_channels = _get(ckpt_args, hyperparams, "num_channels", [64, 64, 64, 64])
-    kernel_size = _get(ckpt_args, hyperparams, "kernel_size", 3)
-    dropout = _get(ckpt_args, hyperparams, "dropout", config.DROPOUT)
-
-    return TCNForecaster(
-        input_size=_input_size(checkpoint, ckpt_args, hyperparams),
-        num_channels=num_channels,
-        kernel_size=kernel_size,
-        dropout=dropout,
-        horizon=_get(ckpt_args, hyperparams, "pred_horizon", config.HORIZON),
-        num_targets=num_targets,
-    )
-
-
-def build_tcn_dual(checkpoint, model_type):
-    from core.architectures.tcn import DualPathTCN
-
-    ckpt_args = checkpoint.get("args", {}) or {}
-    hyperparams = checkpoint.get("hyperparams", {}) or {}
-    num_targets = ckpt_args.get("num_targets", config.NUM_TARGETS)
-
-    num_channels = _get(ckpt_args, hyperparams, "num_channels", [128, 128, 128, 128])
-    kernel_size = _get(ckpt_args, hyperparams, "kernel_size", 3)
-    dropout = _get(ckpt_args, hyperparams, "dropout", config.DROPOUT)
-
-    return DualPathTCN(
-        input_size=_input_size(checkpoint, ckpt_args, hyperparams),
-        cpu_channels=6,
-        mem_channels=6,
-        num_channels=num_channels,
-        kernel_size=kernel_size,
-        dropout=dropout,
-        horizon=_get(ckpt_args, hyperparams, "pred_horizon", config.HORIZON),
-        num_targets=num_targets,
-    )
-
-
 def build_quantile_ensemble(checkpoint, model_type):
     from core.architectures.ensemble import QuantileEnsembleForecaster
 
@@ -179,13 +135,6 @@ def build_quantile_ensemble(checkpoint, model_type):
         quantiles=_get(ckpt_args, hyperparams, "quantiles", [0.10, 0.50, 0.95]),
         ensemble_size=_get(ckpt_args, hyperparams, "ensemble_size", 5),
     )
-
-
-def load_cqr_calibrators(checkpoint) -> dict:
-    cqr_calibrators = checkpoint.get("cqr_calibrators")
-    if cqr_calibrators:
-        return {t_idx: cal.get("q_conf", 0.0) for t_idx, cal in cqr_calibrators.items()}
-    return {}
 
 
 def build_linearreg(checkpoint, model_type):
@@ -228,8 +177,6 @@ BUILDERS = {
     "cnn_bilstm": build_cnn_bilstm,
     "dlinear": build_dlinear,
     "dpam": build_dpam,
-    "tcn": build_tcn,
-    "tcn_dual": build_tcn_dual,
     "quantile_ensemble": build_quantile_ensemble,
     "linearreg": build_linearreg,
 }

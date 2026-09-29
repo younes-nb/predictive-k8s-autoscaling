@@ -114,7 +114,7 @@ def main():
     ap.add_argument(
         "--model_type",
         default="lstm",
-        choices=["lstm", "gru", "bilstm", "bigrue", "cnn_bilstm", "dlinear", "dpam", "linearreg", "tcn", "tcn_focal"],
+        choices=["lstm", "gru", "bilstm", "bigrue", "cnn_bilstm", "dlinear", "dpam", "linearreg"],
         help="Model architecture: lstm/gru (unidirectional), bilstm/bigrue (bidirectional), cnn_bilstm, dlinear (linear decomposition baseline), dpam (DualPathAnchorMixer), linearreg (linear regression)",
     )
     ap.add_argument(
@@ -138,21 +138,11 @@ def main():
     ap.add_argument(
         "--loss_mode",
         default="joint_mse",
-        choices=["joint_mse", "per_target_mse", "per_target_mae", "per_target_huber", "asymmetric_huber", "focal_event", "lds_mse"],
+        choices=["joint_mse", "per_target_mse", "per_target_mae", "per_target_huber", "asymmetric_huber", "lds_mse"],
         help="joint_mse: MSE over all targets. per_target_mae: equal-weight per target with L1 memory loss. "
              "per_target_huber: per-target weighted Huber loss with independent betas (winning loss). "
-             "asymmetric_huber: penalizes underprediction more (for HPA safety). "
-             "focal_event: MSE level + focal BCE on spike/drop heads (tcn_focal).",
+             "asymmetric_huber: penalizes underprediction more (for HPA safety). ",
     )
-    ap.add_argument("--focal_alpha", type=float, default=None,
-                    help="Focal-loss class balance for focal_event (default 0.25)")
-    ap.add_argument("--focal_gamma", type=float, default=None,
-                    help="Focal-loss focusing parameter for focal_event (default 2.0)")
-    ap.add_argument("--focal_weight", type=float, default=None,
-                    help="Weight of the focal event term in focal_event (default 1.0)")
-    ap.add_argument("--event_delta", type=float, default=None,
-                    help="Absolute cpu jump defining spike/drop event labels "
-                         "in focal_event (default 0.2)")
     ap.add_argument("--last_step_only", action=argparse.BooleanOptionalAction, default=True,
                     help="Compute loss only on the final horizon step (H-1); use --no-last_step_only "
                          "to average over all steps (default: on).")
@@ -343,10 +333,6 @@ def main():
             cmd_train.extend(["--under_weight_cpu", str(args.under_weight_cpu)])
         if getattr(args, "under_weight_mem", None) is not None:
             cmd_train.extend(["--under_weight_mem", str(args.under_weight_mem)])
-        for attr in ("focal_alpha", "focal_gamma", "focal_weight", "event_delta"):
-            val = getattr(args, attr, None)
-            if val is not None:
-                cmd_train.extend([f"--{attr}", str(val)])
         if getattr(args, "change_head", False):
             cmd_train.extend(["--change_head"])
         if getattr(args, "change_head_mem", False):

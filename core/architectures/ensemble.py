@@ -21,7 +21,7 @@ class EnsembleForecaster(nn.Module):
         self.ensemble_size = ensemble_size
 
         if model_types is None:
-            model_types = ["lstm", "gru", "bilstm", "tcn", "ridge"]
+            model_types = ["lstm", "gru", "bilstm", "ridge"]
 
         self.models = nn.ModuleList()
         for i, mtype in enumerate(model_types[:ensemble_size]):
@@ -36,8 +36,6 @@ class EnsembleForecaster(nn.Module):
                     dropout=dropout if num_layers > 1 else 0.0,
                     bidirectional=bidirectional,
                 ))
-            elif mtype == "tcn":
-                self.models.append(self._make_tcn(input_size, hidden_size, horizon, num_targets, dropout))
             elif mtype == "ridge":
                 self.models.append(self._make_ridge(input_size, horizon, num_targets))
             else:
@@ -51,30 +49,6 @@ class EnsembleForecaster(nn.Module):
 
         self.ensemble_weights = nn.Parameter(torch.ones(ensemble_size) / ensemble_size)
 
-    def _make_tcn(self, input_size, hidden_size, horizon, num_targets, dropout):
-        class TCNBlock(nn.Module):
-            def __init__(self, in_ch, out_ch, dilation):
-                super().__init__()
-                padding = (3 - 1) * dilation
-                self.conv = nn.Conv1d(in_ch, out_ch, 3, padding=padding, dilation=dilation)
-                self.chomp = nn.Sequential()
-                self.relu = nn.ReLU()
-                self.dropout = nn.Dropout(dropout)
-
-            def forward(self, x):
-                out = self.conv(x)
-                out = out[:, :, :-self.conv.padding[0]]
-                return self.dropout(self.relu(out))
-
-        layers = []
-        in_ch = input_size
-        for i in range(4):
-            dilation = 2 ** i
-            out_ch = hidden_size
-            layers.append(TCNBlock(in_ch, out_ch, dilation))
-            in_ch = out_ch
-        return nn.Sequential(*layers, nn.AdaptiveAvgPool1d(1))
-
     def _make_ridge(self, input_size, horizon, num_targets):
         return nn.Linear(input_size * 128, horizon * num_targets)
 
@@ -86,8 +60,8 @@ class EnsembleForecaster(nn.Module):
                 out = out[:, -1, :]
                 out = self.fc[i](out)
             elif hasattr(model, 'children') and not list(model.children()):
-                x_tcn = x.permute(0, 2, 1)
-                out = model(x_tcn)
+                x_seq = x.permute(0, 2, 1)
+                out = model(x_seq)
                 out = out.squeeze(-1)
                 out = out.view(out.size(0), -1)
             else:
