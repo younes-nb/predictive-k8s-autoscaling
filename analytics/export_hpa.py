@@ -293,7 +293,6 @@ def fetch_and_process_data(start_ts, end_ts, prom_url, out_path,
         for _df in raw.values():
             if "entity" in _df.columns:
                 services.update(_df["entity"].unique().tolist())
-        services.discard("redis-cart")
         services.discard("")
 
         def wins(sec):
@@ -634,8 +633,8 @@ if __name__ == "__main__":
     start_timestamp = parse_time_arg(args.start)
     end_timestamp = parse_time_arg(args.end)
 
-    if args.step < 1:
-        parser.error("--step must be >= 1")
+    if args.step < 10:
+        parser.error("--step must be >= 10 (Prometheus scrape cadence)")
     STEP_SECONDS = args.step
 
     fetch_and_process_data(start_timestamp, end_timestamp, args.mimir_url, args.out,

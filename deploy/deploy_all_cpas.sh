@@ -1,8 +1,8 @@
 #!/bin/bash
 
-NAMESPACE="online-boutique"
+NAMESPACE="train-ticket"
 IMAGE="docker.io/younesnb/predictive-k8s-autoscaler:v1.0.0"
-PROMETHEUS_URL="http://prometheus-stack-kube-prom-prometheus.monitoring.svc.cluster.local:9090"
+PROMETHEUS_URL="http://mimir.monitoring.svc.cluster.local:8080/prometheus"
 FEATURE_SET="cpu_mem_both"
 MODEL_TYPE="dpam"
 PREPROCESS_APPROACH="swt"
@@ -23,7 +23,7 @@ fi
 
 for DEPLOYMENT in $(kubectl get deployments -n $NAMESPACE -o jsonpath='{.items[*].metadata.name}'); do
 
-    if [ "$DEPLOYMENT" == "loadgenerator" ] || [ "$DEPLOYMENT" == "redis-cart" ]; then
+    if [[ "$DEPLOYMENT" == *-mongo ]] || [[ "$DEPLOYMENT" == *-mysql ]] || [ "$DEPLOYMENT" == "ts-voucher-service" ]; then
         continue
     fi
 

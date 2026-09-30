@@ -15,7 +15,6 @@ import torch
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(THIS_DIR, os.pardir))
@@ -37,7 +36,6 @@ from preprocessing.swt.decomposition import decompose_window
 from preprocessing.swt.config import CFG as SWT_CFG
 from preprocessing.build_windows import _CSV_COLUMN_MAP, _CSV_COLUMN_MINMAX
 
-RNN_TYPES = ("lstm", "gru", "bilstm", "bigrue")
 BUILDER_TYPES = ("cnn_bilstm", "dpam", "quantile_ensemble", "linearreg", "dlinear")
 
 DEFAULT_PLOTS_DIR = "/proj/k8sautoscaledl-PG0/analytics_out"
@@ -246,7 +244,6 @@ def load_trace_parquet(parquet_root, feature_set, service_arrays_path=None,
 
 def _load_from_parquet(parquet_root, feature_set):
     import pyarrow.dataset as ds
-    import pyarrow.compute as pc
 
     spec = get_feature_set(feature_set)
     feature_names = spec["features"]
@@ -353,7 +350,8 @@ def _load_from_parquet(parquet_root, feature_set):
 
 
 def select_best_msname(service_data, hours, input_len, pred_horizon,
-                       train_frac, val_frac, max_services=0):
+                       train_frac, val_frac, max_services=0,
+                       cpu_idx=0, mem_idx=1):
     n_minutes = int(hours * 60)
     candidates = []
 
@@ -380,8 +378,8 @@ def select_best_msname(service_data, hours, input_len, pred_horizon,
             cpu = segment["cpu_utilization"].values.astype(float)
             mem = segment["memory_utilization"].values.astype(float) if "memory_utilization" in segment.columns else np.zeros(1)
         else:
-            cpu = segment[:, 0].astype(float)
-            mem = segment[:, 1].astype(float) if segment.shape[1] > 1 else np.zeros(1)
+            cpu = segment[:, cpu_idx].astype(float)
+            mem = segment[:, mem_idx].astype(float) if segment.shape[1] > mem_idx else np.zeros(1)
         score = float(np.std(cpu) + np.std(mem))
         candidates.append((svc_name, score, test_start))
 
@@ -578,17 +576,13 @@ def simulate_trace(raw_feat, model_feat, model, meta, device,
         dt = time.perf_counter() - t0
 
         if preds.dim() == 4:
-            q10 = preds[0, -1, :, 0].cpu().numpy()
             q50 = preds[0, -1, :, 1].cpu().numpy()
-            q95 = preds[0, -1, :, 2].cpu().numpy()
         elif preds.dim() == 3:
             p = torch.round(preds[0, -1] * 100) / 100
             q50 = p.cpu().numpy()
-            q10, q95 = q50.copy(), q50.copy()
         else:
             p = torch.round(preds[0] * 100) / 100
             q50 = p.cpu().numpy().ravel()
-            q10, q95 = q50.copy(), q50.copy()
 
         pred_cpu = float(np.round(q50[0] * 100) / 100)
         pred_mem = float(np.round(q50[1] * 100) / 100) if num_targets > 1 else 0.0
@@ -1046,22 +1040,31 @@ def main():
                 hint = ""
                 if f"MS_{msname}" in service_data:
                     hint = f" Did you mean 'MS_{msname}'?"
+                src_hint = (f"in {args.csv_path}" if ts_map is not None
+                            else f"(cache index: {args.windows_dir or DEFAULT_SERVICE_INDEX}; "
+                            f"if you changed --msname with --skip_preprocessing, rebuild "
+                            f"with --recompute_windows)")
                 raise SystemExit(
                     f"msname '{msname}' not found in data.{hint} "
                     f"Available ({len(available)}): {preview}"
                     f"{'...' if len(available) > 20 else ''} "
-                    f"(cache index: {args.windows_dir or DEFAULT_SERVICE_INDEX}; "
-                    f"if you changed --msname with --skip_preprocessing, rebuild "
-                    f"with --recompute_windows)"
+                    f"{src_hint}"
                 )
         arr = service_data[msname]
         n = arr.shape[0]
         test_start = int(n * (args.train_frac + args.val_frac))
         print(f"Using msname: {msname} (N={n}, test_start={test_start})")
     else:
+        if ts_map is not None:
+            feat_names = feature_names_for_feature_set(meta["feature_set"])
+            cpu_idx = feat_names.index("cpu_utilization") if "cpu_utilization" in feat_names else 0
+            mem_idx = feat_names.index("memory_utilization") if "memory_utilization" in feat_names else 1
+        else:
+            cpu_idx, mem_idx = 0, 1
         msname, test_start = select_best_msname(
             service_data, args.hours, meta["input_len"], meta["pred_horizon"],
             args.train_frac, args.val_frac, max_services=args.max_services,
+            cpu_idx=cpu_idx, mem_idx=mem_idx,
         )
 
     arr = service_data[msname]

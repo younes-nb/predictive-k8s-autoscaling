@@ -15,5 +15,5 @@ spec:
       app.kubernetes.io/managed-by: custom-pod-autoscaler-operator
   namespaceSelector:
     matchNames:
-    - online-boutique
+    - train-ticket
 

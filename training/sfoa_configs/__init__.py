@@ -14,7 +14,6 @@ _REGISTRY = {
     "cnn_bilstm": ("cnn_bilstm", CNN_SEARCH_SPACE, CNN_DEFAULTS, cnn_build_model),
     "dlinear": ("dlinear", DLIN_SEARCH_SPACE, DLIN_DEFAULTS, dlin_build_model),
     "dpam": ("dpam", DPAM_SEARCH_SPACE, DPAM_DEFAULTS, dpam_build_model),
-    "freq_mixer_dualpath": ("dpam", DPAM_SEARCH_SPACE, DPAM_DEFAULTS, dpam_build_model),
     "linearreg": ("linearreg", LR_SEARCH_SPACE, LR_DEFAULTS, lr_build_model),
 }
 

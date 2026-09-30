@@ -1,7 +1,7 @@
 import os
 PROMETHEUS_URL = os.getenv(
     "PROMETHEUS_URL",
-    "http://prometheus-stack-kube-prom-prometheus.monitoring.svc.cluster.local:9090",
+    "http://mimir.monitoring.svc.cluster.local:8080/prometheus",
 )
 NAMESPACE = os.getenv("TARGET_NAMESPACE", "default")
 DEPLOYMENT = os.getenv(
