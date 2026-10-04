@@ -55,6 +55,17 @@ def parse_args():
     ap.add_argument("--parquet_root", default=DEFAULT_PARQUET_ROOT)
     ap.add_argument("--windows_dir", default=None,
                     help="Path to windows directory (contains _service_arrays.npy)")
+    ap.add_argument("--madu_ckpt", default=None,
+                    help="Madu CPM checkpoint (madu/train.py output); enables Madu "
+                         "trace mode plotting predicted CPM/CPU/memory")
+    ap.add_argument("--profile_json", default="/proj/k8sautoscaledl-PG0/madu/profiling.json",
+                    help="§4.2 linear profiling coefficients (madu/profile.py output)")
+    ap.add_argument("--cpm_dir", default="/dataset/ms_call_counts/per_minute")
+    ap.add_argument("--util_parquet",
+                    default="/proj/k8sautoscaledl-PG0/madu/util_per_minute.parquet",
+                    help="Per-minute util aggregation (madu/aggregate_util.py output)")
+    ap.add_argument("--madu_hours", type=float, default=24.0,
+                    help="Hours of test split to plot in Madu mode (default: 24)")
     ap.add_argument("--msname", default=None,
                     help="Specific msname (default: auto-select best)")
     ap.add_argument("--csv_path", default=None,
@@ -71,7 +82,8 @@ def parse_args():
     ap.add_argument("--train_frac", type=float, default=TRAIN_FRAC)
     ap.add_argument("--val_frac", type=float, default=VAL_FRAC)
     ap.add_argument("--max_services", type=int, default=0,
-                    help="Limit auto-select to first N services (0=all)")
+                    help="Limit auto-select candidate pool to first N services (0=all; "
+                         "winner is still the single highest CPU-std service)")
     return ap.parse_args()
 
 
@@ -351,7 +363,9 @@ def _load_from_parquet(parquet_root, feature_set):
 
 def select_best_msname(service_data, hours, input_len, pred_horizon,
                        train_frac, val_frac, max_services=0,
-                       cpu_idx=0, mem_idx=1):
+                       cpu_idx=0):
+    """Pick the single most volatile service, ranked by CPU std over the
+    evaluated test segment. Always returns exactly one msname."""
     n_minutes = int(hours * 60)
     candidates = []
 
@@ -376,11 +390,9 @@ def select_best_msname(service_data, hours, input_len, pred_horizon,
         segment = arr[test_start:test_start + n_minutes]
         if isinstance(segment, pd.DataFrame):
             cpu = segment["cpu_utilization"].values.astype(float)
-            mem = segment["memory_utilization"].values.astype(float) if "memory_utilization" in segment.columns else np.zeros(1)
         else:
             cpu = segment[:, cpu_idx].astype(float)
-            mem = segment[:, mem_idx].astype(float) if segment.shape[1] > mem_idx else np.zeros(1)
-        score = float(np.std(cpu) + np.std(mem))
+        score = float(np.std(cpu))
         candidates.append((svc_name, score, test_start))
 
     if not candidates:
@@ -391,9 +403,9 @@ def select_best_msname(service_data, hours, input_len, pred_horizon,
 
     candidates.sort(key=lambda x: x[1], reverse=True)
     best = candidates[0]
-    print(f"Selected msname: {best[0]} (score={best[1]:.4f}, test_start={best[2]})")
+    print(f"Selected msname: {best[0]} (cpu_std={best[1]:.4f}, test_start={best[2]})")
     if len(candidates) > 1:
-        print(f"  Top 5: {[(c[0], f'{c[1]:.4f}') for c in candidates[:5]]}")
+        print(f"  Top 5 by CPU std: {[(c[0], f'{c[1]:.4f}') for c in candidates[:5]]}")
     return best[0], best[2]
 
 
@@ -833,7 +845,8 @@ def _target_display_name(feature_name):
 
 def plot_results(results, msname, plots_dir, pred_horizon, threshold,
                   num_targets=2, raw_feat=None, feature_names=None, start_idx=0,
-                  target_features=None):
+                  target_features=None, cpm_actual=None, cpm_pred=None,
+                  cpm_label="CPM"):
     df = pd.DataFrame(results)
     has_ts = df["timestamp"].notna().all()
     x = df["timestamp"] if has_ts else np.arange(len(df))
@@ -884,7 +897,8 @@ def plot_results(results, msname, plots_dir, pred_horizon, threshold,
     def _plot_panels(x_vals, actual_c, pred_c, actual_m, pred_m, title_suffix,
                      zoom_start=None, zoom_end=None, filename=None,
                      mcr_vals=None, mark_spikes=False,
-                     spike_threshold=threshold):
+                     spike_threshold=threshold,
+                     cpm_a=None, cpm_p=None):
         if zoom_start is not None:
             mask = np.arange(len(x_vals)) >= zoom_start
             if zoom_end is not None:
@@ -898,6 +912,10 @@ def plot_results(results, msname, plots_dir, pred_horizon, threshold,
                 pred_m = pred_m[mask]
             if mcr_vals is not None:
                 mcr_vals = mcr_vals[mask]
+            if cpm_a is not None:
+                cpm_a = np.asarray(cpm_a)[mask]
+            if cpm_p is not None:
+                cpm_p = np.asarray(cpm_p)[mask]
 
         spike_idx = (np.where(np.asarray(actual_c, dtype=float) > spike_threshold)[0]
                      if mark_spikes else np.zeros(0, dtype=int))
@@ -919,23 +937,20 @@ def plot_results(results, msname, plots_dir, pred_horizon, threshold,
 
         show_mem = has_mem and actual_m is not None and np.any(actual_m)
         show_mcr = mcr_vals is not None and len(mcr_vals) == len(x_vals)
-        n_panels = 2 + (1 if show_mem else 0) + (1 if show_mcr else 0)
+        show_cpm = (cpm_a is not None and cpm_p is not None
+                    and len(cpm_a) == len(x_vals)
+                    and len(cpm_p) == len(x_vals))
+        n_panels = 1 + (1 if show_mem else 0) + (1 if show_mcr else 0) + (1 if show_cpm else 0)
 
         fig, axes = plt.subplots(n_panels, 1, figsize=(22, 4 * n_panels), sharex=True)
+        if n_panels == 1:
+            axes = [axes]
         fig.suptitle(f"{msname} — {title_suffix}\n"
                      f"MSE={np.mean((p_al - a_al)**2):.6f}, "
                      f"MAE={np.mean(np.abs(p_al - a_al)):.6f}",
                      fontsize=13, fontweight="bold", y=0.99)
 
         ai = 0
-        ax = axes[ai]; ai += 1
-        ax.plot(x_vals, actual_c, color='#1976D2', linewidth=1.5, label=f'Actual {tlabel}')
-        ax.plot(x_vals, pred_c, color='#FF5722', linewidth=1.5, alpha=0.8, label=f'Predicted {tlabel}')
-        _spike_lines(ax)
-        ax.set_ylim(0, 1); ax.set_ylabel(tlabel)
-        ax.set_title(f'Predicted vs Actual {tlabel} (unshifted)')
-        ax.legend(); ax.grid(True, alpha=0.2)
-
         ax = axes[ai]; ai += 1
         ax.plot(x_vals, actual_c, color='#1976D2', linewidth=1.5, label=f'Actual {tlabel}')
         if 0 < h < len(x_vals):
@@ -969,9 +984,25 @@ def plot_results(results, msname, plots_dir, pred_horizon, threshold,
             ax.set_ylim(0, 1)
             ax.set_ylabel(mcr_label)
             ax.set_title(mcr_label)
-            ax.set_xlabel('Minute'); ax.legend(); ax.grid(True, alpha=0.2)
-        else:
-            axes[ai - 1].set_xlabel('Minute')
+            ax.legend(); ax.grid(True, alpha=0.2)
+
+        if show_cpm:
+            cpm_a = np.asarray(cpm_a, dtype=float)
+            cpm_p = np.asarray(cpm_p, dtype=float)
+            ax = axes[ai]; ai += 1
+            ax.plot(x_vals, cpm_a, color='#00695C', linewidth=1.5, label=f'Actual {cpm_label}')
+            if 0 < h < len(x_vals):
+                ax.plot(np.asarray(x_vals)[h:], cpm_p[:-h],
+                        color='#FF6F00', linewidth=1.5, alpha=0.8,
+                        label=f'Predicted {cpm_label} (shifted +{h})')
+            else:
+                ax.plot(x_vals, cpm_p, color='#FF6F00', linewidth=1.5, alpha=0.8,
+                        label=f'Predicted {cpm_label}')
+            ax.set_ylabel(cpm_label)
+            ax.set_title(f'Predicted vs Actual {cpm_label} (prediction shifted +{h})')
+            ax.legend(); ax.grid(True, alpha=0.2)
+
+        axes[-1].set_xlabel('Minute')
 
         plt.tight_layout(rect=[0, 0, 1, 0.96])
         filepath = os.path.join(plots_dir, filename)
@@ -985,9 +1016,10 @@ def plot_results(results, msname, plots_dir, pred_horizon, threshold,
     full_path = _plot_panels(
         x_range, actual_cpu, pred_cpu,
         actual_mem, pred_mem,
-        "Full Test Set (unshifted + shifted, h={})".format(pred_horizon),
+        "Full Test Set (shifted, h={})".format(pred_horizon),
         filename=f"trace_eval_{msname}_full_{stamp}.png",
         mcr_vals=mcr_full,
+        cpm_a=cpm_actual, cpm_p=cpm_pred,
     )
 
     zoom_center = _find_zoom_center(actual_cpu)
@@ -1001,15 +1033,138 @@ def plot_results(results, msname, plots_dir, pred_horizon, threshold,
         zoom_start=zoom_start, zoom_end=zoom_end,
         filename=f"trace_eval_{msname}_zoom_{stamp}.png",
         mcr_vals=mcr_full, mark_spikes=True,
+        cpm_a=cpm_actual, cpm_p=cpm_pred,
     )
 
     return full_path, zoom_path
+
+
+def run_madu_trace(args, device):
+    """Madu trace mode: roll a Madu CPM checkpoint over the test split and
+    map predicted CPM to CPU/memory via the §4.2 linear profiles.
+
+    Convention follows the h=1 forecast layout: row at minute m carries the
+    actuals at m and the forecast for m+1 made at m (next-minute head of
+    the Madu decoder). Predicted util uses actual container counts at m+1
+    (documented simplification; a deployment would use planned counts).
+    Returns (results, cpm_actual, cpm_pred, msname).
+    """
+    import torch as _torch
+    from madu.data import prepare_ms, build_feature_matrix
+    from madu.model import MaduSeq2Seq
+
+    ckpt = _torch.load(args.madu_ckpt, map_location=device, weights_only=False)
+    cfg, norm, msname = ckpt["config"], ckpt["norm"], ckpt["msname"]
+    n, m = cfg["n"], cfg["m"]
+    prep = prepare_ms(msname, n, m, args.cpm_dir,
+                      norm["train_frac"], norm["val_frac"], norm["max_minutes"],
+                      norm.get("transform", "max"), norm.get("feat", "paper"),
+                      norm.get("resample", 1), norm.get("resample_how", "mean"))
+    pnorm = prep["norm"]
+
+    def _fwd(a):
+        if pnorm.get("mode") == "log1p":
+            return (np.log1p(a) - pnorm["mean"]) / pnorm["std"]
+        return a / pnorm.get("scale", 1.0)
+
+    def _inv(a):
+        if pnorm.get("mode") == "log1p":
+            return np.maximum(np.expm1(a * pnorm["std"] + pnorm["mean"]), 0.0)
+        return np.maximum(a * pnorm.get("scale", 1.0), 0.0)
+    model = MaduSeq2Seq(input_size=prep["test"][0][0].shape[-1],
+                        hidden_size=cfg["hidden"],
+                        num_layers=cfg["layers"], horizon=m,
+                        attention=cfg["attention"],
+                        uncertainty=cfg["uncertainty"],
+                        dropout=cfg.get("dropout", 0.0)).to(device)
+    model.load_state_dict(ckpt["model_state_dict"])
+    model.eval()
+
+    with open(args.profile_json) as f:
+        prof = json.load(f)[msname]
+
+    grid = prep["series_minutes"]
+    full_cpm = prep["series_cpm"]
+    n_win_total = len(full_cpm) - n - m + 1
+    n_test = len(prep["test_raw"])
+    test_starts = np.arange(n_win_total - n_test, n_win_total)
+
+    H = min(int(args.madu_hours * 60 / max(int(norm.get("resample", 1)), 1)),
+              n_test)
+    test_starts = test_starts[-H:]
+
+    Fall = build_feature_matrix(grid, _fwd(full_cpm).ravel(),
+                                mode=norm.get("feat", "paper"))
+    X = np.stack([Fall[s:s + n] for s in test_starts]).astype(np.float32)
+
+    pred_next = []
+    with _torch.no_grad():
+        for b in range(0, len(X), 1024):
+            xb = _torch.from_numpy(X[b:b + 1024]).to(device)
+            yhat, _, _ = model.predict(xb)
+            pred_next.append(yhat[:, 0].cpu().numpy())
+    pred_next = _inv(np.concatenate(pred_next))
+
+    util = {}
+    import pandas as _pd
+    udf = _pd.read_parquet(args.util_parquet)
+    udf = udf[udf["msname"] == msname]
+    for _, r in udf.iterrows():
+        util[int(r["minute"])] = (float(r["cpu"]), float(r["mem"]), int(r["n_inst"]))
+
+    results, cpm_a, cpm_p = [], [], []
+    for s, fc in zip(test_starts, pred_next):
+        m_now, m_tgt = int(grid[s + n - 1]), int(grid[s + n])
+        if m_now not in util or m_tgt not in util:
+            continue
+        cpu_now, mem_now, _ = util[m_now]
+        _, _, n_inst_tgt = util[m_tgt]
+        per_cont = float(fc) / max(n_inst_tgt, 1)
+        results.append({
+            "timestamp": None,
+            "cpu": cpu_now,
+            "memory": mem_now,
+            "pred_cpu": max(prof["a_cpu"] * per_cont + prof["b_cpu"], 0.0),
+            "pred_mem": max(prof["a_mem"] * per_cont + prof["b_mem"], 0.0),
+            "lower_cpu": 0.0, "upper_cpu": 0.0,
+            "lower_mem": 0.0, "upper_mem": 0.0,
+            "inference_time_s": 0.0,
+        })
+        cpm_a.append(float(full_cpm[s + n - 1]))
+        cpm_p.append(float(fc))
+    print(f"Madu trace: {msname}, {len(results)} plotted minutes "
+          f"(test split, last {args.madu_hours}h)")
+    return results, np.asarray(cpm_a), np.asarray(cpm_p), msname
 
 
 def main():
     args = parse_args()
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
+
+    if args.madu_ckpt:
+        results, cpm_a, cpm_p, msname = run_madu_trace(args, device)
+        if not results:
+            raise SystemExit("No Madu trace results (util/CPM minutes do not overlap).")
+        metrics = compute_metrics(
+            results, 1, args.threshold,
+            target_features=["cpu_utilization", "memory_utilization"])
+        metrics.update({"msname": msname, "madu_ckpt": args.madu_ckpt,
+                        "hours": args.madu_hours})
+        os.makedirs(args.plots_dir, exist_ok=True)
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        pd.DataFrame(results).to_csv(
+            os.path.join(args.plots_dir, f"madu_trace_{msname}_{stamp}.csv"),
+            index=False)
+        with open(os.path.join(args.plots_dir, f"madu_trace_{msname}_{stamp}.json"),
+                  "w") as f:
+            json.dump(metrics, f, indent=2, default=str)
+        plot_results(results, msname, args.plots_dir, 1, args.threshold,
+                     num_targets=2, target_features=["cpu_utilization",
+                                                    "memory_utilization"],
+                     feature_names=["cpu_utilization", "memory_utilization"],
+                     cpm_actual=cpm_a, cpm_pred=cpm_p)
+        return
 
     model, meta = load_model(args.checkpoint, device)
     if args.input_len is not None:
@@ -1058,13 +1213,12 @@ def main():
         if ts_map is not None:
             feat_names = feature_names_for_feature_set(meta["feature_set"])
             cpu_idx = feat_names.index("cpu_utilization") if "cpu_utilization" in feat_names else 0
-            mem_idx = feat_names.index("memory_utilization") if "memory_utilization" in feat_names else 1
         else:
-            cpu_idx, mem_idx = 0, 1
+            cpu_idx = 0
         msname, test_start = select_best_msname(
             service_data, args.hours, meta["input_len"], meta["pred_horizon"],
             args.train_frac, args.val_frac, max_services=args.max_services,
-            cpu_idx=cpu_idx, mem_idx=mem_idx,
+            cpu_idx=cpu_idx,
         )
 
     arr = service_data[msname]
