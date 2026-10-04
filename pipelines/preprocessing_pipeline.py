@@ -59,7 +59,7 @@ def main():
     ap.add_argument(
         "--preprocess_approach",
         default="swt",
-        choices=["none", "smoothing", "swt", "cskv"],
+        choices=["none", "smoothing", "swt", "cskv", "downsample_std"],
         help="Post-processing approach applied after windows are built.",
     )
     ap.add_argument("--csv_path", default=None,
@@ -89,6 +89,16 @@ def main():
                          "train+val+test also fall to test when unset (default).")
     ap.add_argument("--normalize_mcr", action="store_true",
                      help="Normalize MCR features per-service to [0,1] in build_windows")
+    ap.add_argument("--std_bins", type=int, default=50,
+                    help="Std histogram bins for 'downsample_std' (default: %(default)s)")
+    ap.add_argument("--std_sigma", type=float, default=2.0,
+                    help="LDS Gaussian sigma in bins for 'downsample_std' (default: %(default)s)")
+    ap.add_argument("--min_keep", type=float, default=0.1,
+                    help="Keep-probability floor for the densest std bin (default: %(default)s)")
+    ap.add_argument("--downsample_seed", type=int, default=42,
+                    help="RNG seed for 'downsample_std' sampling (default: %(default)s)")
+    ap.add_argument("--downsample_jobs", type=int, default=16,
+                    help="Parallel workers for 'downsample_std' (default: %(default)s)")
     ap.add_argument("--recompute_preprocessing", action="store_true",
                      help="Recompute the preprocessing approach output, ignoring cached shards")
 
@@ -101,6 +111,7 @@ def main():
     ingest_script = os.path.join(REPO_ROOT, "preprocessing", "ingest_traces_parquet.py")
     windows_script = os.path.join(REPO_ROOT, "preprocessing", "build_windows.py")
     smooth_script = os.path.join(REPO_ROOT, "preprocessing", "smooth_windows.py")
+    downsample_script = os.path.join(REPO_ROOT, "preprocessing", "downsample_std_windows.py")
     swt_script = os.path.join(REPO_ROOT, "preprocessing", "swt", "preprocess.py")
     cskv_script = os.path.join(REPO_ROOT, "preprocessing", "cskv", "preprocess.py")
 
@@ -187,6 +198,20 @@ def main():
                 "--smoothing_window", str(args.smooth_window),
             ]
             run(cmd_smooth, "Step 3b: Smoothing")
+        elif args.preprocess_approach == "downsample_std":
+            ds_out = os.path.join(args.windows_dir, "downsample_std")
+            cmd_ds = [sys.executable, downsample_script,
+                      "--windows_dir", args.windows_dir,
+                      "--out_dir", ds_out,
+                      "--feature_set", args.feature_set,
+                      "--std_bins", str(args.std_bins),
+                      "--std_sigma", str(args.std_sigma),
+                      "--min_keep", str(args.min_keep),
+                      "--seed", str(args.downsample_seed),
+                      "--jobs", str(args.downsample_jobs)]
+            if args.recompute_preprocessing:
+                cmd_ds.append("--recompute")
+            run(cmd_ds, "Step 3b: Downsample low-std windows")
         elif args.preprocess_approach == "swt":
             swt_out = os.path.join(args.windows_dir, "swt")
             cmd_swt = [sys.executable, swt_script,

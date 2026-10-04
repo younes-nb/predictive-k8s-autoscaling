@@ -48,7 +48,7 @@ from training.sfoa_configs import get_config
 
 
 MODEL_TYPES = ("lstm", "gru", "bilstm", "bigrue", "cnn_bilstm", "dlinear", "dpam", "linearreg")
-PREPROCESS_APPROACHES = ("none", "smoothing", "swt", "cskv")
+PREPROCESS_APPROACHES = ("none", "smoothing", "swt", "cskv", "downsample_std")
 
 
 SWT_FIELD_MAP = {
@@ -58,6 +58,8 @@ SWT_FIELD_MAP = {
 
 def _preprocess_raw_window(x_np, preprocess_approach, args=None):
     if preprocess_approach == "none":
+        return x_np
+    elif preprocess_approach == "downsample_std":
         return x_np
     elif preprocess_approach == "smoothing":
         from preprocessing.smooth_windows import smooth_array
@@ -232,6 +234,24 @@ def _load_test_dataset(args, ckpt_args, device, log_info, feature_set_name="cpu"
         )
         valid = _near_constant_valid_indices(raw_ds, target_idxs_in_features)
         test_ds = Subset(smooth_ds, valid) if len(valid) < len(smooth_ds) else smooth_ds
+        total_test_samples = len(test_ds)
+        test_ds = head_slice_dataset_by_pct(test_ds, pct)
+        log_info(f"{split.capitalize()} samples (Total): {total_test_samples}")
+        log_info(
+            f"{split.capitalize()} samples (Used):  {len(test_ds)}/{total_test_samples} "
+            f"({float(pct):g}%)"
+        )
+        if len(test_ds) > 0:
+            first_x, *_ = test_ds[0]
+            input_size = first_x.shape[-1]
+        else:
+            input_size = 1
+        return test_ds, input_size
+    elif preprocess_approach == "downsample_std":
+        ds_dir = getattr(args, "preprocess_dir", None) or args.windows_dir
+        test_ds = ShardedWindowsDataset(
+            ds_dir, split, input_len, horizon
+        )
         total_test_samples = len(test_ds)
         test_ds = head_slice_dataset_by_pct(test_ds, pct)
         log_info(f"{split.capitalize()} samples (Total): {total_test_samples}")
@@ -559,7 +579,7 @@ def evaluate(args):
     horizon = ckpt_args.get("pred_horizon", PREPROCESSING.PRED_HORIZON)
     split = args.split
     pct = args.val_pct if split == "val" else args.test_pct
-    if preprocess_approach in ("none", "smoothing"):
+    if preprocess_approach in ("none", "smoothing", "downsample_std"):
         raw_ref = ShardedWindowsDataset(
             args.windows_dir, split, input_len, horizon
         )
@@ -688,7 +708,7 @@ def main():
         default=None,
         help="Train/evaluate only on a specific microservice (msname). Passed through for logging consistency."
     )
-    p.add_argument("--preprocess_dir", default=None, help="Preprocessing output dir (for smoothing/swt/cskv)")
+    p.add_argument("--preprocess_dir", default=None, help="Preprocessing output dir (for smoothing/swt/cskv/downsample_std)")
     p.add_argument("--smoothing_window", type=int, default=5, help="Moving average window size (for 'smoothing' approach)")
     p.add_argument("--seed", type=int, default=TRAINING.SEED, help="Random seed for reproducibility")
     p.add_argument(

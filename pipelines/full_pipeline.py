@@ -108,8 +108,8 @@ def main():
     ap.add_argument(
         "--preprocess_approach",
         default="none",
-        choices=["none", "smoothing", "swt", "cskv"],
-        help="Post-processing: none (raw windows), smoothing (moving avg), swt (SWT), cskv (CEEMDAN+SE+K-means+VMD)",
+        choices=["none", "smoothing", "swt", "cskv", "downsample_std"],
+        help="Post-processing: none (raw windows), smoothing (moving avg), swt (SWT), cskv (CEEMDAN+SE+K-means+VMD), downsample_std (LDS low-std downsample)",
     )
     ap.add_argument(
         "--model_type",
@@ -130,6 +130,11 @@ def main():
                     help="Residual/change injection for the LAST target only "
                          "(memory): keeps a level formulation for the other targets")
     ap.add_argument("--smooth_window", type=int, default=5, help="Moving average window size for 'smoothing' approach (default: %(default)s)")
+    ap.add_argument("--std_bins", type=int, default=50, help="Std histogram bins for 'downsample_std' (default: %(default)s)")
+    ap.add_argument("--std_sigma", type=float, default=2.0, help="LDS Gaussian sigma in bins for 'downsample_std' (default: %(default)s)")
+    ap.add_argument("--min_keep", type=float, default=0.1, help="Keep-probability floor for the densest std bin (default: %(default)s)")
+    ap.add_argument("--downsample_seed", type=int, default=42, help="RNG seed for 'downsample_std' sampling (default: %(default)s)")
+    ap.add_argument("--downsample_jobs", type=int, default=16, help="Parallel workers for 'downsample_std' (default: %(default)s)")
     ap.add_argument("--normalize_mcr", action="store_true",
                     help="Normalize MCR features per-service to [0,1] in build_windows")
     ap.add_argument("--dataset_workers", type=int, default=0, help="Dataloader workers for swt/cskv datasets (default: %(default)s)")
@@ -256,6 +261,11 @@ def main():
             cmd_pre.append("--recompute_preprocessing")
         cmd_pre.extend(["--preprocess_approach", args.preprocess_approach])
         cmd_pre.extend(["--smooth_window", str(args.smooth_window)])
+        cmd_pre.extend(["--std_bins", str(args.std_bins)])
+        cmd_pre.extend(["--std_sigma", str(args.std_sigma)])
+        cmd_pre.extend(["--min_keep", str(args.min_keep)])
+        cmd_pre.extend(["--downsample_seed", str(args.downsample_seed)])
+        cmd_pre.extend(["--downsample_jobs", str(args.downsample_jobs)])
         if args.input_len != PREPROCESSING.INPUT_LEN:
             print(
                 f"\n[INFO] input_len={args.input_len} != default {PREPROCESSING.INPUT_LEN}; "
@@ -308,7 +318,7 @@ def main():
             "SFOA_VAL_PCT": str(args.sfoa_val_pct),
             "SFOA_NUM_WORKERS": str(args.sfoa_num_workers),
         }
-        if args.preprocess_approach in ("swt", "cskv", "smoothing"):
+        if args.preprocess_approach in ("swt", "cskv", "smoothing", "downsample_std"):
             cmd_train.extend(["--preprocess_dir", os.path.join(args.windows_dir, args.preprocess_approach)])
             cmd_train.extend(["--dataset_workers", str(args.dataset_workers)])
         cmd_train.extend(["--model_type", args.model_type])
@@ -381,7 +391,7 @@ def main():
             "SEED": str(args.seed),
             "SMOOTHING_WINDOW": str(args.smooth_window),
         }
-        if args.preprocess_approach in ("swt", "cskv", "smoothing"):
+        if args.preprocess_approach in ("swt", "cskv", "smoothing", "downsample_std"):
             cmd_test.extend(["--preprocess_dir", os.path.join(args.windows_dir, args.preprocess_approach)])
         if args.preprocess_approach == "smoothing":
             cmd_test.extend(["--smoothing_window", str(args.smooth_window)])
