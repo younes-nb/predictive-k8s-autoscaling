@@ -36,7 +36,7 @@ def main():
     ap.add_argument("--skip_profile", action="store_true")
     ap.add_argument("--skip_testing", action="store_true")
     ap.add_argument("--skip_plots", action="store_true")
-    ap.add_argument("--epochs", type=int, default=15)
+    ap.add_argument("--epochs", type=int, default=1000)
     ap.add_argument("--n", type=int, default=60)
     ap.add_argument("--m", type=int, default=5)
     ap.add_argument("--hidden", type=int, default=64)

@@ -22,6 +22,7 @@ if REPO_ROOT not in sys.path:
 from madu.data import prepare_ms, top_ms_names
 from madu.loss import gaussian_nll
 from madu.model import MaduSeq2Seq
+from shared.config_training_defaults import TRAINING
 from shared.logging_utils import setup_logging
 
 
@@ -47,7 +48,13 @@ def train_one_ms(msname, args, device, log_info):
     n_params = sum(p.numel() for p in model.parameters())
     log_info(f"params={n_params:,} attention={args.attention} "
              f"uncertainty={not args.no_uncertainty}")
-    opt = torch.optim.Adam(model.parameters(), lr=args.lr)
+    opt = torch.optim.Adam(model.parameters(), lr=args.lr,
+                           weight_decay=args.weight_decay)
+    scheduler = None
+    if args.lr_scheduler == "ReduceLROnPlateau":
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            opt, mode="min", factor=TRAINING.LR_REDUCE_FACTOR,
+            patience=TRAINING.LR_REDUCE_PATIENCE, min_lr=TRAINING.LR_MIN)
 
     best_val, best_state, patience = float("inf"), None, 0
     for epoch in range(1, args.epochs + 1):
@@ -85,6 +92,8 @@ def train_one_ms(msname, args, device, log_info):
         else:
             patience += 1
         log_info(msg)
+        if scheduler is not None:
+            scheduler.step(va_loss)
         if patience >= args.patience:
             log_info(f"[{msname}] early stopping at epoch {epoch}")
             break
@@ -96,7 +105,12 @@ def train_one_ms(msname, args, device, log_info):
         "config": {"n": args.n, "m": args.m, "hidden": args.hidden,
                    "layers": args.layers, "attention": args.attention,
                    "uncertainty": not args.no_uncertainty,
-                   "dropout": args.dropout},
+                   "dropout": args.dropout, "lr": args.lr,
+                   "weight_decay": args.weight_decay,
+                   "lr_scheduler": args.lr_scheduler,
+                   "batch_size": args.batch_size, "epochs": args.epochs,
+                   "patience": args.patience, "min_delta": args.min_delta,
+                   "seed": args.seed},
         "norm": {**prep["norm"], "train_frac": args.train_frac,
                  "val_frac": args.val_frac, "max_minutes": args.max_minutes,
                  "transform": args.transform, "feat": args.feat,
@@ -120,19 +134,25 @@ def main():
     p.add_argument("--logs_dir", default=None)
     p.add_argument("--n", type=int, default=60, help="Encoder length (paper default 60).")
     p.add_argument("--m", type=int, default=5, help="Decoder/prediction length (paper default 5).")
-    p.add_argument("--hidden", type=int, default=64)
-    p.add_argument("--layers", type=int, default=1)
+    # Training hyperparameters default to shared.config_training_defaults
+    # (env-overridable); --min_delta default 1e-4 per user instruction
+    # (overrides the config's 1e-6 early-stop threshold).
+    p.add_argument("--hidden", type=int, default=TRAINING.HIDDEN_SIZE)
+    p.add_argument("--layers", type=int, default=TRAINING.NUM_LAYERS)
     p.add_argument("--attention", default="stochastic",
                    choices=["stochastic", "deterministic", "none"])
     p.add_argument("--no_uncertainty", action="store_true",
                    help="Deterministic Seq2Seq baseline (MSE, mu head only).")
-    p.add_argument("--dropout", type=float, default=0.0)
-    p.add_argument("--epochs", type=int, default=30)
-    p.add_argument("--batch_size", type=int, default=256)
-    p.add_argument("--lr", type=float, default=1e-3)
-    p.add_argument("--grad_clip", type=float, default=1.0)
-    p.add_argument("--patience", type=int, default=5)
-    p.add_argument("--min_delta", type=float, default=1e-5)
+    p.add_argument("--dropout", type=float, default=TRAINING.DROPOUT)
+    p.add_argument("--epochs", type=int, default=TRAINING.EPOCHS)
+    p.add_argument("--batch_size", type=int, default=TRAINING.BATCH_SIZE)
+    p.add_argument("--lr", type=float, default=TRAINING.LR)
+    p.add_argument("--weight_decay", type=float, default=TRAINING.WEIGHT_DECAY)
+    p.add_argument("--lr_scheduler", default=TRAINING.LR_SCHEDULER,
+                   choices=["ReduceLROnPlateau", "none"])
+    p.add_argument("--grad_clip", type=float, default=TRAINING.GRAD_CLIP)
+    p.add_argument("--patience", type=int, default=TRAINING.EARLY_STOP_PATIENCE)
+    p.add_argument("--min_delta", type=float, default=1e-4)
     p.add_argument("--train_frac", type=float, default=0.7)
     p.add_argument("--val_frac", type=float, default=0.1)
     p.add_argument("--max_minutes", type=int, default=0,
@@ -148,8 +168,8 @@ def main():
                         "isolated single-minute spikes (default 1 = off).")
     p.add_argument("--resample_how", default="mean", choices=["mean", "max"],
                    help="Bin aggregation: mean or max (peak).")
-    p.add_argument("--num_workers", type=int, default=0)
-    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--num_workers", type=int, default=TRAINING.NUM_WORKERS)
+    p.add_argument("--seed", type=int, default=TRAINING.SEED)
     p.add_argument("--cpu", action="store_true")
     p.add_argument("--skip_existing", action="store_true",
                    help="Skip MSs whose checkpoint already exists (resume).")

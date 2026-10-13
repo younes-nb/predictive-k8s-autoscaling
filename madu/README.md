@@ -69,8 +69,13 @@ util uses actual container counts at m+1).
   `--arima_refit` windows on trailing history, frozen AR params recursed
   between refits (exact for multi-step AR); per-window refits are infeasible.
 - BNN/DUBNN baselines omitted (prior work, not the paper's contribution).
-- Hidden size/layers (default 64/1) and LR schedule are unspecified in the
-  paper; chosen for a ~60k-param model trainable on 1 GPU.
+- Training hyperparameters follow `shared/config_training_defaults.py`
+  (`--hidden 64 --layers 3 --dropout 0.5 --batch_size 4096 --lr 5e-4
+  --epochs 1000 --patience 20`, ReduceLROnPlateau scheduler,
+  weight decay 1e-4, seed 42; `--min_delta 1e-4` per user instruction,
+  overriding the config's 1e-6). The paper specifies none of these
+  (only a 100-3000 training-step curve); the 64/3-layer model has
+  ~127k params.
 - Added (beyond paper): `--transform log1p` (z-scored log1p CPM; required
   for bursty MSs where max-scaling collapses typical values to ~1e-5),
   `--feat full` (+cyclic time + rolling mean/std), `--resample N
