@@ -1039,15 +1039,12 @@ def plot_results(results, msname, plots_dir, pred_horizon, threshold,
     return full_path, zoom_path
 
 
-def run_madu_trace(args, device):
-    """Madu trace mode: roll a Madu CPM checkpoint over the test split and
-    map predicted CPM to CPU/memory via the §4.2 linear profiles.
+def madu_rollout(args, device):
+    """Shared rollout core: roll a Madu CPM checkpoint over the test split.
 
-    Convention follows the h=1 forecast layout: row at minute m carries the
-    actuals at m and the forecast for m+1 made at m (next-minute head of
-    the Madu decoder). Predicted util uses actual container counts at m+1
-    (documented simplification; a deployment would use planned counts).
-    Returns (results, cpm_actual, cpm_pred, msname).
+    Returns dict(msname, cfg, norm, test_starts, pred_next, full_cpm, grid).
+    `pred_next[k]` = next-minute CPM forecast for `full_cpm[s+n]` with
+    `s = test_starts[k]` (h=1 head of the decoder).
     """
     import torch as _torch
     from madu.data import prepare_ms, build_feature_matrix
@@ -1080,9 +1077,6 @@ def run_madu_trace(args, device):
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
 
-    with open(args.profile_json) as f:
-        prof = json.load(f)[msname]
-
     grid = prep["series_minutes"]
     full_cpm = prep["series_cpm"]
     n_win_total = len(full_cpm) - n - m + 1
@@ -1104,10 +1098,36 @@ def run_madu_trace(args, device):
             yhat, _, _ = model.predict(xb)
             pred_next.append(yhat[:, 0].cpu().numpy())
     pred_next = _inv(np.concatenate(pred_next))
+    return {"msname": msname, "cfg": cfg, "norm": norm,
+            "test_starts": np.asarray(test_starts),
+            "pred_next": np.asarray(pred_next, dtype=float),
+            "full_cpm": np.asarray(full_cpm, dtype=float),
+            "grid": np.asarray(grid)}
+
+
+def run_madu_trace(args, device, util_df=None):
+    """Madu trace mode: roll a Madu CPM checkpoint over the test split and
+    map predicted CPM to CPU/memory via the §4.2 linear profiles.
+
+    Convention follows the h=1 forecast layout: row at minute m carries the
+    actuals at m and the forecast for m+1 made at m (next-minute head of
+    the Madu decoder). Predicted util uses actual container counts at m+1
+    (documented simplification; a deployment would use planned counts).
+    `util_df`: preloaded util parquet frame (batch callers pass it to avoid
+    re-reading per MS). Returns (results, cpm_actual, cpm_pred, msname).
+    """
+    ro = madu_rollout(args, device)
+    msname = ro["msname"]
+    n = ro["cfg"]["n"]
+    test_starts, pred_next = ro["test_starts"], ro["pred_next"]
+    full_cpm, grid = ro["full_cpm"], ro["grid"]
+
+    with open(args.profile_json) as f:
+        prof = json.load(f)[msname]
 
     util = {}
     import pandas as _pd
-    udf = _pd.read_parquet(args.util_parquet)
+    udf = util_df if util_df is not None else _pd.read_parquet(args.util_parquet)
     udf = udf[udf["msname"] == msname]
     for _, r in udf.iterrows():
         util[int(r["minute"])] = (float(r["cpu"]), float(r["mem"]), int(r["n_inst"]))

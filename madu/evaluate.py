@@ -133,6 +133,8 @@ def summarize_results(all_results):
             [h["accurate_frac_10pct"] for h in have if "accurate_frac_10pct" in h])
         g["overestimation_accuracy"] = _nanmean(
             [h["overestimation_accuracy"] for h in have if "overestimation_accuracy" in h])
+        g["mse"] = _nanmean([h["mse"] for h in have if "mse" in h])
+        g["mae"] = _nanmean([h["mae"] for h in have if "mae" in h])
         g["n_ms_total"] = len(have)
         summary[meth] = g
     return summary
@@ -149,7 +151,9 @@ def _print_summary(summary, log_info):
                      f"{g[grp]['median_accuracy']:>10.4f} "
                      f"{g[grp]['n_ms']:>6d} {g[grp]['n']:>10d}")
         log_info(f"accurate±10% (mean over MSs): {g['accurate_frac_10pct']:.4f} | "
-                 f"overest_acc (mean over MSs): {g['overestimation_accuracy']:.4f}")
+                 f"overest_acc (mean over MSs): {g['overestimation_accuracy']:.4f} | "
+                 f"MSE (mean over MSs): {g['mse']:.4f} | "
+                 f"MAE (mean over MSs): {g['mae']:.4f}")
 
 
 def _print_table(res, y_true, y_pred, log_info):

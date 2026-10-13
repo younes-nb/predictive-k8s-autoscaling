@@ -85,4 +85,6 @@ def evaluate_by_percentile(y_true, y_pred):
                       "n": int(len(y_true))}
     out["accurate_frac_10pct"] = accurate_fraction(y_true, y_pred)
     out["overestimation_accuracy"] = overestimation_accuracy(y_true, y_pred)
+    out["mse"] = float(np.mean((y_true - y_pred) ** 2))
+    out["mae"] = float(np.mean(np.abs(y_true - y_pred)))
     return out
