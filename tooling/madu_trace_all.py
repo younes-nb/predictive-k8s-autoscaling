@@ -81,19 +81,32 @@ def phase_rollout(ckpt_dir, npz_dir, device):
 _UTIL = {}
 
 
-def _plot_one(job):
-    npz_path, plots_dir, prof, util_minutes = job
-    import numpy as np
-    import pandas as pd
+_G_PROF = {}
+_G_UTIL = {}
+_G_PNGSET = None
+_G_PLOTSDIR = ""
+
+
+def _plot_one(npz_path):
     from analytics.evaluate_trace import compute_metrics, plot_results
-    z = np.load(npz_path, allow_pickle=True)
+    plots_dir = _G_PLOTSDIR
+    prof = _G_PROF
+    util_minutes = _G_UTIL
+    png_set = _G_PNGSET
+    import glob as _glob
+    import numpy as _np
+    import pandas as _pd
+    import os as _os
+    z = _np.load(npz_path, allow_pickle=True)
     msname = str(z["msname"])
     stamp = None
-    csv_path = os.path.join(plots_dir, f"madu_trace_{msname}.csv")
-    json_path = os.path.join(plots_dir, f"madu_trace_{msname}.json")
-    if (os.path.isfile(json_path) and os.path.getsize(json_path) > 0
-            and glob.glob(os.path.join(
-                plots_dir, f"trace_eval_{msname}_full_*.png"))):
+    csv_path = _os.path.join(plots_dir, f"madu_trace_{msname}.csv")
+    json_path = _os.path.join(plots_dir, f"madu_trace_{msname}.json")
+    want_png = png_set is None or msname in png_set
+    has_json = _os.path.isfile(json_path) and _os.path.getsize(json_path) > 0
+    has_png = bool(_glob.glob(_os.path.join(
+        plots_dir, f"trace_eval_{msname}_full_*.png")))
+    if has_json and (has_png or not want_png):
         return (msname, "skipped")
     test_starts = z["test_starts"].astype(int)
     pred_next = z["pred_next"].astype(float)
@@ -101,14 +114,19 @@ def _plot_one(job):
     grid = z["grid"].astype(int)
     n = int(z["n"])
     p = prof[msname]
-    um = util_minutes[msname]
+    arr = util_minutes[msname]  # numpy [minute, cpu, mem, n_inst], sorted
+    mins = arr[:, 0]
     results, cpm_a, cpm_p = [], [], []
     for s, fc in zip(test_starts, pred_next):
         m_now, m_tgt = int(grid[s + n - 1]), int(grid[s + n])
-        if m_now not in um or m_tgt not in um:
+        i = int(_np.searchsorted(mins, m_now))
+        j = int(_np.searchsorted(mins, m_tgt))
+        if i >= len(arr) or arr[i, 0] != m_now:
             continue
-        cpu_now, mem_now, _ = um[m_now]
-        _, _, n_inst_tgt = um[m_tgt]
+        if j >= len(arr) or arr[j, 0] != m_tgt:
+            continue
+        cpu_now, mem_now = float(arr[i, 1]), float(arr[i, 2])
+        n_inst_tgt = int(arr[j, 3])
         per_cont = float(fc) / max(n_inst_tgt, 1)
         results.append({"timestamp": None, "cpu": cpu_now, "memory": mem_now,
                         "pred_cpu": max(p["a_cpu"] * per_cont + p["b_cpu"], 0.0),
@@ -124,39 +142,63 @@ def _plot_one(job):
                               target_features=["cpu_utilization",
                                                "memory_utilization"])
     metrics.update({"msname": msname, "hours": MADU_HOURS})
-    pd.DataFrame(results).to_csv(csv_path, index=False)
+    _pd.DataFrame(results).to_csv(csv_path, index=False)
     with open(json_path, "w") as f:
         json.dump(metrics, f, indent=2, default=str)
+    if png_set is not None and msname not in png_set:
+        return (msname, "ok-nopng")
     plot_results(results, msname, plots_dir, 1, THRESHOLD, num_targets=2,
                  target_features=["cpu_utilization", "memory_utilization"],
                  feature_names=["cpu_utilization", "memory_utilization"],
-                 cpm_actual=np.asarray(cpm_a), cpm_pred=np.asarray(cpm_p))
+                 cpm_actual=_np.asarray(cpm_a), cpm_pred=_np.asarray(cpm_p))
     return (msname, "ok")
 
 
-def phase_plot(npz_dir, plots_dir, profile_json, util_parquet, workers):
-    import pandas as pd
+def phase_plot(npz_dir, plots_dir, profile_json, util_parquet, workers,
+               png_list=None, ms_allow=None):
+    import numpy as np
+    import polars as pl
     from concurrent.futures import ProcessPoolExecutor, as_completed
     os.makedirs(plots_dir, exist_ok=True)
     prof = json.load(open(profile_json))
-    print("loading util parquet once...", flush=True)
-    udf = pd.read_parquet(util_parquet)
+    print("loading util parquet once (compact numpy partitions)...",
+          flush=True)
+    udf = pl.read_parquet(util_parquet,
+                          columns=["msname", "minute", "cpu", "mem", "n_inst"])
+    # compact per-MS float64 arrays (fork-shared, read-only); ~1.5 GB total
+    # for 87M rows — never expanded to per-minute Python dicts.
     util_minutes = {}
-    for ms, g in udf.groupby("msname"):
-        util_minutes[str(ms)] = {int(r.minute): (float(r.cpu), float(r.mem),
-                                                 int(r.n_inst))
-                                 for r in g.itertuples()}
+    for ms, g in udf.group_by("msname"):
+        key = ms[0] if isinstance(ms, tuple) else ms
+        a = np.asarray(
+            g.select(["minute", "cpu", "mem", "n_inst"]).to_numpy(),
+            dtype=np.float64)
+        util_minutes[str(key)] = a[a[:, 0].argsort()]
     del udf
+    import gc
+    gc.collect()
     print(f"util: {len(util_minutes)} MSs", flush=True)
     npzs = sorted(glob.glob(os.path.join(npz_dir, "roll_*.npz")))
     print(f"plot: {len(npzs)} rollouts, {workers} workers", flush=True)
-    jobs = [(p, plots_dir, prof, util_minutes) for p in npzs
-            if os.path.basename(p)[len("roll_"):-len(".npz")] in prof
-            and os.path.basename(p)[len("roll_"):-len(".npz")] in util_minutes]
+    png_set = None
+    if png_list:
+        png_set = set(json.load(open(png_list))["msnames"])
+        print(f"PNGs restricted to {len(png_set)} MSs", flush=True)
+    allowed = set(ms_allow) if ms_allow else None
+    global _G_PROF, _G_UTIL, _G_PNGSET, _G_PLOTSDIR
+    _G_PROF, _G_UTIL, _G_PNGSET, _G_PLOTSDIR = prof, util_minutes, png_set, plots_dir
+    jobs = []
+    for p in npzs:
+        ms = os.path.basename(p)[len("roll_"):-len(".npz")]
+        if ms not in prof or ms not in util_minutes:
+            continue
+        if allowed is not None and ms not in allowed:
+            continue
+        jobs.append(p)  # paths only: bulk payloads ride fork-shared globals
     print(f"jobs with profile+util: {len(jobs)}", flush=True)
     ok = skip = empty = 0
     with ProcessPoolExecutor(max_workers=workers) as ex:
-        futs = {ex.submit(_plot_one, j): j[0] for j in jobs}
+        futs = {ex.submit(_plot_one, j): j for j in jobs}
         for fut in as_completed(futs):
             try:
                 _, st = fut.result()
@@ -164,7 +206,7 @@ def phase_plot(npz_dir, plots_dir, profile_json, util_parquet, workers):
                 print(f"PLOT FAILED {futs[fut]}: {e!r}", flush=True)
                 empty += 1
                 continue
-            ok += st == "ok"
+            ok += st in ("ok", "ok-nopng")
             skip += st == "skipped"
             empty += st == "empty"
             if (ok + skip + empty) % 200 == 0:
@@ -217,6 +259,11 @@ def main():
     ap.add_argument("--util_parquet",
                     default="/proj/k8sautoscaledl-PG0/madu_all/util_per_minute.parquet")
     ap.add_argument("--out", default="/proj/k8sautoscaledl-PG0/madu_all/cpu_mem_summary.json")
+    ap.add_argument("--png_list", default=None,
+                    help="JSON {msnames:[...]}: PNGs only for these MSs "
+                         "(metrics+CSV still for all jobs)")
+    ap.add_argument("--ms_list", default=None,
+                    help="JSON {msnames:[...]}: restrict jobs to these MSs")
     ap.add_argument("--workers", type=int, default=32)
     ap.add_argument("--device", default=None)
     args = ap.parse_args()
@@ -226,8 +273,10 @@ def main():
         print(f"device={device}", flush=True)
         phase_rollout(args.ckpt_dir, args.npz_dir, device)
     elif args.phase == "plot":
+        ms_allow = (json.load(open(args.ms_list))["msnames"]
+                    if args.ms_list else None)
         phase_plot(args.npz_dir, args.plots_dir, args.profile_json,
-                   args.util_parquet, args.workers)
+                   args.util_parquet, args.workers, args.png_list, ms_allow)
     else:
         phase_summary(args.plots_dir, args.out)
 
