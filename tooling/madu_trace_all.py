@@ -167,7 +167,7 @@ def _plot_h5(msname, plots_dir, minutes, actual_cpu, actual_mem, actual_cpm,
             ax.plot(xv, mv, color="#FF6F00", linewidth=1.5, alpha=0.8,
                     label=f"Predicted CPM (h={kk})")
         ax.set_ylabel("CPM")
-        ax.set_title(f"Predicted vs Actual CPM (h={m} head)")
+        ax.set_title(f"Predicted vs Actual CPM (h={m_head} head)")
         ax.legend()
         ax.grid(True, alpha=0.2)
         axes[-1].set_xlabel("Minute")
@@ -177,7 +177,7 @@ def _plot_h5(msname, plots_dir, minutes, actual_cpu, actual_mem, actual_cpm,
         _plt.close(fig)
         return fp
 
-    heads_full = [(m - 1, cpm_heads[m - 1])]
+    heads_full = [(m_head - 1, cpm_heads[m_head - 1])]
     full = _draw(x, actual_cpu, pred_cpu_h5, actual_mem, pred_mem_h5,
                  actual_cpm, heads_full, "Full Test Set",
                  fname=f"trace_eval_{msname}_full_{stamp}.png")
