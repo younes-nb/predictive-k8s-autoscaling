@@ -1092,15 +1092,19 @@ def madu_rollout(args, device):
     X = np.stack([Fall[s:s + n] for s in test_starts]).astype(np.float32)
 
     pred_next = []
+    yhat_full = []
     with _torch.no_grad():
         for b in range(0, len(X), 1024):
             xb = _torch.from_numpy(X[b:b + 1024]).to(device)
             yhat, _, _ = model.predict(xb)
             pred_next.append(yhat[:, 0].cpu().numpy())
+            yhat_full.append(yhat.cpu().numpy())
     pred_next = _inv(np.concatenate(pred_next))
+    yhat_full = _inv(np.concatenate(yhat_full, axis=0))
     return {"msname": msname, "cfg": cfg, "norm": norm,
             "test_starts": np.asarray(test_starts),
             "pred_next": np.asarray(pred_next, dtype=float),
+            "yhat_full": np.asarray(yhat_full, dtype=float),
             "full_cpm": np.asarray(full_cpm, dtype=float),
             "grid": np.asarray(grid)}
 
