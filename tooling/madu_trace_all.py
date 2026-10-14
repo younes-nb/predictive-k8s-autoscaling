@@ -139,7 +139,7 @@ def _plot_h5(msname, plots_dir, minutes, actual_cpu, actual_mem, actual_cpm,
         cpm_a = _slice(cpm_a)
         heads = [(k, _slice(mv)) for k, mv in heads]
         fig, axes = _plt.subplots(3, 1, figsize=(22, 12), sharex=True)
-        fig.suptitle(f"{msname} — {suffix} (horizon m={m_head}, all heads)\n"
+        fig.suptitle(f"{msname} — {suffix} (horizon m={m_head}; h={m_head} heads shown, errors pooled over all heads)\n"
                      f"CPM pooled: MSE={cpm_mse:.6f}, MAE={cpm_mae:.6f}",
                      fontsize=13, fontweight="bold", y=0.99)
         ax = axes[0]
