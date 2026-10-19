@@ -9,4 +9,6 @@ __pycache__/
 # Generated load-test credentials (local-only; regenerate via
 # load_testing/seed_tt_users.py, never commit)
 load_testing/seeds/tt_users.json
+# PBScaler collected datasets + HPA state are local artifacts
+pbscaler/data/
 AGENTS.md

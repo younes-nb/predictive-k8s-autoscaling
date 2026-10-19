@@ -1,0 +1,44 @@
+# RBAC for the PBScaler controller pod (namespace train-ticket).
+# Applied by deploy_all script; see README (deployment section).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pbscaler
+  namespace: train-ticket
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: pbscaler
+  namespace: train-ticket
+rules:
+  # read deployments + pods (service list, replica counts, availability)
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch"]
+  # scale-out/in: patch the scale subresource of deployments
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale"]
+    verbs: ["get", "patch", "update"]
+  # pods list for svc pod counts
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  # HPA suspend/restore during runs
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: pbscaler
+  namespace: train-ticket
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: pbscaler
+subjects:
+  - kind: ServiceAccount
+    name: pbscaler
+    namespace: train-ticket

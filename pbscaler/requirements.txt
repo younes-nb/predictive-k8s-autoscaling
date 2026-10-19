@@ -1,0 +1,19 @@
+# PBScaler (vendored code) dependencies — trimmed to what only PBScaler needs.
+# Upstream pins were Python 3.9-oriented (torch etc. for the RL experiments,
+# which are NOT carried in this repo). All pins below install cleanly on
+# Python 3.9 and 3.10.
+# NOTE: upstream requirements.txt ended with a typo line "~andas==1.4.3"
+# that breaks pip install as-is — intentionally not carried over.
+geatpy==2.7.0          # genetic algorithm (util/GA.py) — deinstalled if RL
+joblib==1.1.1          # >=1.1.1 required by scikit-learn 1.2.1 (upstream 1.1.0 was stale)
+kubernetes==31.0.0     # upstream 23.3.0 crashes on pods of >=1.30 kublets
+                       # (unknown PodReadyToStartContainers condition enum)
+networkx==2.8.4
+numpy==1.22.2
+pandas==1.5.3
+requests==2.28.1
+schedule==1.1.0
+scikit_learn==1.2.1
+scipy==1.8.1
+matplotlib==3.5.1      # simulation/ plotting scripts only
+seaborn==0.11.0        # simulation/ plotting scripts only

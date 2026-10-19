@@ -1,0 +1,66 @@
+# PBScaler controller Deployment — NOT APPLIED YET (user instruction:
+# write the deployment code, do not deploy for now).
+#
+#   kubectl apply -f pbscaler/deploy/rbac.yaml
+#   kubectl apply -f pbscaler/deploy/deployment.yaml
+#
+# Run-time behavior (36 min = 5 min grace + 30 min experiment-style):
+#   * starts -> suspends the namespace HPAs (Paper modes: PBScaler IS the
+#     autoscaler while it runs)
+#   * loop: 15 s anomaly (TopoRank + GA scale-out), 120 s waste (scale-in)
+#   * on clean exit (duration end, SIGINT, SIGTERM) -> restores HPAs
+# Restore-after-crash: pbscaler/scripts/hpa_control.py restore (or
+# `kubectl apply -f` the manifests saved to PBS_HPA_STATE_FILE).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pbscaler
+  namespace: train-ticket
+  labels:
+    app: pbscaler
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pbscaler
+  template:
+    metadata:
+      labels:
+        app: pbscaler
+    spec:
+      serviceAccountName: pbscaler
+      containers:
+        - name: pbscaler
+          image: docker.io/younesnb/pbscaler:v1.0.0  # built by deploy/build_and_push.sh
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: PBS_DURATION
+              value: "1800"                 # experiment seconds
+            - name: PBS_SLO
+              value: "200"                  # ms (paper Sec. IV-A4)
+            - name: PBS_MAX_POD
+              value: "10"                   # keeps parity with existing HPAs
+            - name: PBS_MIN_POD
+              value: "1"
+            - name: PBS_NAMESPACE
+              value: "train-ticket"
+            - name: PBS_FRONT_SVC
+              value: "ts-ui-dashboard"
+            - name: PBS_GATEWAY_NAME
+              value: "train-ticket-gateway-istio"
+            - name: PBS_SUSPEND_HPAS
+              value: "true"
+            - name: PBS_RESTORE_HPAS
+              value: "true"
+            - name: PBS_DRY_RUN
+              value: "false"
+            # in-cluster Mimir, no port-forward needed (monitoring ns)
+            - name: PBS_MIMIR_URL
+              value: "http://mimir.monitoring.svc.cluster.local:8080"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
