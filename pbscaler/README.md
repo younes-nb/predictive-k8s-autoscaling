@@ -77,6 +77,18 @@ scales to 6 pods. Multi-hour runs **must be launched `setsid`-detached**
 (`setsid env ... bash pbscaler/scripts/smoke_load.sh 259 258 > log 2>&1 &`) or
 they die with the shell that started them.
 
+`scripts/monitor_run.sh` runs detached alongside a run (90 s cadence,
+`/tmp/opencode/monitor.log`) tracking rows/violations/p90/restarts/HPA state.
+Known k6 artifact: with `USER_POOL` ≥ 150 the first ~15 rows (75 s) are a
+connection storm — near-zero qps but p90 up to 11 s (all VUs start at once).
+**Drop those rows before RF training** (e.g. `tail -n +17 train_data.csv`).
+
+Full-day dataset (`fullrun3_*`, 2026-10-19): `START_MIN=0`,`MAX_REQUESTS=3800`,
+`USER_POOL=300`, `COLLECT_MIN=1441`, `K6_MIN=1440` → ~17,280 rows at 5 s
+covering all of Jul 13 (rows 1–1440). Level 3800 chosen by calibration:
+2 decisive violations (p90 1.6 s) in cal3800 with zero restarts and nodes
+≤10% CPU.
+
 Then train the predictor (writes `simulation/train_ticket/RandomForestClassify.model`):
 
     cp -r data/traindata_<ts> data/train_ticket   # or point --data at the csv
