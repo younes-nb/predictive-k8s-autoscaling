@@ -18,6 +18,8 @@ cd "$(dirname "$0")/../.."
 
 COLLECT_MIN="${1:-16}"
 K6_MIN="${2:-15}"
+COLLECT_INTERVAL="${COLLECT_INTERVAL:-10}"
+OUT_PREFIX="${OUT_PREFIX:-smoke}"
 MCR="${MCR_CSV:-/proj/k8sautoscaledl-PG0/nasa/jul13-14/http_mcr_NASA_jul95.csv}"
 MAXREQ="${MAX_REQUESTS:-400}"
 POOL="${USER_POOL:-100}"
@@ -47,20 +49,20 @@ for i in $(seq 1 30); do curl -sf -m 3 http://127.0.0.1:18081/prometheus/api/v1/
 
 PBS_MIMIR_URL=http://127.0.0.1:18081 \
   "$PY_BIN" pbscaler/scripts/collect_training_data.py \
-    --duration $((COLLECT_MIN * 60)) --interval 10 \
+    --duration $((COLLECT_MIN * 60)) --interval "$COLLECT_INTERVAL" \
     --workload "$MCR" \
-    --out "pbscaler/data/smoke_${OUT_SUFFIX}" >"/tmp/opencode/smoke_collector.log" 2>&1 &
+    --out "pbscaler/data/${OUT_PREFIX}_${OUT_SUFFIX}" >"/tmp/opencode/${OUT_PREFIX}_collector.log" 2>&1 &
 COLLECT_PID=$!
-echo "collector pid $COLLECT_PID -> /tmp/opencode/smoke_collector.log (out: pbscaler/data/smoke_${OUT_SUFFIX})"
+echo "collector pid $COLLECT_PID -> /tmp/opencode/${OUT_PREFIX}_collector.log (out: pbscaler/data/${OUT_PREFIX}_${OUT_SUFFIX})"
 
 # ---- 2. k6 NASA replay -----------------------------------------------------
 sleep 20   # let the collector record a pre-load baseline
 TARGET_URL="${TARGET_URL:-https://train-ticket.younesnb.linkpc.net}" \
 MCR_CSV="$MCR" MAX_REQUESTS="$MAXREQ" USER_POOL="$POOL" SEED_FILE="$SEED_FILE" \
 START_MIN="${START_MIN:-587}" TEST_MIN="$K6_MIN" \
-  bash load_testing/run_test.sh >"/tmp/opencode/smoke_k6.log" 2>&1 &
+  bash load_testing/run_test.sh >"/tmp/opencode/${OUT_PREFIX}_k6.log" 2>&1 &
 K6_PID=$!
-echo "k6 pid $K6_PID -> /tmp/opencode/smoke_k6.log"
+echo "k6 pid $K6_PID -> /tmp/opencode/${OUT_PREFIX}_k6.log"
 
 # ---- 3. wait out the load, then the collector --------------------------------
 wait $K6_PID || echo "WARN: k6 exited non-zero (thresholds are slack on purpose)"
