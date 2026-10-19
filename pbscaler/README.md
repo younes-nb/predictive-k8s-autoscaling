@@ -66,6 +66,17 @@ Outputs in `pbscaler/data/traindata_<ts>/`:
   and success rate (for post-hoc analysis or richer predictors).
 - `meta.json` — run parameters + verification counters.
 
+`scripts/smoke_load.sh` orchestrates both halves (its own Mimir port-forward +
+k6 NASA replay + collector); envs `COLLECT_INTERVAL` (default 10 s),
+`OUT_PREFIX` default smoke) and positional args `[COLLECT_MIN] [K6_MIN]`.
+Calibrated levels for this cluster (3 masters + 3 workers, k6 `START_MIN=587`,
+curve rows 588–845): `MAX_REQUESTS=1000` leaves HPAs nearly idle; `2600`
+(with `USER_POOL=150`) is the highest level that stays clean — front P90
+spikes ≤ ~700 ms only on cold-start crunch minutes, no restarts/OOMs, gateway
+scales to 6 pods. Multi-hour runs **must be launched `setsid`-detached**
+(`setsid env ... bash pbscaler/scripts/smoke_load.sh 259 258 > log 2>&1 &`) or
+they die with the shell that started them.
+
 Then train the predictor (writes `simulation/train_ticket/RandomForestClassify.model`):
 
     cp -r data/traindata_<ts> data/train_ticket   # or point --data at the csv
