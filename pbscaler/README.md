@@ -89,6 +89,27 @@ covering all of Jul 13 (rows 1–1440). Level 3800 chosen by calibration:
 2 decisive violations (p90 1.6 s) in cal3800 with zero restarts and nodes
 ≤10% CPU.
 
+### Relabeling from the k6 client oracle (required)
+
+The collector's `front_p90` (istio source-side gateway→ui histogram) is **not
+a trustworthy SLO oracle on this cluster**: its seconds-scale spikes occur in
+windows where the k6 client measures normal latency (weighted per-window p95
+med 59 ms is identical in "violation" and calm windows). Use
+`scripts/pull_k6_labels.py` to relabel a run from the k6 remote-written
+trend series while they are still in Mimir (needs a `kubectl -n monitoring
+port-forward svc/mimir 18081:8080`):
+
+    pbscaler/.venv/bin/python pbscaler/scripts/pull_k6_labels.py \
+        --run pbscaler/data/fullrun3_20261019_125146 \
+        --in pbscaler/data/train_ticket/train_data.csv \
+        --out pbscaler/data/train_ticket/train_data_k6.csv
+
+This adds `k6_p95`/`k6_fail` columns and rewrites `slo_reward`
+(fullrun3: 111 histogram-artifact rows → 376 real >200 ms windows = 2.2%).
+Known caveat: even with k6-truth labels, (qps, count) state features give
+~AUC 0.5 — this cluster's SLO pain is stochastic, not saturation-driven
+like the paper's regime.
+
 Then train the predictor (writes `simulation/train_ticket/RandomForestClassify.model`):
 
     cp -r data/traindata_<ts> data/train_ticket   # or point --data at the csv
