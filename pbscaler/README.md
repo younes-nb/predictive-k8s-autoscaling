@@ -100,30 +100,45 @@ covering all of Jul 13 (rows 1–1440). Level 3800 chosen by calibration:
 
 The label stays the paper's: `front_p90` = istio P90 of the
 gateway→`ts-ui-dashboard` edge, compared against the SLO (Sec. IV-C2).
-Investigated 2026-10-21 after doubts that istio history was even stored in 5 s
-steps — findings from the pbrun evidence + raw Mimir queries:
+**2026-10-21 (later same day) — two live validations settled the label
+semantics, superseding the earlier pbrun-era notes below:**
 
-- **Storage cadence is NOT the problem**: istio duration buckets and `up`
-  are sampled every **10 s** (30 samples per 5 min verified); the collector's
-  10 s rows read fresh values. The earlier "istio query returns empty"
-  observations were my own probe bugs: queries without `by (le)` and a dead
-  Mimir port-forward, not data behavior (ists data IS retained).
-- **The ~9.9 ms flat reading under load is REAL.** Manual quantile from the
-  raw ui buckets at load/calm instants: ~84% of arrivals ≤10 ms, ~95% ≤25 ms.
-  The SPA frontend simply is not this deployment's latency bottleneck — the
-  login/API chain is (ts-auth P90 ~235 ms even in calm windows, seconds-scale
-  during the cold-start login storm; ts-ppreserve +52 ms slow-vs-calm).
-- **Consequence (accepted per paper-faithfulness directive):** on 2,148
-  collector rows matched against k6 client truth (med p95 63 ms), the paper
-  label flags 0.5% violations against 9.3% >200 ms client windows (Spearman
-  0.109); its median is 9.9 ms in *both* slow and calm windows. The
-  RF-trained paper label learns "frontend saturation" — the mechanism the
-  paper designed for (it spiked to 19.7 s at the cold-start storm) — and its
-  thin violation signal on this cluster is the honest paper-mode result.
-- **Label correctness at the collector is therefore done**: the label query
-  is unchanged; no more k6 relabeling for training. `scripts/
-  pull_k6_labels.py` is diagnostics-only from now on (its older flow with the
-  istio-labeled CSVs is reference material).
+- **Completion-window query (`rate[1m]`, not `irate[1m]`) is now the
+  collector semantics** (`util/PrometheusClient.get_front_p90`). istio stores
+  each request's duration from arrival until its response fully returns
+  through the front-end, so `rate()` over the duration-bucket counters IS the
+  "completions in window" distribution the paper's front P90 wants. Verified
+  live from the runner (Mimir port-forward):
+  - 30-loop bad-creds login storm (~14.5 rps, 90 s): client curl-truth
+    p90 = **2333 ms**; edge `irate[1m]` = 2342 ms, `rate[1m]` = 2348 ms
+    (`rate[2m]`=2360, `rate[5m]`=2365, source-reporter same ±10 ms) — matches.
+  - 9-min k6 replica (real driver, 40 VUs, 3288 reqs): k6 client
+    p95 = **177.6 ms**; edge `rate[1m]`/`irate[1m]` = **180.4/180.0 ms**;
+    dest-bucket increments 3027 ≈ client 3288 with the expected bi-modal
+    split (fast-class ≤10 ms + chain-class ≤250 ms).
+- **The pbrun-era ~9.9 ms flat is an edge-measurement anomaly of that
+  traffic regime, still open.** It reproduced live only in the loose
+  mixed-path probes: the same edge histogram read 93% ≤25 ms while the same
+  requests measured (client) med 55 / p90 609 ms. The pbrun data itself
+  (2711 rows, 2711 gateway_edge) had ~50% of rows at 9.9–10.4 ms with rare
+  spikes to 19.7 s. Same store, same query shape worked the same minute
+  (~1 min apart through 18080 vs 18081 — both same svc/mimir). Consequence:
+  treat pbrun-era front_p90 labels as suspect; the upcoming 12-h collection
+  run is the clean re-verification (fresh 5 s-scraped store, warmup, the
+  rate[1m] label). If the mixed-path edge flatness reappears there, the
+  fallback label basis moves to the `ts-auth-service` istio P90 (the chain
+  bottleneck) — decision AFTER that run lands, not before.
+- **Scrape cadence is now 5 s** (cluster change, 2026-10-21): istio
+  ServiceMonitors *and* Alloy scrapes moved 10 s → 5 s
+  (`~/cluster-repo/lab-setup` postcluster.yaml `istio_scrape_interval` /
+  `alloy_scrape_interval`). Verified in Mimir: 13 raw samples/60 s on
+  istio buckets + `up` + cAdvisor. **Gotcha that broke the first attempt:**
+  a 5 s `scrape_interval` with the default 10 s `scrape_timeout` is invalid —
+  Alloy CrashLoops on its static scrapes, and the istio ServiceMonitor
+  pipeline silently stops producing samples. The templates now pin
+  `scrape_timeout = scrape_interval` in both
+  (`alloy.yaml.j2`, `istio.yaml` tasks).
+- k6 relabel stays retired; `scripts/pull_k6_labels.py` is diagnostics-only.
 
 Mimir retention (measured): trend/bucket history is queryable roughly
 **15–20 h** after a series stops updating (the earlier ~24 h assumption was

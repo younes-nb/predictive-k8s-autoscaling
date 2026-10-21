@@ -160,9 +160,21 @@ class PrometheusClient:
         This is the label signal for the SLO violation predictor
         (paper Sec. IV-C2: compare the tail latency of the front-end
         microservice with the SLO).
+
+        Completion semantics (2026-10-21 decision): the quantile is taken
+        over the durations of requests that COMPLETED inside the window
+        (`rate` over the istio duration-bucket counters), not an instant
+        slope (`irate`). istio records a request's duration from arrival
+        until its response is fully delivered back through the front-end
+        — the user-visible round trip — so the gateway->front edge p90 is
+        completion-based end-to-end truth. Verified live 2026-10-21: a
+        30-loop login storm read 2334-2368 ms at this edge vs client
+        curl-truth p90 = 2333 ms (irate[1m] and rate[1m] agree; rate was
+        chosen per the paper's windowed-interval sampling and its
+        stability under the 5 s scrape cadence).
         """
         if gateway:
-            sql = ('histogram_quantile(0.90, sum(irate('
+            sql = ('histogram_quantile(0.90, sum(rate('
                    'istio_request_duration_milliseconds_bucket{reporter="destination", '
                    'destination_workload="%s", source_workload="%s"}[1m])) '
                    'by (destination_workload, source_workload, le))') % (front_svc, gateway)
@@ -170,7 +182,7 @@ class PrometheusClient:
                                 default=float('nan'))
             if p90 == p90:  # not NaN
                 return {'front_p90': p90, 'front_source': 'gateway_edge'}
-        sql = ('histogram_quantile(0.90, sum(irate('
+        sql = ('histogram_quantile(0.90, sum(rate('
                'istio_request_duration_milliseconds_bucket{reporter="destination", '
                'destination_workload="%s"}[1m])) by (destination_workload, le))') % front_svc
         p90 = self._instant(self.execute_prom(self.prom_no_range_url, sql),
