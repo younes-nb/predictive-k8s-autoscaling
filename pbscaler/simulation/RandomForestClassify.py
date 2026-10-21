@@ -30,6 +30,7 @@ Output — model + stats to simulation/<bench>/(RandomForestClassify.model, rf.p
 """
 
 import argparse
+import json
 import os
 import random
 import pickle
@@ -141,4 +142,10 @@ if __name__ == '__main__':
     model_path = out_dir + '/RandomForestClassify.model'
     pickle.dump(res, open(seed_dump, 'wb'))
     joblib.dump(model, model_path)
-    print(f'model written: {model_path}\n(pickled ROC: {seed_dump})')
+    # bake the exact training svc ORDER next to the model: PBScaler's GA
+    # (util/GA.py, model mode) must reproduce this row layout at runtime
+    # ([i, qps, count, dqps, dcount] per svc).
+    svc_path = out_dir + '/RandomForestClassify.svcs'
+    json.dump(svcs, open(svc_path, 'w'))
+    print(f'model written: {model_path}\n'
+          f'(pickled ROC: {seed_dump}; predictor svc order: {svc_path})')

@@ -4,6 +4,10 @@ FROM python:3.9-slim
 
 WORKDIR /app
 
+# geatpy's compiled extensions need the OpenMP runtime shipped by libgomp1
+RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
 # deps first for layer caching
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
@@ -14,9 +18,14 @@ COPY config /app/config
 COPY util /app/util
 COPY monitor /app/monitor
 COPY scripts /app/scripts
+# trained SLO violation predictor (required for real runs; build_and_push
+# checks it is present) + its exact training svc order
+COPY simulation/train_ticket/RandomForestClassify.model /app/simulation/train_ticket/
+COPY simulation/train_ticket/RandomForestClassify.svcs /app/simulation/train_ticket/
 RUN mkdir -p /app/simulation/train_ticket /app/data
 
-ENV PBS_DRY_RUN=false \
+ENV MPLBACKEND=Agg \
+    PBS_DRY_RUN=false \
     PBS_SUSPEND_HPAS=true \
     PBS_RESTORE_HPAS=true \
     PBS_HPA_STATE_FILE=/app/data/hpa_state.json \

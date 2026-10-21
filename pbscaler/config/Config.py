@@ -97,6 +97,13 @@ class Config():
         self.slo_predictor_path = get_env(
             "PBS_SLO_PREDICTOR", "simulation/train_ticket/RandomForestClassify.model")
 
+        # Companion svc-order list written next to the model by the training
+        # script (<model>.svcs): the GA must feed the predictor the exact
+        # feature row/order it was trained on.
+        self.slo_predictor_svcs_path = get_env(
+            "PBS_SLO_PREDICTOR_SVCS",
+            os.path.splitext(self.slo_predictor_path)[0] + ".svcs")
+
         # ---- scaling integration -----------------------------------------
         # PBScaler patches Deployment replicas (paper: "commits optimized
         # strategies to the kubernetes-client"). The cluster's TrainTicket

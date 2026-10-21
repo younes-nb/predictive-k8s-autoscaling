@@ -51,6 +51,21 @@ class GA:
         self.svcs = svcs
         self.bottlenecks = bottlenecks
         self.r = r
+        # legacy layout: the 3-feature row [i, workload, replica] from upstream
+        self.model_svcs = None
+
+    def set_env_row(self, base_row: list, model_svcs: list, bottlenecks: list, counts: dict):
+        """Model-contract mode: `base_row` is the predictor's exact flat
+        feature row ([i, qps, count, dqps, dcount] per service, the training
+        order); candidate replica counts replace the count feature of the
+        bottleneck services."""
+        if len(base_row) != 5 * len(model_svcs):
+            raise Exception('base_row length must be 5 * len(model_svcs)')
+        self.base_row = list(base_row)
+        self.model_svcs = list(model_svcs)
+        self.model_index = {s: i for i, s in enumerate(self.model_svcs)}
+        self.bottlenecks = bottlenecks
+        self.r = counts
         
     
     def __set_chromosome(self):
@@ -66,16 +81,26 @@ class GA:
         return Field
     
     def fitness(self, action):
-        x = []
-        index = 0
-        for i in range(len(self.svcs)):
-            svc = self.svcs[i]
-            if svc in self.bottlenecks:
-                x.extend([i, self.workloads[i], action[index]])
-                index += 1
-            else:
-                x.extend([i, self.workloads[i], self.r[svc]])
-        x = np.array(x).reshape(1, -1)
+        if self.model_svcs is None:
+            # legacy upstream layout (dry-run identity stub only)
+            x = []
+            index = 0
+            for i in range(len(self.svcs)):
+                svc = self.svcs[i]
+                if svc in self.bottlenecks:
+                    x.extend([i, self.workloads[i], action[index]])
+                    index += 1
+                else:
+                    x.extend([i, self.workloads[i], self.r[svc]])
+            x = np.array(x).reshape(1, -1)
+        else:
+            # model contract: clone the current-state row and substitute the
+            # candidate replica count of each bottleneck service
+            row = list(self.base_row)
+            for j, svc in enumerate(self.bottlenecks):
+                pos = 5 * self.model_index[svc]
+                row[pos + 2] = float(action[j])
+            x = np.asarray(row, dtype=np.float64).reshape(1, -1)
         R1 = self.predictor.predict(x).tolist()[0] 
         R2 = (1 - (np.sum(action) / np.sum(self.ub)))
         return [LAMBDA * R1 + (1 - LAMBDA) * R2]

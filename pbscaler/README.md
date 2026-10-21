@@ -140,7 +140,44 @@ If the run is killed hard (SIGKILL / crash), restore manually:
     python scripts/hpa_control.py restore      # re-creates the HPA objects
     python scripts/hpa_control.py status       # verify
 
-## In-cluster deployment (code shipped, NOT applied)
+## Deployed in-cluster (2026-10-21) — VERIFIED WORKING
+
+`deploy/` is applied and the controller is running as the namespace's
+autoscaler (pod pinned to worker1):
+
+- **Image v1.0.3** (python:3.9-slim **+ libgomp1** — geatpy needs it), RF
+  model + `<model>.svcs` baked. Push auth to docker.io is not configured on
+  the runner, so the image is **side-loaded**:
+  `docker save | gzip | ssh worker1 'ctr -n k8s.io images import -'`
+  → `imagePullPolicy: Never` + `nodeName: worker1` in deployment.yaml.
+- **HPA suspend/restore lives on the runner** (`scripts/hpa_control.py`), with
+  the state file at `pbscaler/data/hpa_state.json` — a controller pod restart
+  must never orphan the suspended-HPA state, so the pod runs
+
+      PBS_SUSPEND_HPAS=false / PBS_RESTORE_HPAS=false
+
+  and suspend/around-run semantics are executed manually around experiments.
+- **Live logs:** `PYTHONUNBUFFERED=1` (prints were block-buffered otherwise).
+- **Function test at SLO=1 ms proved the full path live:** scale-out GA
+  commits changed cluster replicas (ts-station→4, ts-travel→7 over ticks),
+  post-burst the 120 s waste loop fired `begin scale in`, 0 restarts.
+- **GA/model contract fix (required)**: the lab predictor is trained on rows
+  `[i, qps, count, Δqps, Δcount]` per svc (43 svcs, 215 features — see
+  `simulation/RandomForestClassify.py` header); upstream's GA fed a 3-feature
+  row which the model correctly rejects
+  ("X has 132 features, but RandomForestClassifier is expecting 215").
+  GA now has a model mode (`set_env_row`/`fitness`): the current-state row is
+  fetched per tick (qps mean now vs 90–60 s window for Δqps, deployment-spec
+  counts, dcount=0) and candidate replica counts are substituted into the
+  count feature of the bottleneck services. The training svc order is baked
+  next to the model as `<model>.svcs` and loaded at pod start via
+  `PBS_SLO_PREDICTOR_SVCS`.
+- 12-h predictor dataset (2026-10-21): Jul-13 busiest 720-min window
+  (`START_MIN=399`, 7600/560) → 8,637 rows, **149 k6-verified violations
+  (1.7%)**; acc 97.9 / **AUC 0.51** (consistent with every lab-truth dataset:
+  instantaneous (qps,count) state can't separate SLO pain on this cluster).
+
+## In-cluster deployment (listed previously as "not applied")
 
     pbscaler/deploy/build_and_push.sh                     # docker.io/younesnb/pbscaler
     kubectl apply -f pbscaler/deploy/rbac.yaml

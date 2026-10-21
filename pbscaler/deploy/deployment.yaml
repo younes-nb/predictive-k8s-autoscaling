@@ -28,16 +28,24 @@ spec:
       labels:
         app: pbscaler
     spec:
+      nodeName: worker1 # image exists only on this node's containerd (see above)
       serviceAccountName: pbscaler
       containers:
         - name: pbscaler
-          image: docker.io/younesnb/pbscaler:v1.0.0  # built by deploy/build_and_push.sh
-          imagePullPolicy: IfNotPresent
+          image: docker.io/younesnb/pbscaler:v1.0.3  # built by deploy/build_and_push.sh; side-loaded
+          # onto worker1's containerd via ctr over ssh (no docker.io push auth on the runner)
+          imagePullPolicy: Never
           env:
+            - name: PYTHONUNBUFFERED
+              value: "1"                    # live prints for kubectl logs (block-buffered otherwise)
             - name: PBS_DURATION
-              value: "1800"                 # experiment seconds
+              value: "46200"                # 12h50m — covers the 12h k6 window (k6 starts ~2 min after the controller)
             - name: PBS_SLO
               value: "200"                  # ms (paper Sec. IV-A4)
+            - name: PBS_SLO_PREDICTOR
+              value: "/app/simulation/train_ticket/RandomForestClassify.model"
+            - name: PBS_SLO_PREDICTOR_SVCS
+              value: "/app/simulation/train_ticket/RandomForestClassify.svcs"
             - name: PBS_MAX_POD
               value: "10"                   # keeps parity with existing HPAs
             - name: PBS_MIN_POD
@@ -49,9 +57,9 @@ spec:
             - name: PBS_GATEWAY_NAME
               value: "train-ticket-gateway-istio"
             - name: PBS_SUSPEND_HPAS
-              value: "true"
+              value: "false" # HPAs pre-suspended from the runner (scripts/hpa_control.py suspend): state file lives outside the pod, safe across controller restarts
             - name: PBS_RESTORE_HPAS
-              value: "true"
+              value: "false" # manual restore at experiment end: scripts/hpa_control.py restore
             - name: PBS_DRY_RUN
               value: "false"
             # in-cluster Mimir, no port-forward needed (monitoring ns)

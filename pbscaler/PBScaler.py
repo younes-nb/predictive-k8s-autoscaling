@@ -19,7 +19,9 @@ Cluster adaptations (all keyed off config/Config.py):
   * dry_run mode executes every phase and only *prints* the would-be action.
 """
 
+import json
 import math
+import os
 import time
 import numpy as np
 import schedule
@@ -67,6 +69,10 @@ class PBScaler:
         self.mss = self.k8s_util.get_svcs_without_state()
         self.roots = None
         self.svc_counts = None
+        # the exact service ORDER the SLO predictor was trained on — the GA
+        # reproduces the training feature row against it (see _load_model_svcs)
+        self.model_svcs = self._load_model_svcs(config)
+        self.model_index = {s: i for i, s in enumerate(self.model_svcs or [])}
 
     @staticmethod
     def coast_time(func):
@@ -76,6 +82,30 @@ class PBScaler:
             print(f'func {func.__name__} coast time:{time.perf_counter() - t:.8f} s')
             return result
         return fun
+
+    def _load_model_svcs(self, config) -> list:
+        """Per-service list (order-sensitive) the SLO predictor was trained on.
+
+        RandomForestClassify.py writes it next to the model file
+        ('<model>.svcs'); feeding any other layout/order would make the RF's
+        predictions meaningless. The lab model is trained on rows
+        [i, qps, count, dqps, dcount] per service (deviation documented in
+        simulation/RandomForestClassify.py), in this exact order.
+        """
+        path = getattr(config, 'slo_predictor_svcs_path', None)
+        if path and os.path.exists(path):
+            with open(path) as f:
+                svcs = json.load(f)
+            print(f'loaded predictor svc list: {path} ({len(svcs)} svcs)')
+            return svcs
+        if config.dry_run:
+            print('WARNING: no predictor svc list found — GA falls back to the '
+                  'legacy feature layout (dry-run stub only)')
+            return None
+        raise SystemExit(
+            f"predictor svc list not found at '{path}'. Re-run "
+            f"simulation/RandomForestClassify.py (it writes '<model>.svcs' "
+            f"next to the model file).")
 
     def anomaly_detect(self):
         """ SLO check
@@ -179,25 +209,78 @@ class PBScaler:
             min_array = np.maximum(min_array, thesold_array)
         else:
             raise NotImplementedError()
-        qps = self.prom_util.get_svc_qps()
-        for ms in mss:
-            if ms + '&qps' in qps.keys():
-                workloads.append(qps[ms + '&qps'])
+
+        if self.model_svcs is not None:
+            # model mode: feed the predictor the exact feature row it was
+            # trained on ([i, qps, count, dqps, dcount] per service, in the
+            # training svc order); candidate replica counts go into the count
+            # feature of the bottleneck services. Deviation from upstream,
+            # which fed a shorter 3-feature row the lab model rejects
+            # ('X has 132 features, but RandomForestClassifier is expecting
+            # 215').
+            not_in_model = [t for t in roots if t not in self.model_index]
+            if not_in_model:
+                print('roots outside the predictor feature set, skipped: '
+                      + ', '.join(not_in_model))
+            roots = [t for t in roots if t in self.model_index]
+            dim = len(roots)
+            if dim == 0:
+                print('no actionable roots in the predictor feature set; no action')
+                return
+            try:
+                counts = self.k8s_util.get_all_counts()
+            except Exception:
+                counts = dict(r)
+            qps = self.prom_util.get_svc_qps()
+            cur_time = int(round(time.time()))
+            qps_cur_df = qps_old_df = None
+            try:
+                self.prom_util.set_time_range(cur_time - 60, cur_time)
+                qps_cur_df = self.prom_util.get_svc_qps_range()
+                self.prom_util.set_time_range(cur_time - 90, cur_time - 60)
+                qps_old_df = self.prom_util.get_svc_qps_range()
+            except Exception as e:
+                print(f'WARNING: qps range fetch failed ({e}); falling back to instant qps')
+            base_row = []
+            for i, svc in enumerate(self.model_svcs):
+                c = float(counts.get(svc, 0.0))
+                if qps_cur_df is not None and svc in qps_cur_df.columns:
+                    q = float(qps_cur_df[svc].mean())
+                else:
+                    q = float(qps.get(svc + '&qps', 0.0))
+                q_old = float(qps_old_df[svc].mean()) if (
+                    qps_old_df is not None and svc in qps_old_df.columns) else 0.0
+                # dqps: recent 60 s mean vs older 90-60 s window mean (same
+                # shape the collector's consecutive rows provide); dcount
+                # stays 0 — replica changes committed by this very tick
+                base_row.extend([i, q, c, q - q_old, 0.0])
+            # bounds recomputed for the filtered root set
+            if option == 'add':
+                min_array, max_array = [r[t] + 1 for t in roots], [self.max_num] * dim
             else:
-                workloads.append(0)
-        '''
-        optimizing with genetic algorithms
-        only optimize the root services
-        TODO: base the root score
-        '''
+                min_array, max_array = [self.min_num] * dim, [r[t] for t in roots]
+                min_array = np.maximum(min_array, np.array(max_array) - 1)
+
         opter = GA(self.predictor, dim, min_array, max_array, 'max', size_pop=50, max_iter=5, prob_cross=0.9, prob_mut=0.01, precision=1, encoding='BG', selectStyle='tour', recStyle='xovdp', mutStyle='mutbin', seed=1)
 
-        opter.set_env(workloads, mss, roots, r)
+        if self.model_svcs is not None:
+            opter.set_env_row(base_row, self.model_svcs, roots, r)
+        else:
+            qps = self.prom_util.get_svc_qps()
+            for ms in mss:
+                if ms + '&qps' in qps.keys():
+                    workloads.append(qps[ms + '&qps'])
+                else:
+                    workloads.append(0)
+            '''
+            legacy layout (dry-run identity stub only)
+            '''
+            opter.set_env(workloads, mss, roots, r)
+
         res = opter.evolve()
 
         actions = deepcopy(self.svc_counts)
-        for i in range(dim):
-            svc = self.roots[i]
+        for i, svc in enumerate(roots):
             actions[svc] = res[i]
 
         self.execute_task(actions)
