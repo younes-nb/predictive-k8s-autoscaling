@@ -1,32 +1,35 @@
-"""Train the PBScaler SLO violation predictor on TrainTicket data.
+"""Train the PBScaler SLO-violation predictor on TrainTicket data.
 
-Upstream: the repo ships two `svcs` lists (online-boutique active,
-TrainTicket commented). This repo targets the TrainTicket deployment of the
-lab cluster, so the TrainTicket list is active; the list is re-derived from
-the training CSV columns when possible so it stays in sync with whatever the
-collector recorded (svc set frozen per run in meta.json).
+PAPER MODE (IEEE TSC 2024): per-service feature row [i, qps, count] with the
+sklearn RandomForest default class weight (NO balancing and NO derived delta
+features). A previous deviation here — class_weight='balanced_subsample' plus
+[-1-step deltas] features (215 = 5x43) — was reverted on 2026-10-21 per the
+paper-faithfulness directive; cold-start contribution is instead absorbed by
+a 1-h k6 warmup that precedes data collection (scripts/smoke_load.sh) and is
+excluded from the dataset.
+
+Lab adaptations kept (they do not touch the paper's feature/label semantics):
+  * the repo ships two `svcs` lists (online-boutique active, TrainTicket
+    commented); this repo targets the lab's TrainTicket deployment, so the
+    TrainTicket list is the fallback and the active list is re-derived from
+    the training CSV columns to stay in sync with what the collector recorded
+    (svc set frozen per run in meta.json; includes the istio gateway).
+  * the exact training svc ORDER is dumped next to the model
+    ('<model>.svcs') so PBScaler's GA util builds the runtime feature row
+    against the identical order at prediction time.
 
 Input — written by pbscaler/scripts/collect_training_data.py during a k6 run
 (NASA replay) with the namespace's native HPAs performing elastic scaling
-(paper Sec. IV-C2: "historical metric data ... generated using ... the
-Kubernetes autoscaler by default"):
+(paper Sec. IV-C2: historical metric data generated with the K8s default
+autoscaler) and labeled with the paper's istio front P90 (Sec. IV-C2):
 
-    <data>/train_data.csv   columns: <svc>&qps, <svc>&count, slo_reward
-                            (1 = no SLO violation, 0 = violation)
+    <data>/train_data.csv   columns: <svc>&qps, <svc>&count, front_p90,
+                            slo_reward (1 = no SLO violation, 0 = violation)
 
 Rows with slo_reward < 0 (no front traffic in that interval) are skipped.
 
-Deviation from upstream: `class_weight='balanced_subsample'` (upstream used
-the default) — the lab TrainTicket day-long dataset has ~0.5% violation rows,
-with which a default RF degenerates to always-no-violation (recall 0.0).
-Also prints the per-class report. Further deviation: per-service features are
-[svc index, qps, count, Δqps, Δcount] (deltas vs the previous 5 s row,
-computed chronologically before shuffling) — violation rows in this cluster
-are cold-start transitions whose instantaneous qps/count snapshots are
-indistinguishable from calm states.
-
-Output — model + stats to simulation/<bench>/(RandomForestClassify.model, rf.pkl)
-(train_irs dirs created here, upstream required making them by hand).
+Output — model + stats to simulation/<bench>/(RandomForestClassify.model,
+rf.pkl) (train_irs dirs created here; upstream required making them by hand).
 """
 
 import argparse
@@ -73,26 +76,16 @@ def data_loader(path, svcs):
     cols = [col for col in df.columns
             if col.endswith('&qps') or col.endswith('&count') or col == 'slo_reward']
     df = df[cols].fillna(0)
-    # build dataset: [index, qps, count, dqps, dcount] per stateless microservice + label
-    # (deviation: +-1-step deltas over consecutive 5 s rows, computed in file
-    # order BEFORE shuffling — lab violations are cold-start transitions where
-    # instantaneous qps/count alone is indistinguishable from calm rows)
+    # build dataset: [index, qps, count] per stateless microservice + label
+    # (paper feature layout; cold-start handling lives in the load test's
+    # warmup phase, not in derived features)
     datas = []
-    prev = None
     for _, row in df.iterrows():
         x = []
         for i, svc in enumerate(svcs):
-            q_c, c_c = svc + '&qps', svc + '&count'
-            q, c = row.get(q_c, 0.0), row.get(c_c, 0.0)
-            if prev is None:
-                dq, dc = 0.0, 0.0
-            else:
-                dq = q - prev.get(q_c, 0.0)
-                dc = c - prev.get(c_c, 0.0)
-            x.extend([i, q, c, dq, dc])
+            x.extend([i, row.get(svc + '&qps', 0.0), row.get(svc + '&count', 0)])
         x.append(row['slo_reward'])
         datas.append(x)
-        prev = row
     datas = [d for d in datas if d[-1] >= 0]  # drop '-1 = no traffic' rows
     random.shuffle(datas)
     datas = np.array(datas)
@@ -121,7 +114,7 @@ if __name__ == '__main__':
     datas_x, datas_y = data_loader(args.data, svcs)
     print(f'samples: {len(datas_y)} (violations={(1 - datas_y).sum() if datas_y.max() <= 1 else "?"})')
 
-    model = RandomForestClassifier(class_weight='balanced_subsample')
+    model = RandomForestClassifier()  # paper default class weight (no balancing)
     X_train, X_test, y_train, y_test = train_test_split(datas_x, datas_y)
     model.fit(X_train, y_train)
     y_pred = model.predict(X_test)
@@ -143,8 +136,7 @@ if __name__ == '__main__':
     pickle.dump(res, open(seed_dump, 'wb'))
     joblib.dump(model, model_path)
     # bake the exact training svc ORDER next to the model: PBScaler's GA
-    # (util/GA.py, model mode) must reproduce this row layout at runtime
-    # ([i, qps, count, dqps, dcount] per svc).
+    # (util/GA.py) must reproduce the paper 3-feature row in THIS order.
     svc_path = out_dir + '/RandomForestClassify.svcs'
     json.dump(svcs, open(svc_path, 'w'))
     print(f'model written: {model_path}\n'

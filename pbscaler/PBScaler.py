@@ -87,10 +87,9 @@ class PBScaler:
         """Per-service list (order-sensitive) the SLO predictor was trained on.
 
         RandomForestClassify.py writes it next to the model file
-        ('<model>.svcs'); feeding any other layout/order would make the RF's
-        predictions meaningless. The lab model is trained on rows
-        [i, qps, count, dqps, dcount] per service (deviation documented in
-        simulation/RandomForestClassify.py), in this exact order.
+        ('<model>.svcs'); the GA's paper feature row ([i, qps, count] per
+        service) must be built against this exact order for the RF's
+        predictions to be meaningful.
         """
         path = getattr(config, 'slo_predictor_svcs_path', None)
         if path and os.path.exists(path):
@@ -196,7 +195,6 @@ class PBScaler:
         mss = deepcopy(self.mss)
         roots = deepcopy(self.roots)
         r = deepcopy(self.svc_counts)
-        workloads = []
 
         dim = len(roots)
         if option == 'add':
@@ -210,14 +208,11 @@ class PBScaler:
         else:
             raise NotImplementedError()
 
+        # keep only roots the predictor's feature set knows about (the 3-feature
+        # row describes the model's svc order; anomaly roots outside it should
+        # be impossible — the gateway is filtered from anomaly sets upstream —
+        # but stay defensive)
         if self.model_svcs is not None:
-            # model mode: feed the predictor the exact feature row it was
-            # trained on ([i, qps, count, dqps, dcount] per service, in the
-            # training svc order); candidate replica counts go into the count
-            # feature of the bottleneck services. Deviation from upstream,
-            # which fed a shorter 3-feature row the lab model rejects
-            # ('X has 132 features, but RandomForestClassifier is expecting
-            # 215').
             not_in_model = [t for t in roots if t not in self.model_index]
             if not_in_model:
                 print('roots outside the predictor feature set, skipped: '
@@ -227,55 +222,18 @@ class PBScaler:
             if dim == 0:
                 print('no actionable roots in the predictor feature set; no action')
                 return
-            try:
-                counts = self.k8s_util.get_all_counts()
-            except Exception:
-                counts = dict(r)
-            qps = self.prom_util.get_svc_qps()
-            cur_time = int(round(time.time()))
-            qps_cur_df = qps_old_df = None
-            try:
-                self.prom_util.set_time_range(cur_time - 60, cur_time)
-                qps_cur_df = self.prom_util.get_svc_qps_range()
-                self.prom_util.set_time_range(cur_time - 90, cur_time - 60)
-                qps_old_df = self.prom_util.get_svc_qps_range()
-            except Exception as e:
-                print(f'WARNING: qps range fetch failed ({e}); falling back to instant qps')
-            base_row = []
-            for i, svc in enumerate(self.model_svcs):
-                c = float(counts.get(svc, 0.0))
-                if qps_cur_df is not None and svc in qps_cur_df.columns:
-                    q = float(qps_cur_df[svc].mean())
-                else:
-                    q = float(qps.get(svc + '&qps', 0.0))
-                q_old = float(qps_old_df[svc].mean()) if (
-                    qps_old_df is not None and svc in qps_old_df.columns) else 0.0
-                # dqps: recent 60 s mean vs older 90-60 s window mean (same
-                # shape the collector's consecutive rows provide); dcount
-                # stays 0 — replica changes committed by this very tick
-                base_row.extend([i, q, c, q - q_old, 0.0])
-            # bounds recomputed for the filtered root set
-            if option == 'add':
-                min_array, max_array = [r[t] + 1 for t in roots], [self.max_num] * dim
-            else:
-                min_array, max_array = [self.min_num] * dim, [r[t] for t in roots]
-                min_array = np.maximum(min_array, np.array(max_array) - 1)
+
+        # paper Sec. III: the GA fitness evaluates the SLO-violation predictor
+        # on a candidate resource vector with the paper's 3-per-service feature
+        # layout [i, qps, count]. The row is built over the svc ORDER the
+        # predictor was trained on (baked '<model>.svcs'; the namespace list is
+        # the dry-run fallback).
+        svcs_for_row = self.model_svcs if self.model_svcs is not None else mss
+        qps = self.prom_util.get_svc_qps()
+        workloads = [qps.get(svc + '&qps', 0.0) for svc in svcs_for_row]
 
         opter = GA(self.predictor, dim, min_array, max_array, 'max', size_pop=50, max_iter=5, prob_cross=0.9, prob_mut=0.01, precision=1, encoding='BG', selectStyle='tour', recStyle='xovdp', mutStyle='mutbin', seed=1)
-
-        if self.model_svcs is not None:
-            opter.set_env_row(base_row, self.model_svcs, roots, r)
-        else:
-            qps = self.prom_util.get_svc_qps()
-            for ms in mss:
-                if ms + '&qps' in qps.keys():
-                    workloads.append(qps[ms + '&qps'])
-                else:
-                    workloads.append(0)
-            '''
-            legacy layout (dry-run identity stub only)
-            '''
-            opter.set_env(workloads, mss, roots, r)
+        opter.set_env(workloads, svcs_for_row, roots, r)
 
         res = opter.evolve()
 

@@ -67,8 +67,12 @@ Outputs in `pbscaler/data/traindata_<ts>/`:
 - `meta.json` — run parameters + verification counters.
 
 `scripts/smoke_load.sh` orchestrates both halves (its own Mimir port-forward +
-k6 NASA replay + collector); envs `COLLECT_INTERVAL` (default 10 s),
-`OUT_PREFIX` default smoke) and positional args `[COLLECT_MIN] [K6_MIN]`.
+k6 NASA replay + collector); envs `COLLECT_INTERVAL` (default 10 s, matched to
+the measured istio remote-write cadence), `OUT_PREFIX` (default smoke) and
+positional args `[COLLECT_MIN] [K6_MIN]`. Cold-start protocol:
+`WARMUP_MIN=60` starts the k6 replay first and joins the collector only after
+the warmup hour — the collected CSV covers only post-warmup rows (the paper's
+feature state has no cold-start term; the warmup absorbs the startup storm).
 Calibrated levels for this cluster (3 masters + 3 workers, k6 `START_MIN=587`,
 curve rows 588–845): `MAX_REQUESTS=1000` leaves HPAs nearly idle; `2600`
 (with `USER_POOL=150`) is the highest level that stays clean — front P90
@@ -79,9 +83,12 @@ they die with the shell that started them.
 
 `scripts/monitor_run.sh` runs detached alongside a run (90 s cadence,
 `/tmp/opencode/monitor.log`) tracking rows/violations/p90/restarts/HPA state.
-Known k6 artifact: with `USER_POOL` ≥ 150 the first ~15 rows (75 s) are a
-connection storm — near-zero qps but p90 up to 11 s (all VUs start at once).
-**Drop those rows before RF training** (e.g. `tail -n +17 train_data.csv`).
+Cold-start artifact at high VU counts: the first minutes are a connection
+storm (near-zero qps but p90 spikes up to seconds — all VUs start at once;
+p90 reached ~19.7 s at the 650-VU start in the 2026-10-21 pbrun). Paper-mode
+training files this away: run with `WARMUP_MIN=60` so the collector never
+sees the storm (the scoped feature row reverted to the paper's
+`[i, qps, count]` — no delta features to absorb cold starts).
 
 Full-day dataset (`fullrun3_*`, 2026-10-19): `START_MIN=0`,`MAX_REQUESTS=3800`,
 `USER_POOL=300`, `COLLECT_MIN=1441`, `K6_MIN=1440` → ~17,280 rows at 5 s
@@ -89,28 +96,41 @@ covering all of Jul 13 (rows 1–1440). Level 3800 chosen by calibration:
 2 decisive violations (p90 1.6 s) in cal3800 with zero restarts and nodes
 ≤10% CPU.
 
-### Relabeling from the k6 client oracle (required)
+### SLO label — istio front P90 (paper; k6 relabel retired)
 
-The collector's `front_p90` (istio source-side gateway→ui histogram) is **not
-a trustworthy SLO oracle on this cluster**: its seconds-scale spikes occur in
-windows where the k6 client measures normal latency (weighted per-window p95
-med 59 ms is identical in "violation" and calm windows). Use
-`scripts/pull_k6_labels.py` to relabel a run from the k6 remote-written
-trend series while they are still in Mimir (needs a `kubectl -n monitoring
-port-forward svc/mimir 18081:8080`):
+The label stays the paper's: `front_p90` = istio P90 of the
+gateway→`ts-ui-dashboard` edge, compared against the SLO (Sec. IV-C2).
+Investigated 2026-10-21 after doubts that istio history was even stored in 5 s
+steps — findings from the pbrun evidence + raw Mimir queries:
 
-    pbscaler/.venv/bin/python pbscaler/scripts/pull_k6_labels.py \
-        --run pbscaler/data/fullrun3_20261019_125146 \
-        --in pbscaler/data/train_ticket/train_data.csv \
-        --out pbscaler/data/train_ticket/train_data_k6.csv
+- **Storage cadence is NOT the problem**: istio duration buckets and `up`
+  are sampled every **10 s** (30 samples per 5 min verified); the collector's
+  10 s rows read fresh values. The earlier "istio query returns empty"
+  observations were my own probe bugs: queries without `by (le)` and a dead
+  Mimir port-forward, not data behavior (ists data IS retained).
+- **The ~9.9 ms flat reading under load is REAL.** Manual quantile from the
+  raw ui buckets at load/calm instants: ~84% of arrivals ≤10 ms, ~95% ≤25 ms.
+  The SPA frontend simply is not this deployment's latency bottleneck — the
+  login/API chain is (ts-auth P90 ~235 ms even in calm windows, seconds-scale
+  during the cold-start login storm; ts-ppreserve +52 ms slow-vs-calm).
+- **Consequence (accepted per paper-faithfulness directive):** on 2,148
+  collector rows matched against k6 client truth (med p95 63 ms), the paper
+  label flags 0.5% violations against 9.3% >200 ms client windows (Spearman
+  0.109); its median is 9.9 ms in *both* slow and calm windows. The
+  RF-trained paper label learns "frontend saturation" — the mechanism the
+  paper designed for (it spiked to 19.7 s at the cold-start storm) — and its
+  thin violation signal on this cluster is the honest paper-mode result.
+- **Label correctness at the collector is therefore done**: the label query
+  is unchanged; no more k6 relabeling for training. `scripts/
+  pull_k6_labels.py` is diagnostics-only from now on (its older flow with the
+  istio-labeled CSVs is reference material).
 
-This adds `k6_p95`/`k6_fail` columns and rewrites `slo_reward`
-(fullrun3: 111 histogram-artifact rows → 376 real >200 ms windows = 2.2%).
-Known caveat: even with k6-truth labels, (qps, count) state features give
-~AUC 0.5 — this cluster's SLO pain is stochastic, not saturation-driven
-like the paper's regime.
+Mimir retention (measured): trend/bucket history is queryable roughly
+**15–20 h** after a series stops updating (the earlier ~24 h assumption was
+too generous) — run any post-run label/metric analysis promptly.
 
-Then train the predictor (writes `simulation/train_ticket/RandomForestClassify.model`):
+Then train the predictor (paper mode — writes `simulation/train_ticket/
+RandomForestClassify.model` + `<model>.svcs`):
 
     cp -r data/traindata_<ts> data/train_ticket   # or point --data at the csv
     python simulation/RandomForestClassify.py --data data/train_ticket/train_data.csv
@@ -140,42 +160,36 @@ If the run is killed hard (SIGKILL / crash), restore manually:
     python scripts/hpa_control.py restore      # re-creates the HPA objects
     python scripts/hpa_control.py status       # verify
 
-## Deployed in-cluster (2026-10-21) — VERIFIED WORKING
+## Deployed in-cluster — REGISTRY-BASED v1.1.0 (apply after RF retraining)
 
-`deploy/` is applied and the controller is running as the namespace's
-autoscaler (pod pinned to worker1):
+`deploy/` manifests are registry-ready; the `ctr`-side-load workaround and the
+worker1 `nodeName` pin are retired:
 
-- **Image v1.0.3** (python:3.9-slim **+ libgomp1** — geatpy needs it), RF
-  model + `<model>.svcs` baked. Push auth to docker.io is not configured on
-  the runner, so the image is **side-loaded**:
-  `docker save | gzip | ssh worker1 'ctr -n k8s.io images import -'`
-  → `imagePullPolicy: Never` + `nodeName: worker1` in deployment.yaml.
-- **HPA suspend/restore lives on the runner** (`scripts/hpa_control.py`), with
-  the state file at `pbscaler/data/hpa_state.json` — a controller pod restart
-  must never orphan the suspended-HPA state, so the pod runs
-
-      PBS_SUSPEND_HPAS=false / PBS_RESTORE_HPAS=false
-
-  and suspend/around-run semantics are executed manually around experiments.
-- **Live logs:** `PYTHONUNBUFFERED=1` (prints were block-buffered otherwise).
-- **Function test at SLO=1 ms proved the full path live:** scale-out GA
-  commits changed cluster replicas (ts-station→4, ts-travel→7 over ticks),
-  post-burst the 120 s waste loop fired `begin scale in`, 0 restarts.
-- **GA/model contract fix (required)**: the lab predictor is trained on rows
-  `[i, qps, count, Δqps, Δcount]` per svc (43 svcs, 215 features — see
-  `simulation/RandomForestClassify.py` header); upstream's GA fed a 3-feature
-  row which the model correctly rejects
-  ("X has 132 features, but RandomForestClassifier is expecting 215").
-  GA now has a model mode (`set_env_row`/`fitness`): the current-state row is
-  fetched per tick (qps mean now vs 90–60 s window for Δqps, deployment-spec
-  counts, dcount=0) and candidate replica counts are substituted into the
-  count feature of the bottleneck services. The training svc order is baked
-  next to the model as `<model>.svcs` and loaded at pod start via
-  `PBS_SLO_PREDICTOR_SVCS`.
+- **Image v1.1.0 pushed** to `docker.io/younesnb/pbscaler:v1.1.0`
+  (`pbscaler/deploy/build_and_push.sh`; python:3.9-slim + **libgomp1** for
+  geatpy; RF model + `<model>.svcs` baked; PYTHONUNBUFFERED=1,
+  MPLBACKEND=Agg). Kubelet registry pull verified live (a test pod reached
+  Running from the public repo) and the three side-loaded v1.0.x copies were
+  removed from worker1's containerd.
+- deployment.yaml pulls the registry image (`imagePullPolicy: IfNotPresent`,
+  no `nodeName`) and manages its own HPAs again (PBS_SUSPEND_HPAS=true /
+  PBS_RESTORE_HPAS=true — paper modes).
+- **Paper-mode RF restored (2026-10-21)**: `RandomForestClassify.py` trains
+  the paper's 3-per-service feature row `[i, qps, count]` (132 features for
+  the 44-svc list incl. the gateway) with the sklearn **default class
+  weight** — the balanced_subsample + delta-features deviation (215 features)
+  is reverted, and the GA is back to the upstream layout: it builds the same
+  3-feature row over the baked predictor svc order (`<model>.svcs`, still
+  loaded via PBS_SLO_PREDICTOR_SVCS).
+- **Do NOT apply the Deployment until retraining**: the currently baked model
+  is the old deviated one. After the new training collection (HPAs native,
+  1-h warmup) → retrain with the reverted trainer → re-push v1.1.0 (or bump
+  the tag in deployment.yaml) → then:
+  `kubectl apply -f pbscaler/deploy/rbac.yaml -f pbscaler/deploy/deployment.yaml`.
 - 12-h predictor dataset (2026-10-21): Jul-13 busiest 720-min window
-  (`START_MIN=399`, 7600/560) → 8,637 rows, **149 k6-verified violations
-  (1.7%)**; acc 97.9 / **AUC 0.51** (consistent with every lab-truth dataset:
-  instantaneous (qps,count) state can't separate SLO pain on this cluster).
+  (`START_MIN=399`, 7600/560) → 8,637 rows, 149 k6-verified violations (1.7%);
+  the k6-labeled CSV is reference-only now (training labels are the paper's
+  istio front P90 — see the label section above).
 
 ## In-cluster deployment (listed previously as "not applied")
 
