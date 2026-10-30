@@ -1,0 +1,17 @@
+using 43 services from data/traindata_20261022_052124/train_data.csv
+samples: 8490 (violations=32.0)
+Test set score:1.00
+acc 0.9995289684408856
+recall 0.8571428571428571
+auc 0.9285714285714286
+              precision    recall  f1-score   support
+
+         0.0      1.000     0.857     0.923         7
+         1.0      1.000     1.000     1.000      2116
+
+    accuracy                          1.000      2123
+   macro avg      1.000     0.929     0.961      2123
+weighted avg      1.000     1.000     1.000      2123
+
+model written: /users/younes02/predictive-k8s-autoscaling/pbscaler/simulation/train_ticket/RandomForestClassify.model
+(pickled ROC: /users/younes02/predictive-k8s-autoscaling/pbscaler/simulation/train_ticket/rf.pkl; predictor svc order: /users/younes02/predictive-k8s-autoscaling/pbscaler/simulation/train_ticket/RandomForestClassify.svcs)

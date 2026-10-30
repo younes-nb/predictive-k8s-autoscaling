@@ -33,13 +33,16 @@ spec:
       serviceAccountName: pbscaler
       containers:
         - name: pbscaler
-          image: docker.io/younesnb/pbscaler:v1.1.0   # registry pull (credential-free: public repo); RE-PUSH v1.1.0 after RF retraining (baked model must be the paper-mode one)
+          image: docker.io/younesnb/pbscaler:v1.2.4   # v1.2.5 = v1.2.4 model + real Table III module timing
+          # fullrun13_trace573_compress8 (TRACE_COMPRESS=8 + 44-core quota, 15.7%
+          # viol regime; paper-comparable). Fixes v1.2.1 runaway (spec-based svc
+          # counts, aligned GA bounds, write-path clamp).
           imagePullPolicy: IfNotPresent
           env:
             - name: PYTHONUNBUFFERED
               value: "1"                    # live prints for kubectl logs (block-buffered otherwise)
             - name: PBS_DURATION
-              value: "46200"                # 12h50m — tune at deployment time to the evaluation run's k6 window
+              value: "46800"                # 13h — matches the evaluation run's k6 window (60min warmup + 720min)
             - name: PBS_SLO
               value: "200"                  # ms (paper Sec. IV-A4)
             - name: PBS_SLO_PREDICTOR

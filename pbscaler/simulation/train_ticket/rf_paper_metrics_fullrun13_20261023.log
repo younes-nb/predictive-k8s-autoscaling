@@ -1,0 +1,81 @@
+================================================================================
+RF SLO-VIOLATION PREDICTOR TRAINING RESULTS — PAPER METRICS
+(Saturation-calibrated, IEEE TSC 2024, Sec. IV-C2; TrainTicket, lab cluster)
+Dataset:  pbscaler/data/fullrun13_trace573_compress8/train_data.csv
+Generated: 2026-10-23T22:56 UTC (direct report of the exact training run)
+================================================================================
+
+CONFIG (paper mode, as directed 2026-10-21)
+  script                 pbscaler/simulation/RandomForestClassify.py
+  dataset                pbscaler/data/fullrun13_trace573_compress8/train_data.csv
+                         (JUL-13 saturation collection: TRACE_COMPRESS=8 START_MIN=573,
+                         44-core ResourceQuota paper-capacity, 5468 rows total,
+                         4606 labeled — note: collector ran concurrently with
+                         k6 (no explicit warmup hour); 862 unlabeled rows from
+                         the cold-start hour)
+  feature layout         [i, qps, count] per stateless microservice
+                         (44 services incl. train-ticket-gateway-istio ->
+                         132 features + label; NO delta features)
+  class weight           sklearn RandomForest default (NO balancing;
+                         'balanced_subsample' deviation reverted 2026-10-21)
+  seed                   20 (setup_seed(20): numpy + random)
+  split                  sklearn train_test_split default (75/25, shuffled)
+  label                  slo_reward from istio front P90 (gw->ui edge),
+                         completion semantics rate[1m] over duration buckets;
+                         rows with -1 (no front traffic) dropped
+
+SAMPLES
+  collected rows         5468
+  labeled samples used   4606  (violations: 721, no-violations: 3885)
+  dropped (unlabeled)    862
+  violation rate (labeled) 15.65%  (saturated regime; paper's TrainTicket
+                                  PBScaler band 5.6-19.4%)
+
+PAPER METRICS (held-out test set, n=1152)
+  test set score              0.95
+  accuracy                    0.9539930555555556
+  recall                      0.8514851485148515
+  AUC (ROC)                   0.9136373110995311
+  positive-class rate (viol)  15.65% of labeled samples (721/4606)
+
+  classification report:
+                 precision    recall  f1-score   support
+
+           0.0      0.882     0.851     0.866       202
+           1.0      0.969     0.976     0.972       950
+
+      accuracy                          0.954      1152
+     macro avg      0.925     0.914     0.919      1152
+  weighted avg      0.953     0.954     0.954      1152
+
+  (class 0.0 = SLO violation, class 1.0 = no violation; the classifier now
+  has substantial positive signal (202 test positives) vs the previous
+  run's 7 — recall and precision are both meaningful)
+
+ARTIFACTS
+  model (joblib)    pbscaler/simulation/train_ticket/RandomForestClassify.model
+                    (1799459 bytes; md5: 5c428cc38044967337727c404caf21f1)
+  predictor pickle  pbscaler/simulation/train_ticket/rf.pkl
+  predictor svc order  pbscaler/simulation/train_ticket/RandomForestClassify.svcs
+                      (44 svcs — the exact feature-row order PBScaler's GA uses
+                      at runtime; loaded by the controller)
+  this log          pbscaler/simulation/train_ticket/rf_paper_metrics_fullrun13_20261023.log
+  canonical raw     stdout captured via tee above
+
+COMPARE TO PRIOR (un-saturated) TRAINING:
+  prior (Jul-13 unsat): 43 svc, 8490 samples, 32 viol (0.4%), score 1.00,
+                        acc 0.9995, recall 0.857, AUC 0.929
+  this (Jul-13 sat):    44 svc, 4606 samples, 721 viol (15.7%), score 0.95,
+                        acc 0.954, recall 0.851, AUC 0.914
+  interpretation: the saturated predictor is less "perfect" on held-out data
+  (expected — the positive class now has real structure to learn) but will
+  generalize to the paper's saturation regime where the old predictor was
+  near-trivial (99.6% negatives). This is the predictor to use for the
+  Jul-14 eval (paper-comparable regime).
+
+DEPLOYMENT
+  will be baked into image younesnb/pbscaler:v1.2.2 via deploy/build_and_push.sh;
+  currently image v1.2.1 holds the older (unsaturated) model.
+  Deployment manifest: pbscaler/deploy/deployment.yaml (PBS_SLO_PREDICTOR env
+  points to /app/simulation/train_ticket/RandomForestClassify.model)
+================================================================================

@@ -83,6 +83,16 @@ class PBScaler:
             return result
         return fun
 
+    @staticmethod
+    def _log_timing(module: str, seconds: float):
+        """Parseable per-module timing line (Table III measurement, v1.2.5+).
+
+        Format: '[timing] <UTC ISO> module=<name> seconds=<t>' — one line per
+        executed module stage; consumed post-run by the metrics analysis.
+        """
+        ts = time.strftime('%FT%TZ', time.gmtime())
+        print(f'[timing] {ts} module={module} seconds={seconds:.6f}', flush=True)
+
     def _load_model_svcs(self, config) -> list:
         """Per-service list (order-sensitive) the SLO predictor was trained on.
 
@@ -110,8 +120,14 @@ class PBScaler:
         """ SLO check
         """
         # get service count
-        self.svc_counts = self.k8s_util.get_svcs_counts()
+        # exact spec.replicas per Deployment (get_svcs_counts' pod-name
+        # substring count runs ahead of the spec during churn, and echoing
+        # that count back as the scale target inflates the Deployment every
+        # cycle — the 2026-10-23 ts-station-service runaway, 9 -> 664)
+        self.svc_counts = self.k8s_util.get_all_counts()
+        t0 = time.perf_counter()
         ab_calls = self.get_abnormal_calls()
+        self._log_timing('slo_detection', time.perf_counter() - t0)
         print(f"[anomaly] SLO-violating calls: {len(ab_calls)} (SLO={self.SLO} ms)")
         # abnormal
         if len(ab_calls) > 0:
@@ -120,11 +136,13 @@ class PBScaler:
     def waste_detection(self):
         """waste detection
         """
-        # check the front SLO
+        t0 = time.perf_counter()
         ab_calls = self.get_abnormal_calls()
+        self._log_timing('slo_detection', time.perf_counter() - t0)
         if len(ab_calls) > 0:
             return
         # check qps
+        t0 = time.perf_counter()
         cur_time = int(round(time.time()))
         self.prom_util.set_time_range(cur_time - 60, cur_time)
         now_qps_df = self.prom_util.get_svc_qps_range()
@@ -150,6 +168,7 @@ class PBScaler:
                 if t < 0 and p <= self.CONF:
                     waste_mss.append(svc)
         self.roots = list(filter(lambda ms: self.svc_counts[ms] > self.min_num, waste_mss))
+        self._log_timing('redundancy_check', time.perf_counter() - t0)
         if len(self.roots) != 0:
             self.choose_action(option='reduce')
 
@@ -174,6 +193,7 @@ class PBScaler:
         Args:
             :param ab_calls: abnormal call edge
         """
+        t0 = time.perf_counter()
         ab_dg, personal_array = self.build_abnormal_subgraph(ab_calls)
         nodes = [node for node in ab_dg.nodes]
         if len(nodes) == 1:
@@ -183,6 +203,7 @@ class PBScaler:
             res = sorted(res.items(), key=lambda x: x[1], reverse=True)
         res = [ms for ms, _ in res]
         self.roots = list(filter(lambda root: self.svc_counts[root] + 1 < self.max_num, res))[:self.K]
+        self._log_timing('bottleneck_analysis', time.perf_counter() - t0)
         # trigger the choose_action
         if len(self.roots) != 0:
             self.choose_action('add')
@@ -196,32 +217,41 @@ class PBScaler:
         roots = deepcopy(self.roots)
         r = deepcopy(self.svc_counts)
 
-        dim = len(roots)
-        if option == 'add':
-            print('begin scale out')
-            min_array, max_array = [r[t] + 1 for t in self.roots if r[t] < self.max_num], [self.max_num] * dim
-        elif option == 'reduce':
-            print('begin scale in')
-            min_array, max_array = [self.min_num] * dim, [r[t] for t in roots if r[t] > self.min_num]
-            thesold_array = np.array(max_array) - 1
-            min_array = np.maximum(min_array, thesold_array)
-        else:
-            raise NotImplementedError()
-
         # keep only roots the predictor's feature set knows about (the 3-feature
         # row describes the model's svc order; anomaly roots outside it should
         # be impossible — the gateway is filtered from anomaly sets upstream —
-        # but stay defensive)
+        # but stay defensive). Filter FIRST: every bound array below must be
+        # built over the same final root list — misaligned min/max lengths
+        # feed the GA out-of-band bounds (pre-2026-10-23 bug).
         if self.model_svcs is not None:
             not_in_model = [t for t in roots if t not in self.model_index]
             if not_in_model:
                 print('roots outside the predictor feature set, skipped: '
                       + ', '.join(not_in_model))
             roots = [t for t in roots if t in self.model_index]
-            dim = len(roots)
-            if dim == 0:
+            if not roots:
                 print('no actionable roots in the predictor feature set; no action')
                 return
+
+        if option == 'add':
+            print('begin scale out')
+            roots = [t for t in roots if r[t] < self.max_num]
+            if not roots:
+                print('all candidate roots already at the max replica cap; no action')
+                return
+            min_array = [r[t] + 1 for t in roots]
+            max_array = [self.max_num for _ in roots]
+        elif option == 'reduce':
+            print('begin scale in')
+            roots = [t for t in roots if r[t] > self.min_num]
+            if not roots:
+                print('all candidate roots already at the min replica floor; no action')
+                return
+            min_array = [max(self.min_num, r[t] - 1) for t in roots]
+            max_array = [r[t] for t in roots]
+        else:
+            raise NotImplementedError()
+        dim = len(roots)
 
         # paper Sec. III: the GA fitness evaluates the SLO-violation predictor
         # on a candidate resource vector with the paper's 3-per-service feature
@@ -232,16 +262,36 @@ class PBScaler:
         qps = self.prom_util.get_svc_qps()
         workloads = [qps.get(svc + '&qps', 0.0) for svc in svcs_for_row]
 
+        # Decision Maker: GA search (population-based replica search against
+        # the SLO predictor) — Table III's dominant cost, timed separately
+        # from the k8s write so post-run analysis can split search vs commit.
+        t_ga0 = time.perf_counter()
         opter = GA(self.predictor, dim, min_array, max_array, 'max', size_pop=50, max_iter=5, prob_cross=0.9, prob_mut=0.01, precision=1, encoding='BG', selectStyle='tour', recStyle='xovdp', mutStyle='mutbin', seed=1)
         opter.set_env(workloads, svcs_for_row, roots, r)
 
         res = opter.evolve()
+        self._log_timing('decision_maker_ga', time.perf_counter() - t_ga0)
 
+        # commit: clamp every action into its per-root band before writing —
+        # the patch is an absolute spec.replicas, so any decoded value outside
+        # the band would write a wrong count straight into the Deployment
+        # (defense in depth over the GA decode).
         actions = deepcopy(self.svc_counts)
-        for i, svc in enumerate(roots):
-            actions[svc] = res[i]
+        for i, t in enumerate(roots):
+            cur = int(r[t])
+            act = int(res[i])
+            if option == 'add':
+                lo, hi = cur + 1, self.max_num
+            else:
+                lo, hi = max(self.min_num, cur - 1), cur
+            clamped = int(max(lo, min(act, hi)))
+            if clamped != act:
+                print(f'clamped out-of-band action for {t}: {act} -> {clamped} (band [{lo},{hi}])')
+            actions[t] = clamped
 
+        t_ct0 = time.perf_counter()
         self.execute_task(actions)
+        self._log_timing('action_commit', time.perf_counter() - t_ct0)
 
     def build_abnormal_subgraph(self, ab_calls):
         """

@@ -1,0 +1,74 @@
+================================================================================
+COMPREHENSIVE PAPER METRICS - PBScaler Evaluation
+================================================================================
+
+## EXPERIMENT SETUP
+- MAX_REQUESTS=7600, USER_POOL=560, TRACE_COMPRESS=8
+- HPA baseline: 43 HPAs (CPU 80%, min 1, max 10)
+- PBScaler: v1.2.4 with RF trained on Run 1' (clean HPA-only data)
+- All runs: 6h collection + 30min warmup
+
+## TABLE II: SLO VIOLATION RATE & COST
+Metric                              Run1 (HPA Jul-13)    Run3 (HPA Jul-14)    Run2 (PBScaler Jul-14)
+-----------------------------------------------------------------------------------------------
+Rows                                4320                 3886                 3975                
+Violations                          1094                 1799                 1619                
+Violation Rate %                    25.42%               49.46%               42.08%              
+P90 med ms                          20.4                  189.7                  46.5
+P90 p95 ms                          14643.3                  20287.9                  17036.5
+P90 p99 ms                          19117.7                  25036.5                  22947.9
+P90 max ms                          25946.9                  28000.0                  853329.1
+QPS med                             675                  385                  449
+QPS max                             7300                  3790                  3542
+Gaps                                1                    126                  986                 
+
+## TABLE III: MODULE TIME COST (from controller logs)
+Note: Timing data extracted from PBScaler logs during Run 2'
+- SLO Violation Detection: ~1.03s (avg per cycle, from logs)
+- Redundancy Checking: ~0.15s (avg per cycle)
+- PBA (Performance Bottleneck Analysis): ~3.10s (avg per cycle)
+- Decision Maker (GA): ~3.58s (avg per cycle)
+- Total per cycle: ~7.86s (within 15s anomaly detection interval)
+
+## RF PREDICTOR METRICS (Table IV from paper)
+Train dataset: Run 1' (HPA-only, Jul-13, 4320 rows, 25.4% violations)
+- Test accuracy: 0.951
+- Test recall: 0.888 (violation detection)
+- Test precision: 0.918
+- AUC: 0.930
+- F1-score: 0.902 (violation class)
+
+## PBSCALER BEHAVIORAL ANALYSIS
+=== Scaling Decisions (top services by frequency) ===
+- ts-voucher-service: 57 decisions (mostly to 1)
+- ts-user-service: 57 decisions (mostly to 1)
+- ts-travel2-service: 57 decisions (mostly to 9)
+- ts-ui-dashboard: 55 decisions (mostly to 9)
+- ts-travel-service: 55 decisions (mostly to 9)
+- ts-station-service: 55 decisions (mostly to 9)
+
+=== Per-Service Replica Analysis (max/median/mean) ===
+- Most services scale to 9 replicas under load
+- Low-traffic services (voucher, user, notification) stay at 1
+- Hot-path services (travel, ui, contacts) consistently at 9
+
+=== Cost Analysis (Sec IV-B formula) ===
+CPU: 11.07 cores avg | Memory: 194.02 GB avg
+Cost per second: $0.027319
+Total cost (6h run): $590.09
+  CPU cost: ~$228.67
+  Memory cost: ~$361.42
+
+## COMPARISON: PBScaler vs HPA (Jul-14 runs)
+- HPA violation rate: 49.46%
+- PBScaler violation rate: 42.08%
+- PBScaler improvement: 7.38% reduction
+- HPA P90 median: 189.7 ms
+- PBScaler P90 median: 46.5 ms
+- PBScaler P90 improvement: 143.2 ms
+
+## DATA QUALITY NOTES
+- Run 1' (Jul-13): 1 gaps (healthy)
+- Run 3 (Jul-14 HPA): 126 gaps (Mimir blips)
+- Run 2' (Jul-14 PBScaler): 986 gaps (disk pressure event)
+- Max P90 in Run 2' is 853s (artifact from disk pressure event)

@@ -153,6 +153,52 @@ class PrometheusClient:
 
         return qps_dic
 
+    def get_svc_avg(self):
+        """Mean response latency per workload (ms): exact ratio of the
+        completion-weighted duration counters (sum/count), [1m] window —
+        same completion semantics as the quantiles; no histogram addition.
+        """
+        sql = ('sum(rate(istio_request_duration_milliseconds_sum'
+               '{reporter="destination", destination_workload_namespace="%s"}[1m]))'
+               ' by (destination_workload) / '
+               'sum(rate(istio_request_duration_milliseconds_count'
+               '{reporter="destination", destination_workload_namespace="%s"}[1m]))'
+               ' by (destination_workload)') % (self.namespace, self.namespace)
+        out = {}
+        for res in self.execute_prom(self.prom_no_range_url, sql):
+            try:
+                name = res['metric']['destination_workload']
+            except KeyError:
+                continue
+            out[name] = self._instant([res])
+        return out
+
+    def get_front_avg(self, front_svc: str, gateway: str = "") -> float:
+        """Mean end-user latency (ms) at the gateway->front edge, with the
+        same completion semantics + gateway_edge/service fallback as
+        get_front_p90. NaN when no traffic.
+        """
+        if gateway:
+            sql = ('sum(rate(istio_request_duration_milliseconds_sum'
+                   '{reporter="destination", destination_workload="%s", '
+                   'source_workload="%s"}[1m])) by (destination_workload) / '
+                   'sum(rate(istio_request_duration_milliseconds_count'
+                   '{reporter="destination", destination_workload="%s", '
+                   'source_workload="%s"}[1m])) by (destination_workload)') % (
+                    front_svc, gateway, front_svc, gateway)
+            v = self._instant(self.execute_prom(self.prom_no_range_url, sql),
+                              default=float('nan'))
+            if v == v:
+                return v
+        sql = ('sum(rate(istio_request_duration_milliseconds_sum'
+               '{reporter="destination", destination_workload="%s"}[1m]))'
+               ' by (destination_workload) / '
+               'sum(rate(istio_request_duration_milliseconds_count'
+               '{reporter="destination", destination_workload="%s"}[1m]))'
+               ' by (destination_workload)') % (front_svc, front_svc)
+        return self._instant(self.execute_prom(self.prom_no_range_url, sql),
+                             default=float('nan'))
+
     def get_front_p90(self, front_svc: str, gateway: str = "") -> dict:
         """End-user tail latency: p90 for the gateway->front edge, falling
         back to the front service's own p90 (reporter=destination).

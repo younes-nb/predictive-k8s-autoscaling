@@ -1,0 +1,58 @@
+================================================================================
+RF SLO-VIOLATION PREDICTOR TRAINING RESULTS — PAPER METRICS
+(PBScaler, IEEE TSC 2024, Sec. IV-C2; TrainTicket, lab cluster)
+Generated: 2026-10-23T12:4x UTC (direct report of the exact training run)
+================================================================================
+
+CONFIG (paper mode, as directed 2026-10-21)
+  script                 pbscaler/simulation/RandomForestClassify.py
+  dataset                pbscaler/data/traindata_20261022_052124/train_data.csv
+                         (JUL-13 collection: 1 h warmup + 12 h k6 NASA replay,
+                         native HPAs active during collection, 5 s cadence)
+  feature layout         [i, qps, count] per stateless microservice
+                         (43 services -> 129 features + label; NO delta features)
+  class weight           sklearn RandomForest default (NO balancing;
+                         'balanced_subsample' deviation reverted 2026-10-21)
+  seed                   20 (setup_seed(20): numpy + random)
+  split                  sklearn train_test_split default (75/25, shuffled)
+  label                  slo_reward from istio front P90 (gw->ui edge),
+                         completion semantics rate[1m] over duration buckets;
+                         rows with -1 (no front traffic) dropped
+
+SAMPLES
+  collected rows         8640
+  labeled samples used   8490  (violations: 32, no-violations: 8458)
+  dropped (unlabeled)    150
+
+PAPER METRICS (held-out test set, n=2123)
+  test set score              1.00
+  accuracy                    0.9995289684408856
+  recall                      0.8571428571428571
+  AUC (ROC)                   0.9285714285714286
+  positive-class rate (viol)  0.33% of labeled samples (32/8490)
+
+  classification report:
+                 precision    recall  f1-score   support
+
+           0.0      1.000     0.857     0.923         7
+           1.0      1.000     1.000     1.000      2116
+
+      accuracy                          1.000      2123
+     macro avg      1.000     0.929     0.961      2123
+  weighted avg      1.000     1.000     1.000      2123
+
+  (class 0.0 = SLO violation, class 1.0 = no violation; the sole miss was a
+  single violation row misclassified as non-violating)
+
+ARTIFACTS
+  model (joblib)    pbscaler/simulation/train_ticket/RandomForestClassify.model
+  predictor pickle  pbscaler/simulation/train_ticket/rf.pkl
+  svc order file    pbscaler/simulation/train_ticket/RandomForestClassify.svcs
+                    (43 svcs — the exact feature-row order PBScaler's GA uses
+                    at runtime; loaded by the controller, 43 svcs verified)
+  canonical raw     pbscaler/simulation/train_ticket/rf_train_results_traindata_20261022_052124.txt
+  training log
+
+DEPLOYMENT
+  baked into image younesnb/pbscaler:v1.2.1 (current) via deploy/build_and_push.sh;
+  controller verified loading the model + 43 svcs at startup (2026-10-23 08:05Z).

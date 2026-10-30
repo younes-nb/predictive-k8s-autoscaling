@@ -163,6 +163,7 @@ def main():
     def cols_row(extra=None):
         row = {'timestamp': pd.Timestamp.now(tz='UTC').isoformat()}
         row['front_p90'] = np.nan
+        row['front_avg'] = np.nan
         row['front_source'] = ''
         row['slo_reward'] = -1
         row['total_qps'] = 0.0
@@ -172,6 +173,7 @@ def main():
             row[s + '&cpu_usage'] = 0.0
             row[s + '&mem_usage'] = 0.0
             row[s + '&p50'] = np.nan
+            row[s + '&avg'] = np.nan
             row[s + '&p90'] = np.nan
             row[s + '&p99'] = np.nan
             row[s + '&success_rate'] = np.nan
@@ -199,6 +201,8 @@ def main():
             sr = success_rate(prom_util)
             lat = prom_util.get_svc_latency()
             front_p90 = prom_util.get_front_p90(front, config.gateway_name)
+            front_avg = prom_util.get_front_avg(front, config.gateway_name)
+            avg_map = prom_util.get_svc_avg()
 
             total = 0.0
             for s in svcs:
@@ -209,11 +213,13 @@ def main():
                 row[s + '&cpu_usage'] = round(cpu_mb.get(s, 0.0), 9)
                 row[s + '&mem_usage'] = round(mem_mb.get(s, 0.0), 6)
                 row[s + '&p50'] = lat.get(s + '&p50', np.nan)
+                row[s + '&avg'] = avg_map.get(s, np.nan)
                 row[s + '&p90'] = lat.get(s + '&p90', np.nan)
                 row[s + '&p99'] = lat.get(s + '&p99', np.nan)
                 row[s + '&success_rate'] = sr.get(s, np.nan)
             row['total_qps'] = total
             row['front_p90'] = front_p90.get('front_p90', np.nan)
+            row['front_avg'] = front_avg
             row['front_source'] = front_p90.get('front_source', '')
 
             if row['front_p90'] == row['front_p90']:  # not nan
@@ -228,7 +234,7 @@ def main():
 
             # lazy header creation (service list frozen at start)
             if train_f is None:
-                train_cols = ['timestamp', 'front_p90', 'front_source', 'slo_reward',
+                train_cols = ['timestamp', 'front_p90', 'front_avg', 'front_source', 'slo_reward',
                               'total_qps'] + [s + f'&{k}' for s in svcs for k in ('qps', 'count')]
                 train_f = open(train_path, 'w')
                 train_w = csv.DictWriter(train_f, fieldnames=train_cols, extrasaction='ignore')
