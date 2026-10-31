@@ -16,6 +16,17 @@ const TEST_MIN = parseInt(__ENV.TEST_MIN || '0', 10);
 // per-VU sleep stays consistent with the offered rate.
 const COMPRESS = parseFloat(__ENV.TRACE_COMPRESS || '1', 10);
 const PW = __ENV.PW || 'loadtest123';
+// OPEN_LOOP=1: true arrival-based dosing (ramping-arrival-rate executor) —
+// arrivals are scheduled at the trace's per-minute rate regardless of how fast
+// VUs complete iterations; USER_POOL becomes maxVUs (worker cap, sized so
+// bursts during latency spikes don't starve arrivals). Default 0 keeps the
+// legacy closed-loop pacing (VUs sleep to the traced rate).
+const OPEN_LOOP = __ENV.OPEN_LOOP === '1';
+const PRE_ALLOC = parseInt(__ENV.PRE_ALLOCATED_VUS || '100', 10);
+// FLAT_RPS>0 ignores the trace curve entirely and doses a CONSTANT arrival
+// rate (arrivals/sec) for the whole TEST_MIN — used for max-pressure
+// calibration sweeps (trace rhythm replaced by a held peak).
+const FLAT_RPS = parseInt(__ENV.FLAT_RPS || '0', 10);
 
 const MCR = new SharedArray('mcr', function () {
   const txt = open(__ENV.MCR_CSV);
@@ -33,10 +44,48 @@ const SEEDS = new SharedArray('seeds', function () {
 });
 
 const NMIN = TEST_MIN > 0 ? TEST_MIN : Math.ceil(MCR.length / COMPRESS);
-export const options = {
+// buildArrivalStages: one ramping-arrival-rate stage per replayed trace row.
+// With COMPRESS=1 each stage lasts 60s and targets count/60 arrivals per
+// second; consecutive-stage interpolation makes the stepped per-minute curve
+// continuous. Stage duration shrinks to 60/COMPRESS seconds when compressing.
+function buildArrivalStages() {
+  const rows = TEST_MIN > 0 ? TEST_MIN : Math.ceil(MCR.length / COMPRESS);
+  const stageSec = 60 / Math.max(COMPRESS, 0.0001);
+  const stages = [];
+  for (let m = 0; m < rows; m++) {
+    const idx = (START_MIN + Math.floor(m * COMPRESS)) % MCR.length;
+    const rps = (MCR[idx] * COMPRESS) / 60;
+    stages.push({ duration: `${stageSec.toFixed(3)}s`, target: Math.round(rps) });
+  }
+  return stages;
+}
+export const options = OPEN_LOOP ? {
+  scenarios: {
+    load: FLAT_RPS > 0 ? {
+      executor: 'constant-arrival-rate',
+      timeUnit: '1s',
+      rate: FLAT_RPS,
+      duration: `${NMIN}m`,
+      preAllocatedVUs: PRE_ALLOC,
+      maxVUs: POOL,
+    } : {
+      executor: 'ramping-arrival-rate',
+      timeUnit: '1s',
+      stages: buildArrivalStages(),
+      startRate: 0,
+      preAllocatedVUs: PRE_ALLOC,
+      maxVUs: POOL,
+    },
+  },
+
+  systemTags: ['proto', 'status', 'method', 'name', 'group', 'check', 'error', 'error_code', 'tls_version'],
+  thresholds: {
+    http_req_failed: ['rate<0.35'],
+    http_req_duration: ['p(95)<8000'],
+  },
+} : {
   vus: POOL,
   duration: `${NMIN}m`,
-
 
   systemTags: ['proto', 'status', 'method', 'name', 'group', 'check', 'error', 'error_code', 'tls_version'],
   thresholds: {
@@ -181,20 +230,24 @@ function a_notifications(st) {
   if (!ensureLogin(st)) return;
   get('/api/v1/notificationservice/notifications', st);
   get('/api/v1/notificationservice/notifications/types', st);
-  get('/api/v1/notificationservice/notifications/account', st);
+  get(`/api/v1/notificationservice/notifications/account/${st.account}`, st);
 }
 
 function a_voucher(st) {
-  if (!ensureLogin(st)) return;
-  get('/api/v1/voucherservice/vouchers', st);
-  get('/api/v1/voucherservice/vouchers/account', st);
-  post('/api/v1/voucherservice/voucher/use', { userId: st.account, voucherId: 'VOUCHER1' }, st);
+  // ts-voucher-service is a Tornado app with a single route: POST /getVoucher
+  // (routed through a dedicated gateway HTTPRoute; the /api/v1/voucherservice
+  // paths exist only behind the UI's own proxy list and 404 at the gateway).
+  post('/getVoucher', { userId: st.account, voucherId: 'VOUCHER1' }, st);
 }
 
 function a_preserve_other(st) {
-  if (!ensureLogin(st)) return;
-  get('/api/v1/preserveotherservice/preserveother', st);
-  get('/api/v1/preserveotherservice/preserveother/list', st);
+  // POST /api/v1/preserveotherservice/preserveOther is the mounted path; the
+  // lease /welcome 404s at the gateway in this build
+  post('/api/v1/preserveotherservice/preserveOther', {
+    accountId: st.account, contactsId: st.contacts, tripId: pick(TRIPS.slice(0, 3)),
+    ticketType: 2, date: `2026-09-${27 + Math.floor(Math.random() * 3)}`,
+    from: 'nanjing', to: 'shanghai',
+  }, st);
 }
 
 function a_user_profile(st) {
@@ -250,12 +303,19 @@ let ST = null;
 export default function (data) {
   if (!ST) {
     ST = state();
-    sleep(Math.random() * 10);
+    sleep(Math.random() * 2);
     ensureLogin(ST);
   }
   // ALWAYS call frontend first (entry point)
   get('/', ST);
-  
+
+  if (OPEN_LOOP) {
+    // arrivals dosing already matches the schedule (trace-driven or FLAT_RPS);
+    // no per-VU pacing sleep, no trace gate
+    if (Math.random() < 0.03) ensureLogin(ST, true);
+    pick(BAG)(ST);
+    return;
+  }
   const elapsedMin = Math.floor((Date.now() - data.t0) / 60000);
   const traceIdx = Math.floor((START_MIN + elapsedMin * COMPRESS) % MCR.length);
   const count = Math.round(MCR[traceIdx] * COMPRESS) || 0;
