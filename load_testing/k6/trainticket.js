@@ -3,29 +3,29 @@ import { check, sleep } from 'k6';
 import { SharedArray } from 'k6/data';
 import { textSummary } from 'https://jslib.k6.io/k6-summary/0.0.1/index.js';
 
-const HOST = __ENV.HOST || 'https://train-ticket.younesnb.linkpc.net';
+const HOST = __ENV.HOST || 'http://10.10.1.2:30080';
 const MAXR = parseInt(__ENV.MAX_REQUESTS || '5000', 10);
 const POOL = parseInt(__ENV.USER_POOL || '500', 10);
 const START_MIN = parseInt(__ENV.START_MIN || '0', 10);
 const TEST_MIN = parseInt(__ENV.TEST_MIN || '0', 10);
-// TRACE_COMPRESS (k6 env, default 1): replay the NASA trace COMPRESS rows per
-// wall minute instead of 1 row per wall minute. The trace is normalized to
-// [0,1] by MAX_REQUESTS, so this is the ONLY knob that raises offered load
-// without touching MAX_REQUESTS — compressing the timeline scales offered
-// load linearly (paper option 1). count is multiplied by COMPRESS so the
-// per-VU sleep stays consistent with the offered rate.
+
+
+
+
+
+
 const COMPRESS = parseFloat(__ENV.TRACE_COMPRESS || '1', 10);
 const PW = __ENV.PW || 'loadtest123';
-// OPEN_LOOP=1: true arrival-based dosing (ramping-arrival-rate executor) —
-// arrivals are scheduled at the trace's per-minute rate regardless of how fast
-// VUs complete iterations; USER_POOL becomes maxVUs (worker cap, sized so
-// bursts during latency spikes don't starve arrivals). Default 0 keeps the
-// legacy closed-loop pacing (VUs sleep to the traced rate).
+
+
+
+
+
 const OPEN_LOOP = __ENV.OPEN_LOOP === '1';
 const PRE_ALLOC = parseInt(__ENV.PRE_ALLOCATED_VUS || '100', 10);
-// FLAT_RPS>0 ignores the trace curve entirely and doses a CONSTANT arrival
-// rate (arrivals/sec) for the whole TEST_MIN — used for max-pressure
-// calibration sweeps (trace rhythm replaced by a held peak).
+
+
+
 const FLAT_RPS = parseInt(__ENV.FLAT_RPS || '0', 10);
 
 const MCR = new SharedArray('mcr', function () {
@@ -44,10 +44,10 @@ const SEEDS = new SharedArray('seeds', function () {
 });
 
 const NMIN = TEST_MIN > 0 ? TEST_MIN : Math.ceil(MCR.length / COMPRESS);
-// buildArrivalStages: one ramping-arrival-rate stage per replayed trace row.
-// With COMPRESS=1 each stage lasts 60s and targets count/60 arrivals per
-// second; consecutive-stage interpolation makes the stepped per-minute curve
-// continuous. Stage duration shrinks to 60/COMPRESS seconds when compressing.
+
+
+
+
 function buildArrivalStages() {
   const rows = TEST_MIN > 0 ? TEST_MIN : Math.ceil(MCR.length / COMPRESS);
   const stageSec = 60 / Math.max(COMPRESS, 0.0001);
@@ -94,7 +94,7 @@ export const options = OPEN_LOOP ? {
   },
 };
 
-// Expanded constants for wider coverage
+
 const TRIPS = ['G1234', 'G1235', 'G1236', 'D1345', 'G7401', 'D7502', 'G5001', 'D5003'];
 const ODS = [
   ['nanjing', 'shanghai'], ['nanjing', 'suzhou'], ['suzhou', 'shanghai'], ['wuxi', 'shanghai'],
@@ -225,7 +225,7 @@ function a_pay(st) {
   }
 }
 
-// NEW: Explicit actions for dead services
+
 function a_notifications(st) {
   if (!ensureLogin(st)) return;
   get('/api/v1/notificationservice/notifications', st);
@@ -234,15 +234,15 @@ function a_notifications(st) {
 }
 
 function a_voucher(st) {
-  // ts-voucher-service is a Tornado app with a single route: POST /getVoucher
-  // (routed through a dedicated gateway HTTPRoute; the /api/v1/voucherservice
-  // paths exist only behind the UI's own proxy list and 404 at the gateway).
+  
+  
+  
   post('/getVoucher', { userId: st.account, voucherId: 'VOUCHER1' }, st);
 }
 
 function a_preserve_other(st) {
-  // POST /api/v1/preserveotherservice/preserveOther is the mounted path; the
-  // lease /welcome 404s at the gateway in this build
+  
+  
   post('/api/v1/preserveotherservice/preserveOther', {
     accountId: st.account, contactsId: st.contacts, tripId: pick(TRIPS.slice(0, 3)),
     ticketType: 2, date: `2026-09-${27 + Math.floor(Math.random() * 3)}`,
@@ -277,7 +277,7 @@ function a_inside_payment(st) {
   post('/api/v1/inside_pay_service/inside_payment', { userId: st.account, orderId: oid, tripId: pick(TRIPS.slice(0, 3)), price }, st);
 }
 
-// ALWAYS call frontend first, then pick action
+
 const ACTS = [
   [a_travel, 10], [a_static, 6], [a_menus, 5], [a_leaf, 4], [a_orders, 5],
   [a_preserve, 3], [a_pay, 3], [a_admin, 2],
@@ -306,12 +306,12 @@ export default function (data) {
     sleep(Math.random() * 2);
     ensureLogin(ST);
   }
-  // ALWAYS call frontend first (entry point)
+  
   get('/', ST);
 
   if (OPEN_LOOP) {
-    // arrivals dosing already matches the schedule (trace-driven or FLAT_RPS);
-    // no per-VU pacing sleep, no trace gate
+    
+    
     if (Math.random() < 0.03) ensureLogin(ST, true);
     pick(BAG)(ST);
     return;
