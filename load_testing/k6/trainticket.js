@@ -1,7 +1,6 @@
 import http from 'k6/http';
 import { check, sleep } from 'k6';
 import { SharedArray } from 'k6/data';
-import { textSummary } from 'https://jslib.k6.io/k6-summary/0.0.1/index.js';
 
 const HOST = __ENV.HOST || 'http://10.10.1.2:30080';
 const MAXR = parseInt(__ENV.MAX_REQUESTS || '5000', 10);
@@ -95,16 +94,48 @@ export const options = OPEN_LOOP ? {
 };
 
 
-const TRIPS = ['G1234', 'G1235', 'G1236', 'D1345', 'G7401', 'D7502', 'G5001', 'D5003'];
+const TRIPS = ['G1234', 'G1235', 'G1236'];
 const ODS = [
-  ['nanjing', 'shanghai'], ['nanjing', 'suzhou'], ['suzhou', 'shanghai'], ['wuxi', 'shanghai'],
-  ['beijing', 'shanghai'], ['shanghai', 'guangzhou'], ['chengdu', 'chongqing'], ['hangzhou', 'taipei'],
-  ['xian', 'shanghai'], ['wuhan', 'guangzhou'], ['shenzhen', 'changsha'], ['qingdao', 'jinan']
+  ['shanghai', 'taiyuan'],
+  ['nanjing', 'shanghai'],
+  ['suzhou', 'shanghai'],
 ];
-const ROUTES = ['0b23bd3e-876a-4af3-b920-c50a90c90b04', '92708982-77af-4318-be25-57ccb0ff69ad',
-  '580a4d98-a6db-4bb2-abc1-336a2acf8c0b', '0859b176-3f83-4482-b231-5c80432c5b0e'];
+const ROUTES = ['0b23bd3e-876a-4af3-b920-c50a90c90b04'];
 
 function pick(a) { return a[Math.floor(Math.random() * a.length)]; }
+
+// Pre-flight data validation - runs in setup()
+function verifyClusterData() {
+  const checks = [
+    { name: 'station-shanghai', url: `${HOST}/api/v1/stationservice/stations/id/shanghai`, expect: 200 },
+    { name: 'route-shanghai-taiyuan', url: `${HOST}/api/v1/routeservice/routes/0b23bd3e-876a-4af3-b920-c50a90c90b04`, expect: 200 },
+    { name: 'travel-query', url: `${HOST}/api/v1/travelservice/trips/left`, method: 'POST', body: JSON.stringify({startPlace:'shanghai',endPlace:'taiyuan',departureTime:'2027-05-04'}), expect: 200 },
+    { name: 'ticketinfo', url: `${HOST}/api/v1/ticketinfoservice/ticketinfo`, method: 'POST', body: JSON.stringify({trip:{tripId:{type:'G',number:'1236'},trainTypeId:'GaoTieOne',routeId:'0b23bd3e-876a-4af3-b920-c50a90c90b04',startingStationId:'shanghai',stationsId:'suzhou',terminalStationId:'taiyuan',startingTime:'2027-05-04T01:00:00.000Z',endTime:'2027-05-04T07:51:52.000Z'},startingPlace:'shanghai',endPlace:'taiyuan',departureTime:'2027-05-04T00:00:00.000Z'}), expect: 200 },
+    { name: 'basic-welcome', url: `${HOST}/api/v1/basicservice/welcome`, expect: 200 },
+  ];
+  
+  for (const c of checks) {
+    const params = {
+      method: c.method || 'GET',
+      headers: { 'Content-Type': 'application/json' },
+      timeout: '15s'
+    };
+    if (c.body) params.body = c.body;
+    
+    const r = http.request(c.method || 'GET', c.url, c.body || null, params);
+    if (r.status !== c.expect) {
+      throw new Error(`Pre-flight check failed: ${c.name} returned ${r.status} (expected ${c.expect})`);
+    }
+    console.log(`Pre-flight OK: ${c.name}`);
+  }
+  console.log('All pre-flight data checks passed');
+}
+
+function logFailedRequest(r, tag, body) {
+  if (r.status >= 500 || r.status === 0) {
+    console.error(`FAILED ${tag}: status=${r.status} url=${r.url} body=${JSON.stringify(body).slice(0,200)} error=${r.error || r.error_code || 'none'}`);
+  }
+}
 
 function login(st) {
   const r = http.post(
@@ -127,20 +158,26 @@ function ensureLogin(st, force) {
   return login(st);
 }
 function get(path, st, tag) {
-  return http.get(`${HOST}${path}`, { headers: Object.assign({ 'Content-Type': 'application/json' }, st ? H(st) : {}), tags: { name: tag || path }, timeout: '30s' });
+  const r = http.get(`${HOST}${path}`, { headers: Object.assign({ 'Content-Type': 'application/json' }, st ? H(st) : {}), tags: { name: tag || path }, timeout: '30s' });
+  logFailedRequest(r, tag);
+  return r;
 }
 function post(path, body, st, tag) {
-  return http.post(`${HOST}${path}`, JSON.stringify(body), { headers: Object.assign({ 'Content-Type': 'application/json' }, st ? H(st) : {}), tags: { name: tag || path }, timeout: '30s' });
+  const r = http.post(`${HOST}${path}`, JSON.stringify(body), { headers: Object.assign({ 'Content-Type': 'application/json' }, st ? H(st) : {}), tags: { name: tag || path }, timeout: '30s' });
+  logFailedRequest(r, tag, body);
+  return r;
 }
 
 function a_travel(st) {
   const [o, d] = pick(ODS);
   const day = 27 + Math.floor(Math.random() * 3);
-  const b = { startPlace: o, endPlace: d, departureTime: `2026-09-${String(day).padStart(2, '0')}` };
-  post('/api/v1/travelservice/trips/left', b, st);
-  post('/api/v1/travel2service/trips/left', b, st);
-  get(`/api/v1/travelservice/trips/${pick(TRIPS)}`, st);
-  post('/api/v1/travel2service/trips/left', b, st);
+  const b = { startPlace: o, endPlace: d, departureTime: `2027-05-${String(day).padStart(2, '0')}` };
+  const r1 = post('/api/v1/travelservice/trips/left', b, st, 'travel-query');
+  check(r1, { 'travel-query ok': r => r.status === 200 && r.json().status === 1 });
+  const r2 = post('/api/v1/travel2service/trips/left', b, st);
+  check(r2, { 'travel2-query ok': r => r.status === 200 });
+  const r3 = get(`/api/v1/travelservice/trips/${pick(TRIPS)}`, st);
+  check(r3, { 'trip-detail ok': r => r.status === 200 });
 }
 function a_static(st) {
   get(`/api/v1/routeservice/routes/${pick(ROUTES)}`, st);
@@ -205,7 +242,7 @@ function a_preserve(st) {
   const [o, d] = pick(ODS.slice(0, 3));
   const r = post('/api/v1/preserveservice/preserve', {
     accountId: st.account, contactsId: st.contacts, tripId: pick(TRIPS.slice(0, 3)),
-    seatType: pick([2, 3]), date: `2026-09-${27 + Math.floor(Math.random() * 3)}`,
+    seatType: pick([2, 3]), date: `2027-05-${27 + Math.floor(Math.random() * 3)}`,
     from: o, to: d, assurance: 0,
   }, st);
   if (r.status === 200) a_orders(st);
@@ -221,7 +258,7 @@ function a_pay(st) {
   get(`/api/v1/executeservice/execute/execute/${oid}`, st);
   if (Math.random() < 0.5) get(`/api/v1/cancelservice/cancel/${oid}/${st.account}`, st);
   if (Math.random() < 0.3 && st.orders.length) {
-    post('/api/v1/rebookservice/rebook', { orderId: pick(st.orders), oldTripId: 'G1234', tripId: 'G1235', seatType: 2, date: `2026-09-${27 + Math.floor(Math.random() * 3)}` }, st);
+    post('/api/v1/rebookservice/rebook', { orderId: pick(st.orders), oldTripId: 'G1234', tripId: 'G1235', seatType: 2, date: `2027-05-${27 + Math.floor(Math.random() * 3)}` }, st);
   }
 }
 
@@ -241,13 +278,14 @@ function a_voucher(st) {
 }
 
 function a_preserve_other(st) {
-  
-  
-  post('/api/v1/preserveotherservice/preserveOther', {
-    accountId: st.account, contactsId: st.contacts, tripId: pick(TRIPS.slice(0, 3)),
-    ticketType: 2, date: `2026-09-${27 + Math.floor(Math.random() * 3)}`,
-    from: 'nanjing', to: 'shanghai',
+  if (!ensureLogin(st) || !st.contacts) { a_travel(st); return; }
+  const [o, d] = pick(ODS);
+  const r = post('/api/v1/preserveotherservice/preserveOther', {
+    accountId: st.account, contactsId: st.contacts, tripId: pick(TRIPS),
+    ticketType: 2, date: `2027-05-${27 + Math.floor(Math.random() * 3)}`,
+    from: o, to: d,
   }, st);
+  if (r.status === 200) a_orders(st);
 }
 
 function a_user_profile(st) {
@@ -288,6 +326,7 @@ const BAG = [];
 ACTS.forEach(([f, w]) => { for (let i = 0; i < w; i++) BAG.push(f); });
 
 export function setup() {
+  verifyClusterData();
   return { t0: Date.now() };
 }
 function state() {
@@ -324,7 +363,4 @@ export default function (data) {
   if (Math.random() < 0.03) ensureLogin(ST, true);
   pick(BAG)(ST);
   sleep(Math.max(0.05, 60 / Math.max(1, perVU) - 0.5));
-}
-export function handleSummary(data) {
-  return { stdout: textSummary(data, { compact: true }) };
 }
