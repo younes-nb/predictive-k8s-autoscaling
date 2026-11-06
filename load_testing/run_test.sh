@@ -25,76 +25,171 @@ case "$TARGET_URL" in
     ;;
 esac
 
-# Pre-flight health checks (run on loadgen, save results there)
+# Pre-flight health checks (run locally from runner with kubectl access, save logs locally)
 preflight_checks() {
-  echo "Running pre-flight health checks on loadgen..."
-  ssh -o ConnectTimeout=10 loadgen '
-    set -euo pipefail
-    LOG_DIR=/opt/loadgen/logs
-    mkdir -p "$LOG_DIR"
-    PREFLIGHT_LOG="$LOG_DIR/preflight_$(date +%Y%m%d_%H%M%S).log"
-    exec > >(tee -a "$PREFLIGHT_LOG") 2>&1
-    
-    echo "=== Pre-flight checks started at $(date) ==="
-    
-    checks=(
-      "ts-station-service:12345:/api/v1/stationservice/stations"
-      "ts-route-service:11178:/api/v1/routeservice/routes"
-      "ts-travel-service:12346:/api/v1/travelservice/trips/left"
-      "ts-ticketinfo-service:15681:/api/v1/ticketinfoservice/ticketinfo"
-      "ts-basic-service:15680:/api/v1/basicservice/welcome"
-    )
-    
-    for check in "${checks[@]}"; do
-      IFS=":" read -r svc port path <<< "$check"
-      echo "Checking $svc..."
-      if ! curl -sf -o /dev/null --max-time 10 "http://$svc.train-ticket.svc.cluster.local:$port$path"; then
-        echo "ERROR: $svc health check failed"
-        exit 1
-      fi
-    done
-    
-    echo "Verifying core data..."
-    
-    # Station service - shanghai must exist
-    if ! curl -sf "http://ts-station-service.train-ticket.svc.cluster.local:12345/api/v1/stationservice/stations/id/shanghai" | jq -e ".status==1" >/dev/null; then
-      echo "ERROR: Station service missing shanghai"
-      exit 1
-    fi
-    
-    # Route service - shanghai->taiyuan must exist
-    if ! curl -sf "http://ts-route-service.train-ticket.svc.cluster.local:11178/api/v1/routeservice/routes/0b23bd3e-876a-4af3-b920-c50a90c90b04" | jq -e ".status==1" >/dev/null; then
-      echo "ERROR: Route service missing shanghai->taiyuan route"
-      exit 1
-    fi
-    
-    # Travel service - must have valid trips
-    if ! curl -sf "http://ts-travel-service.train-ticket.svc.cluster.local:12346/api/v1/travelservice/trips/left" \
-         -X POST -H "Content-Type: application/json" \
-         -d "{\"startPlace\":\"shanghai\",\"endPlace\":\"taiyuan\",\"departureTime\":\"2027-05-04\"}" \
-         | jq -e ".status==1 and .data|length>0" >/dev/null; then
-      echo "ERROR: Travel service has no valid trips"
-      exit 1
-    fi
-    
-    # Ticketinfo service
-    if ! curl -sf "http://ts-ticketinfo-service.train-ticket.svc.cluster.local:15681/api/v1/ticketinfoservice/ticketinfo" \
-         -X POST -H "Content-Type: application/json" \
-         -d "{\"trip\":{\"tripId\":{\"type\":\"G\",\"number\":\"1236\"},\"trainTypeId\":\"GaoTieOne\",\"routeId\":\"0b23bd3e-876a-4af3-b920-c50a90c90b04\",\"startingStationId\":\"shanghai\",\"stationsId\":\"suzhou\",\"terminalStationId\":\"taiyuan\",\"startingTime\":\"2027-05-04T01:00:00.000Z\",\"endTime\":\"2027-05-04T07:51:52.000Z\"},\"startingPlace\":\"shanghai\",\"endPlace\":\"taiyuan\",\"departureTime\":\"2027-05-04T00:00:00.000Z\"}" \
-         | jq -e ".status==1" >/dev/null; then
-      echo "ERROR: Ticketinfo service failed"
-      exit 1
-    fi
-    
-    # Basic service
-    if ! curl -sf "http://ts-basic-service.train-ticket.svc.cluster.local:15680/api/v1/basicservice/welcome" | jq -e ".status==1" >/dev/null; then
-      echo "ERROR: Basic service failed"
-      exit 1
-    fi
-    
-    echo "=== All pre-flight checks passed at $(date) ==="
-  ' || { echo "Pre-flight checks failed, aborting"; exit 1; }
-}
+  echo "Running pre-flight health checks..."
+  LOG_DIR=/tmp/loadgen_logs
+  mkdir -p "$LOG_DIR"
+  PREFLIGHT_LOG="$LOG_DIR/preflight_$(date +%Y%m%d_%H%M%S).log"
+  exec > >(tee -a "$PREFLIGHT_LOG") 2>&1
+  
+  echo "=== Pre-flight checks started at $(date) ==="
+  
+  # Use kubectl port-forward or exec to check cluster services
+  echo "Checking cluster services via kubectl exec..."
+  
+  # Check station service
+  echo "Checking ts-station-service..."
+  if ! kubectl -n monitoring exec pbscaler-collector -- python3 -c "
+import requests, sys
+try:
+    r = requests.get('http://ts-station-service.train-ticket.svc.cluster.local:12345/api/v1/stationservice/stations', timeout=10)
+    sys.exit(0 if r.status_code == 200 else 1)
+except Exception as e:
+    sys.exit(1)
+  "; then
+    echo "ERROR: ts-station-service health check failed"
+    exit 1
+  fi
+  
+  # Check route service
+  echo "Checking ts-route-service..."
+  if ! kubectl -n monitoring exec pbscaler-collector -- python3 -c "
+import requests, sys
+try:
+    r = requests.get('http://ts-route-service.train-ticket.svc.cluster.local:11178/api/v1/routeservice/routes', timeout=10)
+    sys.exit(0 if r.status_code == 200 else 1)
+except Exception as e:
+    sys.exit(1)
+  "; then
+    echo "ERROR: ts-route-service health check failed"
+    exit 1
+  fi
+  
+  # Check travel service
+  echo "Checking ts-travel-service..."
+  if ! kubectl -n monitoring exec pbscaler-collector -- python3 -c "
+import requests, sys
+try:
+    r = requests.post('http://ts-travel-service.train-ticket.svc.cluster.local:12346/api/v1/travelservice/trips/left', 
+                      json={'startPlace':'shanghai','endPlace':'taiyuan','departureTime':'2027-05-04'},
+                      headers={'Content-Type': 'application/json'}, timeout=10)
+    sys.exit(0 if r.status_code == 200 and r.json().get('status') == 1 else 1)
+except Exception as e:
+    sys.exit(1)
+  "; then
+    echo "ERROR: ts-travel-service health check failed"
+    exit 1
+  fi
+  
+  # Check ticketinfo service
+  echo "Checking ts-ticketinfo-service..."
+  if ! kubectl -n monitoring exec pbscaler-collector -- python3 -c "
+import requests, sys
+try:
+    r = requests.post('http://ts-ticketinfo-service.train-ticket.svc.cluster.local:15681/api/v1/ticketinfoservice/ticketinfo',
+                      json={'trip':{'tripId':{'type':'G','number':'1236'},'trainTypeId':'GaoTieOne','routeId':'0b23bd3e-876a-4af3-b920-c50a90c90b04','startingStationId':'shanghai','stationsId':'suzhou','terminalStationId':'taiyuan','startingTime':'2027-05-04T01:00:00.000Z','endTime':'2027-05-04T07:51:52.000Z'},'startingPlace':'shanghai','endPlace':'taiyuan','departureTime':'2027-05-04T00:00:00.000Z'},
+                      headers={'Content-Type': 'application/json'}, timeout=10)
+    sys.exit(0 if r.status_code == 200 and r.json().get('status') == 1 else 1)
+except Exception as e:
+    sys.exit(1)
+  "; then
+    echo "ERROR: ts-ticketinfo-service health check failed"
+    exit 1
+  fi
+  
+  # Check basic service
+  echo "Checking ts-basic-service..."
+  if ! kubectl -n monitoring exec pbscaler-collector -- python3 -c "
+import requests, sys
+try:
+    r = requests.get('http://ts-basic-service.train-ticket.svc.cluster.local:15680/api/v1/basicservice/welcome', timeout=10)
+    sys.exit(0 if r.status_code == 200 else 1)
+except Exception as e:
+    sys.exit(1)
+  "; then
+    echo "ERROR: ts-basic-service health check failed"
+    exit 1
+  fi
+  
+  echo "Verifying core data..."
+  
+  # Station service - shanghai must exist
+  if ! kubectl -n monitoring exec pbscaler-collector -- python3 -c "
+import requests, sys
+try:
+    r = requests.get('http://ts-station-service.train-ticket.svc.cluster.local:12345/api/v1/stationservice/stations/id/shanghai', timeout=10)
+    data = r.json()
+    sys.exit(0 if r.status_code == 200 and data.get('status') == 1 else 1)
+except Exception as e:
+    sys.exit(1)
+  "; then
+    echo "ERROR: Station service missing shanghai"
+    exit 1
+  fi
+  
+  # Route service - shanghai->taiyuan must exist
+  if ! kubectl -n monitoring exec pbscaler-collector -- python3 -c "
+import requests, sys
+try:
+    r = requests.get('http://ts-route-service.train-ticket.svc.cluster.local:11178/api/v1/routeservice/routes/0b23bd3e-876a-4af3-b920-c50a90c90b04', timeout=10)
+    data = r.json()
+    sys.exit(0 if r.status_code == 200 and data.get('status') == 1 else 1)
+except Exception as e:
+    sys.exit(1)
+  "; then
+    echo "ERROR: Route service missing shanghai->taiyuan route"
+    exit 1
+  fi
+  
+  # Travel service - must have valid trips
+  if ! kubectl -n monitoring exec pbscaler-collector -- python3 -c "
+import requests, sys
+try:
+    r = requests.post('http://ts-travel-service.train-ticket.svc.cluster.local:12346/api/v1/travelservice/trips/left',
+         json={'startPlace':'shanghai','endPlace':'taiyuan','departureTime':'2027-05-04'},
+         headers={'Content-Type': 'application/json'}, timeout=10)
+    data = r.json()
+    sys.exit(0 if r.status_code == 200 and data.get('status') == 1 and len(data.get('data', [])) > 0 else 1)
+except Exception as e:
+    sys.exit(1)
+  "; then
+    echo "ERROR: Travel service has no valid trips"
+    exit 1
+  fi
+  
+  # Ticketinfo service
+  if ! kubectl -n monitoring exec pbscaler-collector -- python3 -c "
+import requests, sys
+try:
+    r = requests.post('http://ts-ticketinfo-service.train-ticket.svc.cluster.local:15681/api/v1/ticketinfoservice/ticketinfo',
+         json={'trip':{'tripId':{'type':'G','number':'1236'},'trainTypeId':'GaoTieOne','routeId':'0b23bd3e-876a-4af3-b920-c50a90c90b04','startingStationId':'shanghai','stationsId':'suzhou','terminalStationId':'taiyuan','startingTime':'2027-05-04T01:00:00.000Z','endTime':'2027-05-04T07:51:52.000Z'},'startingPlace':'shanghai','endPlace':'taiyuan','departureTime':'2027-05-04T00:00:00.000Z'},
+         headers={'Content-Type': 'application/json'}, timeout=10)
+    data = r.json()
+    sys.exit(0 if r.status_code == 200 and data.get('status') == 1 else 1)
+except Exception as e:
+    sys.exit(1)
+  "; then
+    echo "ERROR: Ticketinfo service failed"
+    exit 1
+  fi
+  
+  # Basic service
+  if ! kubectl -n monitoring exec pbscaler-collector -- python3 -c "
+import requests, sys
+try:
+    r = requests.get('http://ts-basic-service.train-ticket.svc.cluster.local:15680/api/v1/basicservice/welcome', timeout=10)
+    data = r.json()
+    sys.exit(0 if r.status_code == 200 and data.get('status') == 1 else 1)
+except Exception as e:
+    sys.exit(1)
+  "; then
+    echo "ERROR: Basic service failed"
+    exit 1
+  fi
+  
+  echo "=== All pre-flight checks passed at $(date) ==="
+} || { echo "Pre-flight checks failed, aborting"; exit 1; }
 
 preflight_checks
 
