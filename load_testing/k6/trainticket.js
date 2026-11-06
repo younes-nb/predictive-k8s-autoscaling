@@ -25,8 +25,6 @@ const PRE_ALLOC = parseInt(__ENV.PRE_ALLOCATED_VUS || '100', 10);
 
 
 
-const FLAT_RPS = parseInt(__ENV.FLAT_RPS || '0', 10);
-
 const MCR = new SharedArray('mcr', function () {
   const txt = open(__ENV.MCR_CSV);
   const lines = txt.trim().split('\n').slice(1);
@@ -60,14 +58,11 @@ function buildArrivalStages() {
 }
 export const options = OPEN_LOOP ? {
   scenarios: {
-    load: FLAT_RPS > 0 ? {
-      executor: 'constant-arrival-rate',
-      timeUnit: '1s',
-      rate: FLAT_RPS,
-      duration: `${NMIN}m`,
-      preAllocatedVUs: PRE_ALLOC,
-      maxVUs: POOL,
-    } : {
+    // Trace replay only: offered rps = MCR[idx] * TRACE_COMPRESS / 60 where
+    // MCR[idx] = round(raw_mcr / peak_raw * MAX_REQUESTS). FLAT_RPS (constant-
+    // arrival bypassing the trace) was removed by user directive: the official
+    // load axis is the jul13/jul14 NASA day-slice replay.
+    load: {
       executor: 'ramping-arrival-rate',
       timeUnit: '1s',
       stages: buildArrivalStages(),

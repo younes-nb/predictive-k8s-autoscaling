@@ -3,6 +3,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 MCR_CSV="${MCR_CSV:-/proj/k8sautoscaledl-PG0/nasa/jul13-14/http_mcr_NASA_jul95.csv}"
+MCR_NAME="${MCR_CSV##*/}"   # day-slice traces (mcr_jul13_slice.csv / mcr_jul14_slice.csv) live on the loadgen side
 MAX_REQUESTS="${MAX_REQUESTS:-5000}"
 USER_POOL="${USER_POOL:-500}"
 SEED_FILE="${SEED_FILE:-load_testing/seeds/tt_users.json}"
@@ -11,7 +12,6 @@ TEST_MIN="${TEST_MIN:-0}"
 TARGET_URL="${TARGET_URL:-http://10.10.1.2:30080}"
 TRACE_COMPRESS="${TRACE_COMPRESS:-1}"
 OPEN_LOOP="${OPEN_LOOP:-1}"
-FLAT_RPS="${FLAT_RPS:-0}"
 PRE_ALLOCATED_VUS="${PRE_ALLOCATED_VUS:-100}"
 
 case "$TARGET_URL" in
@@ -194,16 +194,16 @@ except Exception as e:
 preflight_checks
 
 if [[ -x /opt/loadgen/launch_k6.sh ]]; then
-  if [ ! -f /opt/loadgen/mcr.csv ] && [ -f "$MCR_CSV" ]; then
-    cp "$MCR_CSV" /opt/loadgen/mcr.csv
+  if [ ! -f "/opt/loadgen/$MCR_NAME" ] && [ -f "$MCR_CSV" ]; then
+    cp "$MCR_CSV" "/opt/loadgen/$MCR_NAME"
   fi
   exec env TARGET_URL="$TARGET_URL" \
-    MCR_CSV=/opt/loadgen/mcr.csv \
+    MCR_CSV="/opt/loadgen/$MCR_NAME" \
     MAX_REQUESTS="$MAX_REQUESTS" USER_POOL="$USER_POOL" \
     SEED_FILE=/opt/loadgen/seeds/tt_users.json \
     START_MIN="$START_MIN" TEST_MIN="$TEST_MIN" \
     TRACE_COMPRESS="$TRACE_COMPRESS" OPEN_LOOP="$OPEN_LOOP" \
-    FLAT_RPS="$FLAT_RPS" PRE_ALLOCATED_VUS="$PRE_ALLOCATED_VUS" \
+    PRE_ALLOCATED_VUS="$PRE_ALLOCATED_VUS" \
     /opt/loadgen/launch_k6.sh
 fi
 
@@ -214,9 +214,9 @@ ssh -o ConnectTimeout=10 loadgen 'test -x /opt/loadgen/launch_k6.sh' \
     exit 1
   }
 
-if ! ssh -o ConnectTimeout=10 loadgen 'test -f /opt/loadgen/mcr.csv'; then
-  scp -q "$MCR_CSV" loadgen:/tmp/mcr.csv && \
-  ssh -o ConnectTimeout=10 loadgen 'sudo mv /tmp/mcr.csv /opt/loadgen/mcr.csv && sudo chmod 0644 /opt/loadgen/mcr.csv'
+if ! ssh -o ConnectTimeout=10 loadgen "test -f /opt/loadgen/$MCR_NAME"; then
+  scp -q "$MCR_CSV" "loadgen:/tmp/$MCR_NAME" && \
+  ssh -o ConnectTimeout=10 loadgen "sudo mv /tmp/$MCR_NAME /opt/loadgen/$MCR_NAME && sudo chmod 0644 /opt/loadgen/$MCR_NAME"
 fi
 if ! ssh -o ConnectTimeout=10 loadgen 'test -f /opt/loadgen/seeds/tt_users.json'; then
   scp -q "$SEED_FILE" loadgen:/tmp/tt_users.json && \
@@ -225,10 +225,10 @@ fi
 
 exec ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=10 loadgen \
   "env TARGET_URL='$TARGET_URL' \
-   MCR_CSV=/opt/loadgen/mcr.csv \
+   MCR_CSV='/opt/loadgen/$MCR_NAME' \
    MAX_REQUESTS='$MAX_REQUESTS' USER_POOL='$USER_POOL' \
    SEED_FILE=/opt/loadgen/seeds/tt_users.json \
    START_MIN='$START_MIN' TEST_MIN='$TEST_MIN' \
    TRACE_COMPRESS='$TRACE_COMPRESS' OPEN_LOOP='$OPEN_LOOP' \
-   FLAT_RPS='$FLAT_RPS' PRE_ALLOCATED_VUS='$PRE_ALLOCATED_VUS' \
+   PRE_ALLOCATED_VUS='$PRE_ALLOCATED_VUS' \
    /opt/loadgen/launch_k6.sh"
