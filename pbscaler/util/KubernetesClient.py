@@ -122,6 +122,39 @@ class KubernetesClient():
                 "metadata": meta,
                 "spec": json.loads(json.dumps(hpa.get("spec", {})))}
 
+    # ---- HPA state durability ----------------------------------------------
+    # /app/data lives in the container FS: a pod restart previously lost
+    # hpa_state.json while the HPA objects were already deleted, making
+    # restore a no-op (43 HPAs lost this way, 2026-11-05). The state is now
+    # also mirrored into a ConfigMap and recovered from it when the file is
+    # missing.
+    HPA_STATE_CM = 'pbscaler-hpa-state'
+
+    def backup_hpa_state(self, state_file: str) -> None:
+        """Mirror the on-disk HPA state file into a namespace ConfigMap."""
+        try:
+            with open(state_file) as f:
+                state = f.read()
+        except OSError as e:
+            print(f'WARNING: cannot read {state_file} for configmap backup: {e}')
+            return
+        cm = {'apiVersion': 'v1', 'kind': 'ConfigMap',
+              'metadata': {'name': self.HPA_STATE_CM, 'namespace': self.namespace},
+              'data': {'hpa_state.json': state}}
+        try:
+            self.core_api.create_namespaced_config_map(self.namespace, cm)
+            print(f'HPA state backed up to configmap {self.HPA_STATE_CM} (created)')
+        except Exception as e:
+            if '409' in str(e):
+                try:
+                    self.core_api.replace_namespaced_config_map(
+                        self.HPA_STATE_CM, self.namespace, cm)
+                    print(f'HPA state backed up to configmap {self.HPA_STATE_CM} (replaced)')
+                except Exception as e2:
+                    print(f'WARNING: configmap backup replace failed ({e2})')
+            else:
+                print(f'WARNING: configmap backup failed ({e})')
+
     def suspend_hpas(self, state_file: str) -> int:
         """Delete every HPA in the namespace, saving manifests first.
 
@@ -148,6 +181,19 @@ class KubernetesClient():
 
     def restore_hpas(self, state_file: str) -> int:
         """Re-create the HPAs deleted by suspend_hpas."""
+        if not os.path.exists(state_file):
+            # recover from the in-cluster backup (see backup_hpa_state)
+            try:
+                cm = self.core_api.read_namespaced_config_map(
+                    self.HPA_STATE_CM, self.namespace)
+                state = cm.data.get('hpa_state.json')
+                if state:
+                    os.makedirs(os.path.dirname(state_file) or '.', exist_ok=True)
+                    with open(state_file, 'w') as f:
+                        f.write(state)
+                    print(f'recovered HPA state from configmap {self.HPA_STATE_CM}')
+            except Exception:
+                pass
         if not os.path.exists(state_file):
             print("no HPA state file found, nothing to restore")
             return 0

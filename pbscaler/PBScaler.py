@@ -104,7 +104,7 @@ class PBScaler:
         path = getattr(config, 'slo_predictor_svcs_path', None)
         if path and os.path.exists(path):
             with open(path) as f:
-                svcs = json.load(f)
+                svcs = [line.strip() for line in f if line.strip()]
             print(f'loaded predictor svc list: {path} ({len(svcs)} svcs)')
             return svcs
         if config.dry_run:
@@ -386,6 +386,10 @@ class PBScaler:
         if getattr(config, 'suspend_hpas_on_start', False) and not config.dry_run:
             try:
                 k8s_util.suspend_hpas(config.hpa_state_file)
+                # mirror the state into a ConfigMap so a pod restart can never
+                # again orphan the HPAs (see KubernetesClient.backup_hpa_state)
+                if os.path.exists(config.hpa_state_file):
+                    k8s_util.backup_hpa_state(config.hpa_state_file)
             except Exception as e:
                 print(f'WARNING: HPA suspend failed ({e}); '
                       f'scaling decisions may be overwritten by the HPAs')
@@ -403,9 +407,21 @@ class PBScaler:
     def start(self):
         print("PBScaler is running...")
         self._maybe_suspend_hpas(self.k8s_util, self.config)
+
+        def guarded(job):
+            """Keep one bad Mimir query / K8s hiccup from killing the controller loop
+            (jobs run via `schedule`, whose run_pending propagates exceptions)."""
+            def wrap():
+                try:
+                    job()
+                except Exception as e:
+                    print(f'[guard] {getattr(job, "__name__", "job")} failed: '
+                          f'{type(e).__name__}: {e}', flush=True)
+            return wrap
+
         schedule.clear()
-        schedule.every(self.ab_check_interval).seconds.do(self.anomaly_detect)
-        schedule.every(self.waste_check_interval).seconds.do(self.waste_detection)
+        schedule.every(self.ab_check_interval).seconds.do(guarded(self.anomaly_detect))
+        schedule.every(self.waste_check_interval).seconds.do(guarded(self.waste_detection))
         time_start = time.time()
 
         try:

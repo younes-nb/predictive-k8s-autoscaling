@@ -11,6 +11,8 @@ Differences from upstream PBScaler:
   * ``container_spec_cpu_quota`` does not exist in this cluster's kubelet
     exposition, so CPU limits are derived from
     ``kube_pod_container_resource_limits`` (kube-state-metrics) instead.
+  * Added retry logic with exponential backoff for 503 errors (Mimir temporary
+    unavailability during compaction/WAL replay) to prevent controller crashes.
 """
 
 import time
@@ -19,6 +21,8 @@ import networkx as nx
 import numpy as np
 import pandas as pd
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from config.Config import Config
 from util.KubernetesClient import KubernetesClient
@@ -33,19 +37,32 @@ class PrometheusClient:
         self.start = config.start
         self.end = config.end
         self.step = config.step
+        # Session with retry for transient 503/502/504 from Mimir
+        self._session = requests.Session()
+        retry = Retry(
+            total=5,
+            backoff_factor=1.5,
+            status_forcelist=(502, 503, 504),
+            allowed_methods=("GET",),
+            raise_on_status=False,
+        )
+        adapter = HTTPAdapter(max_retries=retry)
+        self._session.mount("http://", adapter)
+        self._session.mount("https://", adapter)
 
     def set_time_range(self, start, end):
         self.start = start
         self.end = end
 
-    # execute prom_sql
+    # execute prom_sql with retry on transient 503/502/504
     def execute_prom(self, prom_url, prom_sql):
-        response = requests.get(prom_url,
-                                params={'query': prom_sql,
-                                        'start': self.start,
-                                        'end': self.end,
-                                        'step': self.step},
-                                timeout=30)
+        response = self._session.get(prom_url,
+                                    params={'query': prom_sql,
+                                            'start': self.start,
+                                            'end': self.end,
+                                            'step': self.step},
+                                    timeout=30)
+        # If still failing after retries, raise
         response.raise_for_status()
         data = response.json().get('data') or {}
         return data.get('result') or []

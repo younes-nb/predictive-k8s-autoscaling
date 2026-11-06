@@ -24,6 +24,11 @@ Outputs (in --out, default data/<runid> under pbscaler/):
 Read-only: it never touches replicas or HPAs — HPAs stay enabled exactly as
 the paper's data generation (built on the K8s default autoscaler).
 
+2026-11-06 robustness fix: every tick now writes a row, even when Mimir is
+unreachable (a no-data row with front_p90=NaN / slo_reward=-1). The CSV length
+always equals wall-clock duration x interval; outage windows are explicitly
+counted in the summary (coverage_pct) instead of silently shrinking the file.
+
 Usage:
   cd pbscaler && ./.venv/bin/python scripts/collect_training_data.py \
         --duration 900 --interval 10 \
@@ -181,9 +186,25 @@ def main():
             row.update(extra)
         return row
 
+    def ensure_files(first_row):
+        """lazy header creation (service list frozen at start)"""
+        nonlocal train_f, train_w, full_f, full_w
+        if train_f is not None:
+            return
+        train_cols = ['timestamp', 'front_p90', 'front_avg', 'front_source', 'slo_reward',
+                      'total_qps'] + [s + f'&{k}' for s in svcs for k in ('qps', 'count')]
+        train_f = open(train_path, 'w')
+        train_w = csv.DictWriter(train_f, fieldnames=train_cols, extrasaction='ignore')
+        train_w.writeheader()
+        full_cols = list(first_row.keys())
+        full_f = open(full_path, 'w')
+        full_w = csv.DictWriter(full_f, fieldnames=full_cols, extrasaction='ignore')
+        full_w.writeheader()
+
     n_rows = 0
     n_violation = 0
     n_noviolation = 0
+    n_nodata = 0
     front_seen = 0
     t0 = time.time()
     next_tick = t0
@@ -232,27 +253,32 @@ def main():
             else:
                 row['front_p90'] = np.nan
 
-            # lazy header creation (service list frozen at start)
-            if train_f is None:
-                train_cols = ['timestamp', 'front_p90', 'front_avg', 'front_source', 'slo_reward',
-                              'total_qps'] + [s + f'&{k}' for s in svcs for k in ('qps', 'count')]
-                train_f = open(train_path, 'w')
-                train_w = csv.DictWriter(train_f, fieldnames=train_cols, extrasaction='ignore')
-                train_w.writeheader()
-                full_cols = list(row.keys())
-                full_f = open(full_path, 'w')
-                full_w = csv.DictWriter(full_f, fieldnames=full_cols, extrasaction='ignore')
-                full_w.writeheader()
+            ensure_files(row)
             train_w.writerow(row)
             full_w.writerow(row)
             train_f.flush()
             full_f.flush()
             n_rows += 1
+            n_nodata += int(row['front_p90'] != row['front_p90'])
             ts_short = ts[11:19]
             print(f'[{ts_short}Z] row {n_rows}: front_p90={row["front_p90"]} '
                   f'qps_total={total:.2f} slo_reward={row["slo_reward"]}', flush=True)
         except Exception as e:
-            print(f'[{ts[11:19]}Z] tick FAILED: {type(e).__name__}: {e}', flush=True)
+            # never lose wall-clock rows: write an explicit no-data row so the
+            # file length stays honest (front_p90=NaN, slo_reward=-1)
+            print(f'[{ts[11:19]}Z] tick FAILED: {type(e).__name__}: {e} '
+                  f'— writing no-data row', flush=True)
+            try:
+                ensure_files(row)
+                train_w.writerow(row)
+                full_w.writerow(row)
+                train_f.flush()
+                full_f.flush()
+                n_rows += 1
+                n_nodata += 1
+            except Exception as e2:
+                print(f'[{ts[11:19]}Z] no-data row write FAILED: '
+                      f'{type(e2).__name__}: {e2}', flush=True)
 
         sleep = next_tick - time.time()
         if sleep > 0:
@@ -265,13 +291,22 @@ def main():
     # ---- verification summary -------------------------------------------
     print('\n================ collection summary ================')
     print(f'rows written            : {n_rows} (+ header) -> {train_path}')
-    print(f'front P90 samples seen  : {front_seen}')
+    coverage = (front_seen / n_rows * 100.0) if n_rows else 0.0
+    print(f'front P90 samples seen  : {front_seen} (coverage {coverage:.1f}% '
+          f'of rows; {n_nodata} no-data rows [Mimir outage etc.])')
     print(f'slo labels: violation=0 : {n_violation}   no-violation=1: {n_noviolation}')
-    ok = n_rows > 3 and front_seen > 0 and (n_violation + n_noviolation) > 0
-    print('RESULT:', 'OK — dataset usable' if ok else
-          'INCOMPLETE — check istio telemetry/traffic above (see pbscaler README)')
+    ok = (n_rows > 3 and front_seen > 0 and (n_violation + n_noviolation) > 0
+          and coverage >= 95.0)
+    if ok:
+        print('RESULT: OK — dataset usable')
+    else:
+        print(f'RESULT: INCOMPLETE — coverage {coverage:.1f}% < 95%; no-data rows are '
+              f'front_p90=NaN/slo_reward=-1 and must be excluded (or accounted for) '
+              f'in any violation-fraction computed from this file')
     meta['rows'] = n_rows
     meta['front_p90_samples'] = front_seen
+    meta['no_data_rows'] = n_nodata
+    meta['coverage_pct'] = round(coverage, 2)
     meta['labels_violation'] = n_violation
     meta['labels_no_violation'] = n_noviolation
     meta['ended_at'] = datetime.utcnow().isoformat() + 'Z'

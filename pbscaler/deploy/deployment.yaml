@@ -33,7 +33,7 @@ spec:
       serviceAccountName: pbscaler
       containers:
         - name: pbscaler
-          image: docker.io/younesnb/pbscaler:v1.2.4   # v1.2.5 = v1.2.4 model + real Table III module timing
+          image: docker.io/younesnb/pbscaler:v1.1.4   # v1.1.4 = 15s-loop guarded vs Mimir hiccups; hpa_state mirrored to ConfigMap (pod restarts can no longer orphan HPAs)
           # fullrun13_trace573_compress8 (TRACE_COMPRESS=8 + 44-core quota, 15.7%
           # viol regime; paper-comparable). Fixes v1.2.1 runaway (spec-based svc
           # counts, aligned GA bounds, write-path clamp).
