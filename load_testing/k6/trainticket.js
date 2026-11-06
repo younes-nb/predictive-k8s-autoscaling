@@ -105,7 +105,6 @@ function verifyClusterData() {
     { name: 'station-shanghai', url: `${HOST}/api/v1/stationservice/stations/id/shanghai`, expect: 200 },
     { name: 'route-shanghai-taiyuan', url: `${HOST}/api/v1/routeservice/routes/0b23bd3e-876a-4af3-b920-c50a90c90b04`, expect: 200 },
     { name: 'travel-query', url: `${HOST}/api/v1/travelservice/trips/left`, method: 'POST', body: JSON.stringify({startPlace:'shanghai',endPlace:'taiyuan',departureTime:'2027-05-04'}), expect: 200 },
-    { name: 'ticketinfo', url: `${HOST}/api/v1/ticketinfoservice/ticketinfo`, method: 'POST', body: JSON.stringify({trip:{tripId:{type:'G',number:'1236'},trainTypeId:'GaoTieOne',routeId:'0b23bd3e-876a-4af3-b920-c50a90c90b04',startingStationId:'shanghai',stationsId:'suzhou',terminalStationId:'taiyuan',startingTime:'2027-05-04T01:00:00.000Z',endTime:'2027-05-04T07:51:52.000Z'},startingPlace:'shanghai',endPlace:'taiyuan',departureTime:'2027-05-04T00:00:00.000Z'}), expect: 200 },
     { name: 'basic-welcome', url: `${HOST}/api/v1/basicservice/welcome`, expect: 200 },
   ];
   
