@@ -744,6 +744,7 @@ launch_k6_local() {
     ulimit -n 65536 2>/dev/null || ulimit -n 8192
     exec env RUNID="$RUNID" \
       MAX_REQUESTS="$MAX_REQUESTS" USER_POOL="$USER_POOL" TRACE_COMPRESS=1 OPEN_LOOP=1 \
+      K6_OUT_DIR="$K6_CONSOLE_DIR" \
       PRE_ALLOCATED_VUS="$PRE_ALLOC" MAX_VUS="$MAX_VUS" \
       PREFLIGHT=0 ALLOW_SEED_REUSE=0 LOGIN_RETRIES=2 LOGIN_COOLDOWN_MS=30000 \
       START_MIN="$START_MIN" TEST_MIN="$TEST_MIN" \
@@ -756,7 +757,7 @@ launch_k6_local() {
 }
 
 launch_k6_ssh() {
-  on_loadgen "ulimit -n 65536; nohup setsid env RUNID='$RUNID' \
+  on_loadgen "ulimit -n 65536; nohup setsid env RUNID='$RUNID' K6_OUT_DIR='$K6_CONSOLE_DIR' \
     MAX_REQUESTS=$MAX_REQUESTS USER_POOL=$USER_POOL TRACE_COMPRESS=1 OPEN_LOOP=1 \
     PRE_ALLOCATED_VUS=$PRE_ALLOC MAX_VUS=$MAX_VUS \
     PREFLIGHT=0 ALLOW_SEED_REUSE=0 LOGIN_RETRIES=2 LOGIN_COOLDOWN_MS=30000 \
@@ -766,6 +767,11 @@ launch_k6_ssh() {
     > '$CONSOLE_SRC' 2>&1 < /dev/null &" 2>&1 | sed 's/^/k6launch: /' >> "$LOG"
 }
 
+# k6 writes its console/summary/samples into $K6_CONSOLE_DIR. The loadgen role
+# creates /opt/loadgen but not necessarily the k6 subdirectory, and when it is
+# missing the redirect fails, the subshell dies, and the orchestrator reports
+# "k6 console log size=0" (2026-11-18, new loadgen).
+mkdir -p "$K6_CONSOLE_DIR" 2>/dev/null || true
 log "phase 3: launching k6 (RUNID=$RUNID, mode=$MODE, preAllocatedVUs=$PRE_ALLOC, maxVUs=$MAX_VUS)"
 if [ "$MODE" = local ]; then
   launch_k6_local

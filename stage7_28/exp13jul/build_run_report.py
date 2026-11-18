@@ -162,8 +162,10 @@ class Loki:
             self.failures += 1
             return None
 
-    def by_label(self, query, start, end, label="pod"):
+    def by_label(self, query, start, end, label="instance"):
         """-> {label_value: count}"""
+        # Loki's kubernetes log streams are labelled instance/job/service_name;
+# asking for `pod` returns "?" for every stream.
         if not self.enabled:
             return {}
         url = f"{self.base}/loki/api/v1/query_range?" + urllib.parse.urlencode({
@@ -177,8 +179,15 @@ class Loki:
             return {}
         out = {}
         for s in d.get("data", {}).get("result", []):
-            k = s.get("stream", {}).get(label) or s.get("stream", {}).get("pod") or "?"
-            out[k] = out.get(k, 0) + len(s.get("values", []))
+            # count_over_time is a METRIC query, so Loki puts the labels under
+# "metric", not "stream" -- reading only "stream" yielded "?" for every entry.
+            m = s.get("metric") or s.get("stream") or {}
+            k = m.get(label) or m.get("pod") or m.get("instance") or "?"
+            vals = s.get("values") or []
+            if vals:
+                out[k] = out.get(k, 0) + int(float(vals[-1][1]))
+            else:
+                out[k] = out.get(k, 0) + 1
         return out
 
 
@@ -373,7 +382,7 @@ class Run:
             n = loki.count(f"sum(count_over_time({sel} |= `{pat}` [{dur}s]))", s, e)
             self.loki_events.append((label, pat, n))
         self.loki_total = loki.count(f"sum(count_over_time({sel} [{dur}s]))", s, e)
-        self.loki_lines = loki.by_label(f"sum by (pod) (count_over_time({sel} [{dur}s]))",
+        self.loki_lines = loki.by_label(f"sum by (instance) (count_over_time({sel} [{dur}s]))",
                                         s, e)
         self.loki_failures = loki.failures
 
@@ -742,11 +751,11 @@ class Report:
         for i, r in enumerate(self.runs, 1):
             ss = r.svc_stats()
             items = [(k, v) for k, v in ss.items() if v.get("p90", {}).get("n")]
-            items.sort(key=lambda x: -x[1]["p90"]["p90"])
+            items.sort(key=lambda x: -(x[1].get("p90", {}).get("p90", float("nan"))))
             for svc, v in items[:15]:
-                rows.append([f"{i}", svc, fmt(v["p50"]["p50"], 0),
-                             fmt(v["p90"]["p90"], 0), fmt(v["p99"]["p99"], 0),
-                             fmt(v["avg"]["mean"], 0)])
+                rows.append([f"{i}", svc, fmt(v.get("p50", {}).get("p50", float("nan")), 0),
+                             fmt(v.get("p90", {}).get("p90", float("nan")), 0), fmt(v.get("p99", {}).get("p99", float("nan")), 0),
+                             fmt(v.get("avg", {}).get("mean", float("nan")), 0)])
         if rows:
             self.table(["#", "service", "p50 ms", "p90 ms", "p99 ms", "avg ms"], rows)
         else:
@@ -773,13 +782,14 @@ class Report:
         for i, r in enumerate(self.runs, 1):
             ss = r.svc_stats()
             items = [(k, v) for k, v in ss.items() if v.get("success_rate", {}).get("n")]
-            items.sort(key=lambda x: (x[1]["success_rate"]["mean"]
-                                      if x[1]["success_rate"]["mean"] == x[1]["success_rate"]["mean"]
-                                      else 2))
+            def _sr(x):
+                v = x[1].get("success_rate", {}).get("mean", float("nan"))
+                return v if v == v else 2.0
+            items.sort(key=_sr)
             for svc, v in items[:15]:
-                sr = v["success_rate"]["mean"]
+                sr = v.get("success_rate", {}).get("mean", float("nan"))
                 rows.append([f"{i}", svc, fmt(100 * sr, 2) + " %",
-                             fmt(v["qps"]["mean"], 1)])
+                             fmt(v.get("qps", {}).get("mean", float("nan")), 1)])
         if rows:
             self.table(["#", "service", "success rate", "avg qps"], rows)
         else:
@@ -856,13 +866,13 @@ class Report:
         for i, r in enumerate(self.runs, 1):
             ss = r.svc_stats()
             items = [(k, v) for k, v in ss.items() if v.get("cpu_usage", {}).get("n")]
-            items.sort(key=lambda x: -x[1]["cpu_usage"]["mean"])
+            items.sort(key=lambda x: -(x[1].get("cpu_usage", {}).get("mean", float("nan"))))
             for svc, v in items[:15]:
                 rows.append([f"{i}", svc,
-                             fmt(v["cpu_usage"]["mean"] * 1000, 0) + " m",
-                             fmt(v["cpu_usage"]["max"] * 1000, 0) + " m",
-                             fmt(v["mem_usage"]["mean"], 0) + " Mi",
-                             fmt(v["mem_usage"]["max"], 0) + " Mi"])
+                             fmt(v.get("cpu_usage", {}).get("mean", float("nan")) * 1000, 0) + " m",
+                             fmt(v.get("cpu_usage", {}).get("max", float("nan")) * 1000, 0) + " m",
+                             fmt(v.get("mem_usage", {}).get("mean", float("nan")), 0) + " Mi",
+                             fmt(v.get("mem_usage", {}).get("max", float("nan")), 0) + " Mi"])
         if rows:
             self.table(["#", "service", "cpu avg", "cpu max", "mem avg", "mem max"], rows)
         else:
@@ -913,7 +923,7 @@ class Report:
                 rows.append([f"{i}", pod,
                              fmt(cpu.get("mean", float("nan")) * 1000, 0) + " m",
                              fmt(cpu.get("max", float("nan")) * 1000, 0) + " m",
-                             fmt(mem.get("max", float("nan")), 0) + " Mi",
+                             fmt(mem.get("max", float("nan")) / 1024.0, 0) + " Mi",
                              fmt(net.get("mean", float("nan")) / 1024, 1) + " Ki/s",
                              fmt(disk.get("mean", float("nan")) / 1024, 1) + " Ki/s",
                              fmt(rst.get("max", 0), 0)])
@@ -982,9 +992,9 @@ class Report:
         for i, r in enumerate(self.runs, 1):
             sch, done, drop, dl = r.delivered()
             ss = r.svc_stats()
-            cpu_vals = [v["cpu_usage"]["mean"] for v in ss.values()
+            cpu_vals = [v.get("cpu_usage", {}).get("mean", float("nan")) for v in ss.values()
                         if v.get("cpu_usage", {}).get("n")]
-            mem_vals = [v["mem_usage"]["mean"] for v in ss.values()
+            mem_vals = [v.get("mem_usage", {}).get("mean", float("nan")) for v in ss.values()
                         if v.get("mem_usage", {}).get("n")]
             cpu_mean = sum(cpu_vals) if cpu_vals else float("nan")
             mem_mean = sum(mem_vals) if mem_vals else float("nan")
