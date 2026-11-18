@@ -1,4 +1,10 @@
 #!/bin/bash
+# SUPERSEDED -- run_experiment.sh does all of this (phases 5b/7/8) and is the
+# single orchestrator. Kept for provenance only.
+#
+# The trace slice is generated per run; the old fixed
+# /opt/loadgen/mcr_jul13_slice.csv no longer exists. Generate one if MCR_CSV is
+# unset so this script still runs when invoked by hand.
 # Collector wrapper: waits until real k6 traffic is observed in Mimir, then
 # waits until traffic_start + WARMUP_S, then runs the collector for the
 # 240-minute scored window at 5 s. Detached; writes its own log.
@@ -33,4 +39,4 @@ echo "$MEASURE_START_UTC" > "$RUN_DIR/measure_start_utc"
 echo "$(date -u +%FT%TZ) MEASUREMENT START $MEASURE_START_UTC — attaching collector (duration=${DURATION_S}s interval=5s)"
 exec pbscaler/.venv/bin/python pbscaler/scripts/collect_training_data.py \
   --duration "$DURATION_S" --interval 5 --out "$DATASET_DIR" \
-  --workload /opt/loadgen/mcr_jul13_slice.csv
+  --workload "${MCR_CSV:-/opt/loadgen/mcr_jul13_slice.csv}"

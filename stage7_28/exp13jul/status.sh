@@ -2,7 +2,7 @@
 # Compact experiment status: sleep then print. Usage: status.sh [sleep_s] [run_dir]
 #
 # Both the repo path and the run directory used to be hardcoded
-# (/users/younes02/predictive-k8s-autoscaling and a run from 2026-11-13), so
+# (the pre-move /users/younes02 path and a run from 2026-11-13), so
 # this script always reported on a run that no longer existed. Now it derives the
 # repo root from its own location and takes the run directory as an argument,
 # defaulting to the newest run.
