@@ -458,6 +458,40 @@ if ! "$PY" pbscaler/scripts/launchers/reset_cluster_cold.py --assert-only \
 fi
 log "cold gate passed: $(grep -m1 'ASSERT cold_ok' "$RUN_DIR/cold_gate.log")"
 
+# ---------- resolve the gateway address ----------
+# Used to be hardcoded (http://10.10.1.2:30080). That was master1's IP on the
+# OLD cluster; on the new one 10.10.1.2 is the monitoring node and the gateway
+# NodePort is whatever the Service has. Derive both from the live Service so a
+# new cluster needs no edit here.
+if [ -z "$TARGET_URL" ]; then
+  _gw=$(kubectl -n train-ticket get svc train-ticket-gateway-istio -o json 2>/dev/null)
+  if [ -n "$_gw" ]; then
+    _ip=$(printf '%s' "$_gw" | python3 -c 'import json,sys
+try:
+    d=json.load(sys.stdin); s=d["spec"]
+    print((s.get("externalIPs") or [""])[0])
+except Exception:
+    print("")' 2>/dev/null)
+    _np=$(printf '%s' "$_gw" | python3 -c 'import json,sys
+try:
+    d=json.load(sys.stdin)
+    for p in d["spec"]["ports"]:
+        if p.get("port") == 80: print(p.get("nodePort", "")); break
+    else: print("")
+except Exception:
+    print("")' 2>/dev/null)
+    if [ -z "$_ip" ]; then
+      _ip=$(kubectl get nodes -o jsonpath='{range .items[*]}{.status.addresses[?(@.type=="InternalIP")].address}{"\n"}{end}' 2>/dev/null | grep -E '^10\.' | head -1)
+    fi
+    if [ -n "$_ip" ] && [ -n "$_np" ]; then
+      TARGET_URL="http://${_ip}:${_np}"
+      log "resolved TARGET_URL=$TARGET_URL (gateway externalIP/nodeIP + NodePort from the live Service)"
+    fi
+    unset _gw _ip _np
+  fi
+  [ -z "$TARGET_URL" ] && log "WARN: could not resolve the gateway address; launch_k6.sh default will be used"
+fi
+
 UPNOW=$(curl -s -m 10 "http://127.0.0.1:18080/prometheus/api/v1/query" \
         --data-urlencode 'query=up' 2>/dev/null \
         | python3 -c 'import json,sys
