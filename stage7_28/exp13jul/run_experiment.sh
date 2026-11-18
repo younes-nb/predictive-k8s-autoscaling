@@ -115,6 +115,7 @@ SKIP_TRAFFIC_GATE=${SKIP_TRAFFIC_GATE:-0}
 # unreachable (Prometheus/Mimir down) before anchoring the window at launch.
 TRAFFIC_GATE_FALLBACK_S=${TRAFFIC_GATE_FALLBACK_S:-180}
 SKIP_DATASET=${SKIP_DATASET:-0}
+SKIP_REPORT=${SKIP_REPORT:-0}      # build the one-file REPORT_*.md after the run
 SKIP_DUMPS=${SKIP_DUMPS:-0}
 SKIP_RESET=${SKIP_RESET:-0}
 MAX_STREAMS=${MAX_STREAMS:-0}   # 0 = derive from the live pod count at launch
@@ -986,6 +987,27 @@ print("RESULT COMPLETE:", "COMPLETE" in txt.upper())
 cov = m.get("coverage_pct") or 0
 print("coverage_ok:", float(cov) >= 95 if cov else False)
 EOF
+fi
+
+# ---------- phase 9: build the one-file report ----------
+# Reads this run's artifacts (k6 summary, live.csv, failures.jsonl, the dataset,
+# hpa/dep history) plus Mimir, and writes a single timestamped REPORT_*.md into
+# RUN_DIR. With 60-day retention the per-run dumps are no longer the archival
+# copy -- this report is.
+if [ "${SKIP_REPORT:-0}" = "1" ]; then
+  log "phase 9: SKIPPED (SKIP_REPORT=1)"
+elif [ "$SKIP_DATASET" = "1" ]; then
+  log "phase 9: SKIPPED (no dataset -- SKIP_DATASET=1)"
+else
+  log "phase 9: building the run report"
+  if python3 "$TOOLS/build_run_report.py" "$RUN_DIR" \
+       --mimir "${PBS_MIMIR_URL:-http://127.0.0.1:18080}" >> "$LOG" 2>&1; then
+    _rep=$(ls -t "$RUN_DIR"/REPORT_*.md 2>/dev/null | head -1)
+    log "phase 9: report -> ${_rep:-<none>}"
+  else
+    log "WARN: report generation failed"
+    status_reason "report generation failed"
+  fi
 fi
 
 # ---------- phase 10: Mimir + Loki range dumps ----------
