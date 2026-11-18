@@ -359,14 +359,20 @@ log "params: MAX_REQUESTS=$MAX_REQUESTS USER_POOL=$USER_POOL PRE_ALLOCATED_VUS=$
 log "thresholds: 5XX_RATE_MIN=$S5XX 4XX_RATE_MIN=$S4XX COOLDOWN=$SCOOL"
 
 # ---------- phase -1a: publish the trace slice to the load generator ----------
+# In local mode the load generator IS this node and MCR_SLICE_LOADGEN is the
+# slice in RUN_DIR, so there is nothing to copy -- copying a file onto itself
+# used to fail the run at 07:47Z on the smoke test (2026-11-18).
 if [ "$MODE" = local ]; then
-  cp -f "$MCR_SLICE_LOCAL" "$MCR_SLICE_LOADGEN" \
-    || die "could not copy the trace slice to $MCR_SLICE_LOADGEN"
+  if [ "$MCR_SLICE_LOADGEN" != "$MCR_SLICE_LOCAL" ]; then
+    cp -f "$MCR_SLICE_LOCAL" "$MCR_SLICE_LOADGEN" \
+      || die "could not copy the trace slice to $MCR_SLICE_LOADGEN"
+  fi
+  log "trace slice used in place (local mode) -> $MCR_SLICE_LOADGEN"
 else
   $SCP -q "$MCR_SLICE_LOCAL" "loadgen:$MCR_SLICE_LOADGEN" \
     || die "could not copy the trace slice to loadgen:$MCR_SLICE_LOADGEN"
+  log "trace slice published -> $MCR_SLICE_LOADGEN (sha256=$TRACE_SHA)"
 fi
-log "trace slice published -> $MCR_SLICE_LOADGEN (sha256=$TRACE_SHA)"
 
 # ---------- phase -1: preflight (files, hashes, k6 config) ----------
 log "phase -1: preflight"

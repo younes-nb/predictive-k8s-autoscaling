@@ -135,6 +135,85 @@ def fnum(v):
     return f
 
 
+class Loki:
+    """Minimal Loki client for the log-derived event counts in the report."""
+
+    def __init__(self, base, enabled=True):
+        self.base = base.rstrip("/")
+        self.enabled = enabled
+        self.failures = 0
+
+    def count(self, query, start, end):
+        """Total matching lines in [start,end] via count_over_time."""
+        if not self.enabled:
+            return None
+        url = f"{self.base}/loki/api/v1/query_range?" + urllib.parse.urlencode({
+            "query": query, "start": int(start), "end": int(end),
+            "limit": 1, "direction": "backward"})
+        try:
+            with urllib.request.urlopen(url, timeout=120) as r:
+                d = json.load(r)
+            res = d.get("data", {}).get("result", [])
+            if not res:
+                return 0
+            # count_over_time returns the count in the single value
+            return int(float(res[0]["values"][-1][1]))
+        except Exception:
+            self.failures += 1
+            return None
+
+    def by_label(self, query, start, end, label="pod"):
+        """-> {label_value: count}"""
+        if not self.enabled:
+            return {}
+        url = f"{self.base}/loki/api/v1/query_range?" + urllib.parse.urlencode({
+            "query": query, "start": int(start), "end": int(end),
+            "limit": 5000, "direction": "backward"})
+        try:
+            with urllib.request.urlopen(url, timeout=120) as r:
+                d = json.load(r)
+        except Exception:
+            self.failures += 1
+            return {}
+        out = {}
+        for s in d.get("data", {}).get("result", []):
+            k = s.get("stream", {}).get(label) or s.get("stream", {}).get("pod") or "?"
+            out[k] = out.get(k, 0) + len(s.get("values", []))
+        return out
+
+
+# Log signatures worth counting for an autoscaler comparison. Anything that
+# explains a slow or failed request without being an application exception is
+# here; the JVM-heap ones matter because they are the dominant failure family
+# (ts-user-service / ts-auth-service at -Xmx512m) and they are NOT visible as
+# container OOM kills.
+LOKI_PATTERNS = [
+    ("envoy 503 no healthy upstream", "no healthy upstream"),
+    ("envoy upstream reset (UF)", "|UF|"),
+    ("envoy upstream overflow (UO)", "|UO|"),
+    ("JVM heap exhausted", "Java heap space"),
+    ("JVM GC overhead limit", "GC overhead limit exceeded"),
+    ("Mongo connection reset", "Connection reset"),
+    ("Mongo premature end of stream", "Prematurely reached end of stream"),
+    ("Mongo socket exception", "MongoSocketException"),
+    ("Mongo time / server selection", "MongoTimeoutException"),
+    ("JDBC connection failure", "CannotGetJdbcConnection"),
+    ("socket read timeout", "Read timed out"),
+    ("RejectedExecution (thread pool)", "RejectedExecutionException"),
+    ("UnknownHost / DNS", "UnknownHostException"),
+    ("readiness probe failed", "Readiness probe failed"),
+    ("liveness probe failed", "Liveness probe failed"),
+    ("panic / crash", "panic:"),
+]
+
+STATEFUL_RE = ("mongo", "mysql", "redis", "postgres", "-db")
+
+
+def is_stateful(name):
+    n = (name or "").lower()
+    return any(k in n for k in STATEFUL_RE)
+
+
 class Mimir:
     def __init__(self, base, enabled=True):
         self.base = base.rstrip("/")
@@ -180,7 +259,7 @@ SVC_KEYS = ("qps", "count", "cpu_usage", "mem_usage", "p50", "avg", "p90", "p99"
 
 
 class Run:
-    def __init__(self, path, mimir):
+    def __init__(self, path, mimir, loki=None):
         self.path = os.path.abspath(path)
         self.name = os.path.basename(self.path.rstrip("/"))
         self.mimir = mimir
@@ -195,10 +274,15 @@ class Run:
         self.train = []
         self.exit_codes = {}
         self.dataset_dir = None
+        self.loki_events = []
+        self.loki_lines = {}
+        self.loki_total = None
+        self.loki_failures = 0
         self._load_disk()
         self.window = self._window()
         self.svc = self._per_service()
         self._load_mimir()
+        self._load_loki(loki)
 
     def _p(self, *a):
         return os.path.join(self.path, *a)
@@ -274,12 +358,37 @@ class Run:
         return out
 
     # -- Mimir supplements (optional) ---------------------------------------- #
+    # -- Mimir/Loki supplements (optional) ----------------------------------- #
+    def _load_loki(self, loki):
+        self.loki_events = []
+        self.loki_lines = {}
+        self.loki_total = None
+        self.loki_failures = 0
+        if not self.window[1] or loki is None:
+            return
+        s, e = self.window
+        sel = '{instance=~"train-ticket/.*"}'
+        dur = max(e - s, 60)
+        for label, pat in LOKI_PATTERNS:
+            n = loki.count(f"sum(count_over_time({sel} |= `{pat}` [{dur}s]))", s, e)
+            self.loki_events.append((label, pat, n))
+        self.loki_total = loki.count(f"sum(count_over_time({sel} [{dur}s]))", s, e)
+        self.loki_lines = loki.by_label(f"sum by (pod) (count_over_time({sel} [{dur}s]))",
+                                        s, e)
+        self.loki_failures = loki.failures
+
     def _load_mimir(self):
         self.node_cpu = {}
         self.node_mem = {}
         self.pending = {}
         self.oom = {}
         self.istio_5xx = {}
+        self.stateful = {}
+        self.stateful_mem = {}
+        self.stateful_net = {}
+        self.stateful_disk = {}
+        self.stateful_restarts = {}
+        self.db_metrics = float("nan")
         if not self.mimir.enabled or not self.window[1]:
             return
         s, e = self.window
@@ -295,6 +404,29 @@ class Run:
         self.istio_5xx = self._agg(self.mimir.range(
             'sum by (destination_service) (rate(istio_requests_total'
             '{reporter="destination",response_code=~"5.."}[1m]))', s, e))
+
+        # ---- stateful tier (databases) -------------------------------------
+        # The dataset deliberately covers only the 43 stateless services (that is
+        # what the RF is trained on), but the databases are part of the story:
+        # ts-user-service's heap death is usually downstream of a Mongo stall.
+        # They are NOT controlled by HPA/PBScaler -- this is context, not a
+        # comparison axis.
+        f = '{namespace="train-ticket",container!="",pod=~"ts-.*-(mongo|mysql|redis).*"}'
+        self.stateful = self._agg(self.mimir.range(
+            f'sum by (pod) (rate(container_cpu_usage_seconds_total{f}[1m]))', s, e))
+        self.stateful_mem = self._agg(self.mimir.range(
+            f'sum by (pod) (container_memory_working_set_bytes{f})', s, e))
+        self.stateful_net = self._agg(self.mimir.range(
+            f'sum by (pod) (rate(container_network_receive_bytes_total'
+            f'{{namespace="train-ticket",pod=~"ts-.*-(mongo|mysql|redis).*"}}[1m]))', s, e))
+        self.stateful_disk = self._agg(self.mimir.range(
+            f'sum by (pod) (rate(container_fs_writes_bytes_total'
+            f'{{namespace="train-ticket",pod=~"ts-.*-(mongo|mysql|redis).*"}}[1m]))', s, e))
+        self.stateful_restarts = self._agg(self.mimir.range(
+            'sum by (pod) (kube_pod_container_status_restarts_total'
+            '{namespace="train-ticket",pod=~"ts-.*-(mongo|mysql|redis).*"})', s, e))
+        self.db_metrics = self.mimir.value(
+            'count(mongodb_connections)')
 
     @staticmethod
     def _agg(series):
@@ -676,6 +808,43 @@ class Report:
                          fmt(rs[-1], 0) if rs else "—",
                          fmt(max(rs) if rs else float("nan"), 0), fmt(oom, 0)])
         self.table(["#", "restarts start", "restarts end", "restarts peak", "OOM"], rows)
+        self.section_3b()
+
+    def section_3b(self):
+        """Aggregated important events from Loki."""
+        self.w("### 3.1 Aggregated log events (Loki)")
+        self.w()
+        if not any(r.loki_events for r in self.runs):
+            self.note("Loki not queried (unreachable), or the run window predates "
+                      "the retention of the current Loki.")
+            return
+        rows = []
+        for i, r in enumerate(self.runs, 1):
+            if not r.loki_events:
+                continue
+            for label, pat, n in r.loki_events:
+                if n:
+                    rows.append([f"{i}", label, "`%s`" % pat, fmt(n)])
+        if rows:
+            self.table(["#", "event", "pattern", "lines"], rows)
+        else:
+            self.note("None of the watched signatures appeared in the logs.")
+        self.w("Total log lines ingested for the namespace, and the noisiest pods:")
+        self.w()
+        rows = []
+        for i, r in enumerate(self.runs, 1):
+            if r.loki_total is None:
+                continue
+            top = sorted(r.loki_lines.items(), key=lambda x: -x[1])[:8]
+            rows.append([f"{i}", fmt(r.loki_total),
+                         ", ".join("%s %s" % (k, fmt(v, 0)) for k, v in top) or "—"])
+        if rows:
+            self.table(["#", "total lines", "top pods by line count"], rows)
+        self.note(
+            "Log-side view of the events the failure recorder also captures. "
+            "'JVM heap exhausted' / 'GC overhead limit' are the important ones: "
+            "they explain ts-user-service failures without any container OOM kill, "
+            "so they are invisible in the resource tables.")
 
     def section_4(self):
         self.w("## 4. Resource utilisation")
@@ -719,6 +888,54 @@ class Report:
                 oom = sum(st["max"] for st in r.oom.values())
                 rows.append([f"{i}", fmt(pend, 0), fmt(oom, 0)])
             self.table(["#", "peak pending pods", "OOM events"], rows)
+        self.section_4b()
+
+    def section_4b(self):
+        """Stateful tier (databases) -- context, not an autoscaler target."""
+        self.w("### 4.1 Stateful services (databases) — context only")
+        self.w()
+        self.note(
+            "HPA and PBScaler only ever patch the 43 stateless deployments, so these "
+            "numbers are NOT a comparison axis. They are here so a bad result can be "
+            "attributed: ts-user-service and ts-auth-service usually fail because a "
+            "database stalled, not because of their own CPU.")
+        rows = []
+        for i, r in enumerate(self.runs, 1):
+            pods = sorted(set(r.stateful) | set(r.stateful_mem))
+            for pod in pods[:20]:
+                cpu = r.stateful.get(pod, {})
+                mem = r.stateful_mem.get(pod, {})
+                net = r.stateful_net.get(pod, {})
+                disk = r.stateful_disk.get(pod, {})
+                rst = r.stateful_restarts.get(pod, {})
+                if not (cpu.get("n") or mem.get("n")):
+                    continue
+                rows.append([f"{i}", pod,
+                             fmt(cpu.get("mean", float("nan")) * 1000, 0) + " m",
+                             fmt(cpu.get("max", float("nan")) * 1000, 0) + " m",
+                             fmt(mem.get("max", float("nan")), 0) + " Mi",
+                             fmt(net.get("mean", float("nan")) / 1024, 1) + " Ki/s",
+                             fmt(disk.get("mean", float("nan")) / 1024, 1) + " Ki/s",
+                             fmt(rst.get("max", 0), 0)])
+        if rows:
+            self.table(["#", "pod", "cpu avg", "cpu max", "mem max", "net rx",
+                        "disk write", "restarts"], rows)
+        else:
+            self.note("No stateful (mongo/mysql) container metrics in this run window.")
+        self.w("Database-internal metrics (`mongodb_connections`, opcounters, "
+               "replication):")
+        self.w()
+        vals = [r.db_metrics for r in self.runs]
+        if any(v == v for v in vals):
+            self.table(["#", "mongodb series"],
+                       [[f"{i}", fmt(v, 0)] for i, v in enumerate(vals, 1)])
+        else:
+            self.note(
+                "UNAVAILABLE -- the mongodb-exporter has no targets and no "
+                "`mongodb_*` series exist (its last log line is from 2026-11-17 and "
+                "it reports 'connection reset by peer' against ts-user-mongo). "
+                "Container-level CPU/memory/network/disk for the database pods above "
+                "are still recorded; only DB-internal counters are missing.")
 
     def section_5(self):
         self.w("## 5. Autoscaler behaviour")
@@ -874,7 +1091,9 @@ def main():
     ap.add_argument("--runs-dir", help="discover run directories here")
     ap.add_argument("--output", help="output file")
     ap.add_argument("--mimir", default=os.environ.get("MIMIR_URL", "http://127.0.0.1:18080"))
+    ap.add_argument("--loki", default=os.environ.get("LOKI_URL", "http://127.0.0.1:3100"))
     ap.add_argument("--no-mimir", action="store_true")
+    ap.add_argument("--no-loki", action="store_true")
     ap.add_argument("--baseline", type=int, default=1)
     ap.add_argument("--target", default="10-20")
     args = ap.parse_args()
@@ -893,10 +1112,11 @@ def main():
         lo, hi = 10.0, 20.0
 
     mimir = Mimir(args.mimir, enabled=not args.no_mimir)
+    loki = Loki(args.loki, enabled=not args.no_loki)
     runs = []
     for p in paths:
         try:
-            runs.append(Run(p, mimir))
+            runs.append(Run(p, mimir, loki))
         except Exception as e:
             print(f"warning: could not read {p}: {e}", file=sys.stderr)
     if not runs:
