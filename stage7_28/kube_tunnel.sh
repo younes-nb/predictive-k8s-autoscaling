@@ -8,15 +8,37 @@
 # single-master loop spun forever, killing kubectl + the Mimir/Loki forwards.
 # 2026-11-17: the loop now also clears a stale port holder before binding.
 #
-# Env: MASTERS="master1:10.10.1.2 master2:10.10.1.3 master3:10.10.1.4"
+# Env: MASTERS="master1:<ip> master2:<ip> master3:<ip>"
 #      LOCAL_PORT=16443  FAILOVER_AFTER=2
+#
+# The master list defaults to the IPs in the generated
+# cluster-repo/.../group_vars/all/cluster_ips.yml, so moving to a new cluster
+# needs no edit here. The hardcoded fallback below is the clemson cluster
+# (masters 10.10.1.3-5); note 10.10.1.2 is the MONITORING node there, which is
+# why the old default (master1:10.10.1.2 ...) must not be reused.
 set -u
 SSH_CONFIG=${SSH_CONFIG:-/proj/k8sautoscaledl-PG0/src/cluster-access/ssh_config}
 LOCAL_PORT=${LOCAL_PORT:-16443}
 FAILOVER_AFTER=${FAILOVER_AFTER:-2}
-MASTERS=${MASTERS:-"master1:10.10.1.2 master2:10.10.1.3 master3:10.10.1.4"}
 LOG=${LOG:-/tmp/kube_tunnel.log}
 exec >>"$LOG" 2>&1
+
+if [ -z "${MASTERS:-}" ]; then
+  _ips=/proj/k8sautoscaledl-PG0/src/cluster-repo/lab-setup/inventory/group_vars/all/cluster_ips.yml
+  if [ -f "$_ips" ]; then
+    MASTERS=$(python3 - "$_ips" <<'PY' 2>/dev/null || true
+import sys, re
+s = open(sys.argv[1]).read()
+m = re.search(r"cloudlab_private_ips:\s*(\{.*?\})", s, re.S)
+if not m:
+    sys.exit(1)
+d = dict(re.findall(r"'([a-z0-9]+)':\s*'([0-9.]+)'", m.group(1)))
+print(" ".join("master%d:%s" % (i, d["master%d" % i]) for i in (1, 2, 3) if "master%d" % i in d))
+PY
+)
+  fi
+  MASTERS=${MASTERS:-"master1:10.10.1.3 master2:10.10.1.4 master3:10.10.1.5"}
+fi
 
 read -r -a MASTER_ARR <<< "$MASTERS"
 N=${#MASTER_ARR[@]}
