@@ -1,0 +1,61 @@
+# Run D: PBScaler Jul-14 official 2h10m protocol
+# Applied AFTER Run B′ completes and cluster is cold-reset.
+# Image: docker.io/younesnb/pbscaler:v2.0.0-official2h (RF trained on official Jul-13 data)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pbscaler
+  namespace: train-ticket
+  labels:
+    app: pbscaler
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pbscaler
+  template:
+    metadata:
+      labels:
+        app: pbscaler
+    spec:
+      serviceAccountName: pbscaler
+      containers:
+        - name: pbscaler
+          image: docker.io/younesnb/pbscaler:v2.1.0-4htrained
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            - name: PBS_DURATION
+              value: "7920"               # 2h12m = 130 min k6 + 2 min buffer (controller must restore HPAs AFTER k6 ends)
+            - name: PBS_SLO
+              value: "200"                # ms (paper Sec. IV-A4)
+            - name: PBS_SLO_PREDICTOR
+              value: "/app/simulation/train_ticket/RandomForestClassify.model"
+            - name: PBS_SLO_PREDICTOR_SVCS
+              value: "/app/simulation/train_ticket/RandomForestClassify.svcs"
+            - name: PBS_MAX_POD
+              value: "8"                  # parity with live HPAs (min1/max8)
+            - name: PBS_MIN_POD
+              value: "1"
+            - name: PBS_NAMESPACE
+              value: "train-ticket"
+            - name: PBS_FRONT_SVC
+              value: "ts-ui-dashboard"
+            - name: PBS_GATEWAY_NAME
+              value: "train-ticket-gateway-istio"
+            - name: PBS_SUSPEND_HPAS
+              value: "true"              # paper: PBScaler IS the autoscaler
+            - name: PBS_RESTORE_HPAS
+              value: "true"              # restore native HPAs on clean exit
+            - name: PBS_DRY_RUN
+              value: "false"
+            - name: PBS_MIMIR_URL
+              value: "http://mimir.monitoring.svc.cluster.local:8080"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"

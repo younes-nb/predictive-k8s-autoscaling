@@ -215,3 +215,7 @@ worker1 `nodeName` pin are retired:
 RBAC is namespaced: the pod may scale deployments of the `train-ticket`
 namespace, read pods, and create/delete HPAs there. Metrics are fetched
 in-cluster from Mimir directly (no port-forward needed).
+
+## Known infra issue (documented 2026-11-08): two kube-state-metrics instances
+
+`kube-prometheus-stack` ships one `kube-state-metrics`; this cluster exposes **two concurrent instances** (pod IP `10.233.104.188:8080` and the `prometheus-stack-kube-state-metrics.monitoring.svc.cluster.local` service name). Both export the identical `kube_deployment_* / kube_pod_* / kube_node_* / kube_horizontalpodautoscaler*` series, so any Prometheus/Mimir query of the form `sum (kube_*)` returns ~2× the true gauge (two copies). Verified at 09:50Z / 17:42Z / 21:04Z on 2026-11-07 at 66 series each. Dump/collect scripts must aggregate with `max by (...)` (dedupe by instance) for all `kube_*` metrics while this persists; cAdvisor (`container_*`) and istio metrics are single-source and unaffected.

@@ -11,4 +11,17 @@ __pycache__/
 load_testing/seeds/tt_users.json
 # PBScaler collected datasets + HPA state are local artifacts
 pbscaler/data/
+# PBScaler log artifacts (moved to /proj/k8sautoscaledl-PG0/reports)
+pbscaler/simulation/train_ticket/*.log
+pbscaler/simulation/train_ticket/*.txt
 AGENTS.md
+# Experiment run directories: logs, dumps and datasets are large local
+# artifacts, not source. Without this every snapshot (opencode and git) copies
+# gigabytes of run data — one 4 h run reached 18 GB of snapshots and filled the
+# 63 GB loadgen disk.
+stage7_28/exp13jul/hpa*/
+stage7_28/exp13jul/smoke_*/
+stage7_28/exp13jul/dryruns/
+# Every run directory is <name>_<UTC timestamp> (e.g. step1_hpa_30k_jul13_20261117T221258Z).
+stage7_28/exp13jul/step*/
+stage7_28/exp13jul/*_20[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z/

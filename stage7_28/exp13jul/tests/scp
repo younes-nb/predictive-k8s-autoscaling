@@ -1,0 +1,3 @@
+#!/bin/bash
+echo "SCP_CALLED: $*" >> /tmp/opencode/scp_calls.log
+exit 255

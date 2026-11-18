@@ -103,8 +103,9 @@ class PBScaler:
         """
         path = getattr(config, 'slo_predictor_svcs_path', None)
         if path and os.path.exists(path):
+            import json
             with open(path) as f:
-                svcs = [line.strip() for line in f if line.strip()]
+                svcs = json.load(f)
             print(f'loaded predictor svc list: {path} ({len(svcs)} svcs)')
             return svcs
         if config.dry_run:

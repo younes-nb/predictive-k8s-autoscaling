@@ -10,7 +10,8 @@ START_MIN=1932
 TEST_MIN=390
 COLLECT_MIN=360
 LOG=/tmp/opencode/run2prime_launcher.log
-cd /users/younes02/predictive-k8s-autoscaling
+REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
+cd "$REPO_ROOT"
 
 echo "$(date -u +%FT%TZ) k6 starting (TEST_MIN=${TEST_MIN}, START_MIN=${START_MIN}, COMPRESS=8)" >>"$LOG"
 setsid env TARGET_URL="$TARGET_URL" \

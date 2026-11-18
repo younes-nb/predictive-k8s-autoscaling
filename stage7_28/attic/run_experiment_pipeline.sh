@@ -2,6 +2,15 @@
 # Full experiment pipeline for HPA Jul-13, HPA Jul-14, PBScaler Jul-14
 # Run on head node after cluster is deployed with private network (10.10.1.0/24)
 # Load generator is on lb/loadgen node (10.10.1.1) targeting master1 (10.10.1.2:30080)
+#
+# ===========================================================================
+# SUPERSEDED (2026-11-13) — DO NOT USE for the final experiment sequence.
+# This script's parameters are stale: MAX_REQUESTS=2600, USER_POOL=150,
+# START_MIN=497/2324. The authorized sequence (8 steps, MAX_REQUESTS=10500,
+# USER_POOL=3000, START_MIN=529 jul13 / 145 jul14, RF trained on the 13 July
+# HPA observations ONLY, model frozen+re-baked before the 14 July runs) is
+# stage7_28/reconciliation/07_experiment_sequence.md.
+# ===========================================================================
 
 set -euo pipefail
 cd /users/younes02/predictive-k8s-autoscaling

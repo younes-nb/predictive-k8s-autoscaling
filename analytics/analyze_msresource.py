@@ -19,7 +19,11 @@ if REPO_ROOT not in sys.path:
 from config.defaults import Paths
 
 DEFAULT_BINS = 128
-CACHE_DIR = "/dataset/analysis_cache"
+# Dataset root is configurable: /dataset exists on the old lab machines but not on
+# the loadgen/monitoring nodes. DATASET_ROOT overrides every path below.
+DATASET_ROOT = os.environ.get("DATASET_ROOT", "/dataset")
+CACHE_DIR = os.path.join(DATASET_ROOT, "analysis_cache")
+DUCKDB_TMP = os.path.join(DATASET_ROOT, "temp")
 
 
 def log(msg: str) -> None:
@@ -238,8 +242,8 @@ def main():
         con.execute("SET threads TO 2")
         con.execute("SET memory_limit = '12GB'")
         con.execute("SET preserve_insertion_order = false")
-        os.makedirs("/dataset/temp", exist_ok=True)
-        con.execute("SET temp_directory = '/dataset/temp'")
+        os.makedirs(DUCKDB_TMP, exist_ok=True)
+        con.execute("SET temp_directory = '{}'".format(DUCKDB_TMP))
 
         log("  Querying histograms + globals...")
         cpu_bins, cpu_cnts, mem_bins, mem_cnts, global_avg_cpu, global_avg_mem = \

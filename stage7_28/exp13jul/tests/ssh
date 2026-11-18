@@ -1,0 +1,3 @@
+#!/bin/bash
+echo "SSH_CALLED: $*" >> /tmp/opencode/ssh_calls.log
+exit 255

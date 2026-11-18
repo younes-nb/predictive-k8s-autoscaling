@@ -1,0 +1,22 @@
+apiVersion: networking.istio.io/v1alpha3
+kind: EnvoyFilter
+metadata:
+  name: x-request-id-response
+  namespace: istio-system
+spec:
+  configPatches:
+    # `response_headers_to_add` is a RouteConfiguration field, not an
+    # HttpConnectionManager field. Merging it into every gateway route makes
+    # Envoy echo back the request ID it generated, so the load generator can
+    # join its ledger to the gateway and destination-sidecar access logs on an
+    # exact key (the mesh ID is otherwise only visible in the logs).
+    - applyTo: ROUTE_CONFIGURATION
+      match:
+        context: GATEWAY
+      patch:
+        operation: MERGE
+        value:
+          response_headers_to_add:
+            - header:
+                key: x-request-id
+                value: "%REQ(X-REQUEST-ID)%"

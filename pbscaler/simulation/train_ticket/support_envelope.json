@@ -1,0 +1,994 @@
+{
+ "created_utc": "2026-11-15T05:05:59.890937+00:00",
+ "trainer_version": "rf-train-2.0-stage726",
+ "data_path": "stage7_28/exp13jul/hpa25k_rr_20261114T200638Z/dataset_hpa25k_rr_20261114T200638Z/train_data_rebuilt.csv",
+ "data_sha256": "d4f7c6b849cb995f84a091e02bb86c18fc83acd11b6fb81a1157a2dd27432ec6",
+ "svcs": [
+  "train-ticket-gateway-istio",
+  "ts-admin-basic-info-service",
+  "ts-admin-order-service",
+  "ts-admin-route-service",
+  "ts-admin-travel-service",
+  "ts-admin-user-service",
+  "ts-assurance-service",
+  "ts-auth-service",
+  "ts-avatar-service",
+  "ts-basic-service",
+  "ts-cancel-service",
+  "ts-config-service",
+  "ts-consign-price-service",
+  "ts-consign-service",
+  "ts-contacts-service",
+  "ts-execute-service",
+  "ts-food-map-service",
+  "ts-food-service",
+  "ts-inside-payment-service",
+  "ts-news-service",
+  "ts-notification-service",
+  "ts-order-other-service",
+  "ts-order-service",
+  "ts-payment-service",
+  "ts-preserve-other-service",
+  "ts-preserve-service",
+  "ts-price-service",
+  "ts-rebook-service",
+  "ts-route-plan-service",
+  "ts-route-service",
+  "ts-seat-service",
+  "ts-security-service",
+  "ts-station-service",
+  "ts-ticket-office-service",
+  "ts-ticketinfo-service",
+  "ts-train-service",
+  "ts-travel-plan-service",
+  "ts-travel-service",
+  "ts-travel2-service",
+  "ts-ui-dashboard",
+  "ts-user-service",
+  "ts-verification-code-service",
+  "ts-voucher-service"
+ ],
+ "n_features": 129,
+ "n_train": 2304,
+ "n_test": 565,
+ "test_frac": 0.2,
+ "embargo_seconds": 60.0,
+ "split": {
+  "last_train_ts_epoch_s": 1794698939.0,
+  "embargo_end_epoch_s": 1794698999.0,
+  "test_rows_dropped_by_embargo": 11,
+  "ts_train_utc": [
+   "2026-11-14T20:17:04+00:00",
+   "2026-11-14T23:28:59+00:00"
+  ],
+  "ts_test_utc": [
+   "2026-11-14T23:29:59+00:00",
+   "2026-11-15T00:16:59+00:00"
+  ],
+  "test_frac": 0.2,
+  "embargo_seconds": 60.0,
+  "n_train": 2304,
+  "n_test": 565
+ },
+ "rejects": {
+  "invalid_label": 0,
+  "nonfinite_feature": 0
+ },
+ "n_rows_total": 2880,
+ "n_rejected": 0,
+ "class_balance": {
+  "train": {
+   "0": 0,
+   "1": 2304
+  },
+  "test": {
+   "0": 0,
+   "1": 565
+  }
+ },
+ "feature_bounds": [
+  {
+   "feature": "train-ticket-gateway-istio#index",
+   "slot": "index",
+   "col": 0,
+   "min": 0.0,
+   "max": 0.0
+  },
+  {
+   "feature": "train-ticket-gateway-istio&qps",
+   "slot": "qps",
+   "col": 1,
+   "min": 0.0,
+   "max": 0.0
+  },
+  {
+   "feature": "train-ticket-gateway-istio&count",
+   "slot": "count",
+   "col": 2,
+   "min": 4.0,
+   "max": 8.0
+  },
+  {
+   "feature": "ts-admin-basic-info-service#index",
+   "slot": "index",
+   "col": 3,
+   "min": 1.0,
+   "max": 1.0
+  },
+  {
+   "feature": "ts-admin-basic-info-service&qps",
+   "slot": "qps",
+   "col": 4,
+   "min": 0.2909090909090909,
+   "max": 12.509090909090908
+  },
+  {
+   "feature": "ts-admin-basic-info-service&count",
+   "slot": "count",
+   "col": 5,
+   "min": 1.0,
+   "max": 1.0
+  },
+  {
+   "feature": "ts-admin-order-service#index",
+   "slot": "index",
+   "col": 6,
+   "min": 2.0,
+   "max": 2.0
+  },
+  {
+   "feature": "ts-admin-order-service&qps",
+   "slot": "qps",
+   "col": 7,
+   "min": 0.1272727272727272,
+   "max": 6.254545454545454
+  },
+  {
+   "feature": "ts-admin-order-service&count",
+   "slot": "count",
+   "col": 8,
+   "min": 1.0,
+   "max": 1.0
+  },
+  {
+   "feature": "ts-admin-route-service#index",
+   "slot": "index",
+   "col": 9,
+   "min": 3.0,
+   "max": 3.0
+  },
+  {
+   "feature": "ts-admin-route-service&qps",
+   "slot": "qps",
+   "col": 10,
+   "min": 0.1272727272727272,
+   "max": 6.218181818181818
+  },
+  {
+   "feature": "ts-admin-route-service&count",
+   "slot": "count",
+   "col": 11,
+   "min": 1.0,
+   "max": 1.0
+  },
+  {
+   "feature": "ts-admin-travel-service#index",
+   "slot": "index",
+   "col": 12,
+   "min": 4.0,
+   "max": 4.0
+  },
+  {
+   "feature": "ts-admin-travel-service&qps",
+   "slot": "qps",
+   "col": 13,
+   "min": 0.1454545454545454,
+   "max": 6.236363636363636
+  },
+  {
+   "feature": "ts-admin-travel-service&count",
+   "slot": "count",
+   "col": 14,
+   "min": 1.0,
+   "max": 1.0
+  },
+  {
+   "feature": "ts-admin-user-service#index",
+   "slot": "index",
+   "col": 15,
+   "min": 5.0,
+   "max": 5.0
+  },
+  {
+   "feature": "ts-admin-user-service&qps",
+   "slot": "qps",
+   "col": 16,
+   "min": 0.1272727272727272,
+   "max": 6.236363636363636
+  },
+  {
+   "feature": "ts-admin-user-service&count",
+   "slot": "count",
+   "col": 17,
+   "min": 1.0,
+   "max": 1.0
+  },
+  {
+   "feature": "ts-assurance-service#index",
+   "slot": "index",
+   "col": 18,
+   "min": 6.0,
+   "max": 6.0
+  },
+  {
+   "feature": "ts-assurance-service&qps",
+   "slot": "qps",
+   "col": 19,
+   "min": 0.5817970255627068,
+   "max": 31.636363636363637
+  },
+  {
+   "feature": "ts-assurance-service&count",
+   "slot": "count",
+   "col": 20,
+   "min": 1.0,
+   "max": 1.0
+  },
+  {
+   "feature": "ts-auth-service#index",
+   "slot": "index",
+   "col": 21,
+   "min": 7.0,
+   "max": 7.0
+  },
+  {
+   "feature": "ts-auth-service&qps",
+   "slot": "qps",
+   "col": 22,
+   "min": 0.0545454545454545,
+   "max": 5.036363636363636
+  },
+  {
+   "feature": "ts-auth-service&count",
+   "slot": "count",
+   "col": 23,
+   "min": 1.0,
+   "max": 2.0
+  },
+  {
+   "feature": "ts-avatar-service#index",
+   "slot": "index",
+   "col": 24,
+   "min": 8.0,
+   "max": 8.0
+  },
+  {
+   "feature": "ts-avatar-service&qps",
+   "slot": "qps",
+   "col": 25,
+   "min": 0.2181818181818181,
+   "max": 13.072727272727272
+  },
+  {
+   "feature": "ts-avatar-service&count",
+   "slot": "count",
+   "col": 26,
+   "min": 1.0,
+   "max": 1.0
+  },
+  {
+   "feature": "ts-basic-service#index",
+   "slot": "index",
+   "col": 27,
+   "min": 9.0,
+   "max": 9.0
+  },
+  {
+   "feature": "ts-basic-service&qps",
+   "slot": "qps",
+   "col": 28,
+   "min": 0.3272727272727272,
+   "max": 19.127272727272725
+  },
+  {
+   "feature": "ts-basic-service&count",
+   "slot": "count",
+   "col": 29,
+   "min": 1.0,
+   "max": 1.0
+  },
+  {
+   "feature": "ts-cancel-service#index",
+   "slot": "index",
+   "col": 30,
+   "min": 10.0,
+   "max": 10.0
+  },
+  {
+   "feature": "ts-cancel-service&qps",
+   "slot": "qps",
+   "col": 31,
+   "min": 0.0,
+   "max": 0.0
+  },
+  {
+   "feature": "ts-cancel-service&count",
+   "slot": "count",
+   "col": 32,
+   "min": 1.0,
+   "max": 1.0
+  },
+  {
+   "feature": "ts-config-service#index",
+   "slot": "index",
+   "col": 33,
+   "min": 11.0,
+   "max": 11.0
+  },
+  {
+   "feature": "ts-config-service&qps",
+   "slot": "qps",
+   "col": 34,
+   "min": 0.2909090909090909,
+   "max": 19.07272727272727
+  },
+  {
+   "feature": "ts-config-service&count",
+   "slot": "count",
+   "col": 35,
+   "min": 1.0,
+   "max": 1.0
+  },
+  {
+   "feature": "ts-consign-price-service#index",
+   "slot": "index",
+   "col": 36,
+   "min": 12.0,
+   "max": 12.0
+  },
+  {
+   "feature": "ts-consign-price-service&qps",
+   "slot": "qps",
+   "col": 37,
+   "min": 0.2909090909090909,
+   "max": 15.836363636363636
+  },
+  {
+   "feature": "ts-consign-price-service&count",
+   "slot": "count",
+   "col": 38,
+   "min": 1.0,
+   "max": 1.0
+  },
+  {
+   "feature": "ts-consign-service#index",
+   "slot": "index",
+   "col": 39,
+   "min": 13.0,
+   "max": 13.0
+  },
+  {
+   "feature": "ts-consign-service&qps",
+   "slot": "qps",
+   "col": 40,
+   "min": 0.2727272727272727,
+   "max": 16.054545454545455
+  },
+  {
+   "feature": "ts-consign-service&count",
+   "slot": "count",
+   "col": 41,
+   "min": 1.0,
+   "max": 1.0
+  },
+  {
+   "feature": "ts-contacts-service#index",
+   "slot": "index",
+   "col": 42,
+   "min": 14.0,
+   "max": 14.0
+  },
+  {
+   "feature": "ts-contacts-service&qps",
+   "slot": "qps",
+   "col": 43,
+   "min": 0.4362288020066525,
+   "max": 21.782610276737337
+  },
+  {
+   "feature": "ts-contacts-service&count",
+   "slot": "count",
+   "col": 44,
+   "min": 1.0,
+   "max": 2.0
+  },
+  {
+   "feature": "ts-execute-service#index",
+   "slot": "index",
+   "col": 45,
+   "min": 15.0,
+   "max": 15.0
+  },
+  {
+   "feature": "ts-execute-service&qps",
+   "slot": "qps",
+   "col": 46,
+   "min": 0.2363636363636363,
+   "max": 13.127272727272729
+  },
+  {
+   "feature": "ts-execute-service&count",
+   "slot": "count",
+   "col": 47,
+   "min": 1.0,
+   "max": 1.0
+  },
+  {
+   "feature": "ts-food-map-service#index",
+   "slot": "index",
+   "col": 48,
+   "min": 16.0,
+   "max": 16.0
+  },
+  {
+   "feature": "ts-food-map-service&qps",
+   "slot": "qps",
+   "col": 49,
+   "min": 0.7818181818181817,
+   "max": 47.43636363636364
+  },
+  {
+   "feature": "ts-food-map-service&count",
+   "slot": "count",
+   "col": 50,
+   "min": 1.0,
+   "max": 2.0
+  },
+  {
+   "feature": "ts-food-service#index",
+   "slot": "index",
+   "col": 51,
+   "min": 17.0,
+   "max": 17.0
+  },
+  {
+   "feature": "ts-food-service&qps",
+   "slot": "qps",
+   "col": 52,
+   "min": 0.7636363636363636,
+   "max": 47.43636363636364
+  },
+  {
+   "feature": "ts-food-service&count",
+   "slot": "count",
+   "col": 53,
+   "min": 1.0,
+   "max": 2.0
+  },
+  {
+   "feature": "ts-inside-payment-service#index",
+   "slot": "index",
+   "col": 54,
+   "min": 18.0,
+   "max": 18.0
+  },
+  {
+   "feature": "ts-inside-payment-service&qps",
+   "slot": "qps",
+   "col": 55,
+   "min": 0.0,
+   "max": 0.0
+  },
+  {
+   "feature": "ts-inside-payment-service&count",
+   "slot": "count",
+   "col": 56,
+   "min": 1.0,
+   "max": 1.0
+  },
+  {
+   "feature": "ts-news-service#index",
+   "slot": "index",
+   "col": 57,
+   "min": 19.0,
+   "max": 19.0
+  },
+  {
+   "feature": "ts-news-service&qps",
+   "slot": "qps",
+   "col": 58,
+   "min": 0.2363636363636363,
+   "max": 13.09090909090909
+  },
+  {
+   "feature": "ts-news-service&count",
+   "slot": "count",
+   "col": 59,
+   "min": 1.0,
+   "max": 1.0
+  },
+  {
+   "feature": "ts-notification-service#index",
+   "slot": "index",
+   "col": 60,
+   "min": 20.0,
+   "max": 20.0
+  },
+  {
+   "feature": "ts-notification-service&qps",
+   "slot": "qps",
+   "col": 61,
+   "min": 0.0,
+   "max": 0.0
+  },
+  {
+   "feature": "ts-notification-service&count",
+   "slot": "count",
+   "col": 62,
+   "min": 1.0,
+   "max": 1.0
+  },
+  {
+   "feature": "ts-order-other-service#index",
+   "slot": "index",
+   "col": 63,
+   "min": 21.0,
+   "max": 21.0
+  },
+  {
+   "feature": "ts-order-other-service&qps",
+   "slot": "qps",
+   "col": 64,
+   "min": 0.6363636363636364,
+   "max": 24.78181818181818
+  },
+  {
+   "feature": "ts-order-other-service&count",
+   "slot": "count",
+   "col": 65,
+   "min": 1.0,
+   "max": 1.0
+  },
+  {
+   "feature": "ts-order-service#index",
+   "slot": "index",
+   "col": 66,
+   "min": 22.0,
+   "max": 22.0
+  },
+  {
+   "feature": "ts-order-service&qps",
+   "slot": "qps",
+   "col": 67,
+   "min": 0.6181818181818182,
+   "max": 24.89090909090909
+  },
+  {
+   "feature": "ts-order-service&count",
+   "slot": "count",
+   "col": 68,
+   "min": 1.0,
+   "max": 2.0
+  },
+  {
+   "feature": "ts-payment-service#index",
+   "slot": "index",
+   "col": 69,
+   "min": 23.0,
+   "max": 23.0
+  },
+  {
+   "feature": "ts-payment-service&qps",
+   "slot": "qps",
+   "col": 70,
+   "min": 0.7090909090909091,
+   "max": 39.25454545454545
+  },
+  {
+   "feature": "ts-payment-service&count",
+   "slot": "count",
+   "col": 71,
+   "min": 1.0,
+   "max": 1.0
+  },
+  {
+   "feature": "ts-preserve-other-service#index",
+   "slot": "index",
+   "col": 72,
+   "min": 24.0,
+   "max": 24.0
+  },
+  {
+   "feature": "ts-preserve-other-service&qps",
+   "slot": "qps",
+   "col": 73,
+   "min": 0.0,
+   "max": 0.0
+  },
+  {
+   "feature": "ts-preserve-other-service&count",
+   "slot": "count",
+   "col": 74,
+   "min": 1.0,
+   "max": 1.0
+  },
+  {
+   "feature": "ts-preserve-service#index",
+   "slot": "index",
+   "col": 75,
+   "min": 25.0,
+   "max": 25.0
+  },
+  {
+   "feature": "ts-preserve-service&qps",
+   "slot": "qps",
+   "col": 76,
+   "min": 0.0,
+   "max": 0.0
+  },
+  {
+   "feature": "ts-preserve-service&count",
+   "slot": "count",
+   "col": 77,
+   "min": 1.0,
+   "max": 1.0
+  },
+  {
+   "feature": "ts-price-service#index",
+   "slot": "index",
+   "col": 78,
+   "min": 26.0,
+   "max": 26.0
+  },
+  {
+   "feature": "ts-price-service&qps",
+   "slot": "qps",
+   "col": 79,
+   "min": 0.3090909090909091,
+   "max": 19.125534042359785
+  },
+  {
+   "feature": "ts-price-service&count",
+   "slot": "count",
+   "col": 80,
+   "min": 1.0,
+   "max": 1.0
+  },
+  {
+   "feature": "ts-rebook-service#index",
+   "slot": "index",
+   "col": 81,
+   "min": 27.0,
+   "max": 27.0
+  },
+  {
+   "feature": "ts-rebook-service&qps",
+   "slot": "qps",
+   "col": 82,
+   "min": 0.2363636363636363,
+   "max": 13.145454545454545
+  },
+  {
+   "feature": "ts-rebook-service&count",
+   "slot": "count",
+   "col": 83,
+   "min": 1.0,
+   "max": 1.0
+  },
+  {
+   "feature": "ts-route-plan-service#index",
+   "slot": "index",
+   "col": 84,
+   "min": 28.0,
+   "max": 28.0
+  },
+  {
+   "feature": "ts-route-plan-service&qps",
+   "slot": "qps",
+   "col": 85,
+   "min": 0.3090909090909091,
+   "max": 19.10909090909091
+  },
+  {
+   "feature": "ts-route-plan-service&count",
+   "slot": "count",
+   "col": 86,
+   "min": 1.0,
+   "max": 1.0
+  },
+  {
+   "feature": "ts-route-service#index",
+   "slot": "index",
+   "col": 87,
+   "min": 29.0,
+   "max": 29.0
+  },
+  {
+   "feature": "ts-route-service&qps",
+   "slot": "qps",
+   "col": 88,
+   "min": 0.5818181818181818,
+   "max": 34.90909090909091
+  },
+  {
+   "feature": "ts-route-service&count",
+   "slot": "count",
+   "col": 89,
+   "min": 1.0,
+   "max": 2.0
+  },
+  {
+   "feature": "ts-seat-service#index",
+   "slot": "index",
+   "col": 90,
+   "min": 30.0,
+   "max": 30.0
+  },
+  {
+   "feature": "ts-seat-service&qps",
+   "slot": "qps",
+   "col": 91,
+   "min": 0.2363636363636363,
+   "max": 13.036363636363635
+  },
+  {
+   "feature": "ts-seat-service&count",
+   "slot": "count",
+   "col": 92,
+   "min": 1.0,
+   "max": 2.0
+  },
+  {
+   "feature": "ts-security-service#index",
+   "slot": "index",
+   "col": 93,
+   "min": 31.0,
+   "max": 31.0
+  },
+  {
+   "feature": "ts-security-service&qps",
+   "slot": "qps",
+   "col": 94,
+   "min": 0.2545454545454545,
+   "max": 15.927272727272726
+  },
+  {
+   "feature": "ts-security-service&count",
+   "slot": "count",
+   "col": 95,
+   "min": 1.0,
+   "max": 1.0
+  },
+  {
+   "feature": "ts-station-service#index",
+   "slot": "index",
+   "col": 96,
+   "min": 32.0,
+   "max": 32.0
+  },
+  {
+   "feature": "ts-station-service&qps",
+   "slot": "qps",
+   "col": 97,
+   "min": 1.0545454545454545,
+   "max": 56.81404988728092
+  },
+  {
+   "feature": "ts-station-service&count",
+   "slot": "count",
+   "col": 98,
+   "min": 1.0,
+   "max": 1.0
+  },
+  {
+   "feature": "ts-ticket-office-service#index",
+   "slot": "index",
+   "col": 99,
+   "min": 33.0,
+   "max": 33.0
+  },
+  {
+   "feature": "ts-ticket-office-service&qps",
+   "slot": "qps",
+   "col": 100,
+   "min": 0.4363636363636363,
+   "max": 26.18181818181818
+  },
+  {
+   "feature": "ts-ticket-office-service&count",
+   "slot": "count",
+   "col": 101,
+   "min": 1.0,
+   "max": 1.0
+  },
+  {
+   "feature": "ts-ticketinfo-service#index",
+   "slot": "index",
+   "col": 102,
+   "min": 34.0,
+   "max": 34.0
+  },
+  {
+   "feature": "ts-ticketinfo-service&qps",
+   "slot": "qps",
+   "col": 103,
+   "min": 0.0,
+   "max": 0.0
+  },
+  {
+   "feature": "ts-ticketinfo-service&count",
+   "slot": "count",
+   "col": 104,
+   "min": 1.0,
+   "max": 1.0
+  },
+  {
+   "feature": "ts-train-service#index",
+   "slot": "index",
+   "col": 105,
+   "min": 35.0,
+   "max": 35.0
+  },
+  {
+   "feature": "ts-train-service&qps",
+   "slot": "qps",
+   "col": 106,
+   "min": 0.2909090909090909,
+   "max": 19.09090909090909
+  },
+  {
+   "feature": "ts-train-service&count",
+   "slot": "count",
+   "col": 107,
+   "min": 1.0,
+   "max": 1.0
+  },
+  {
+   "feature": "ts-travel-plan-service#index",
+   "slot": "index",
+   "col": 108,
+   "min": 36.0,
+   "max": 36.0
+  },
+  {
+   "feature": "ts-travel-plan-service&qps",
+   "slot": "qps",
+   "col": 109,
+   "min": 0.2727272727272727,
+   "max": 19.08917371148078
+  },
+  {
+   "feature": "ts-travel-plan-service&count",
+   "slot": "count",
+   "col": 110,
+   "min": 1.0,
+   "max": 1.0
+  },
+  {
+   "feature": "ts-travel-service#index",
+   "slot": "index",
+   "col": 111,
+   "min": 37.0,
+   "max": 37.0
+  },
+  {
+   "feature": "ts-travel-service&qps",
+   "slot": "qps",
+   "col": 112,
+   "min": 2.290909090909091,
+   "max": 109.4
+  },
+  {
+   "feature": "ts-travel-service&count",
+   "slot": "count",
+   "col": 113,
+   "min": 1.0,
+   "max": 3.0
+  },
+  {
+   "feature": "ts-travel2-service#index",
+   "slot": "index",
+   "col": 114,
+   "min": 38.0,
+   "max": 38.0
+  },
+  {
+   "feature": "ts-travel2-service&qps",
+   "slot": "qps",
+   "col": 115,
+   "min": 1.018181818181818,
+   "max": 46.54335133955367
+  },
+  {
+   "feature": "ts-travel2-service&count",
+   "slot": "count",
+   "col": 116,
+   "min": 1.0,
+   "max": 2.0
+  },
+  {
+   "feature": "ts-ui-dashboard#index",
+   "slot": "index",
+   "col": 117,
+   "min": 39.0,
+   "max": 39.0
+  },
+  {
+   "feature": "ts-ui-dashboard&qps",
+   "slot": "qps",
+   "col": 118,
+   "min": 18.21818181818182,
+   "max": 902.7402384848484
+  },
+  {
+   "feature": "ts-ui-dashboard&count",
+   "slot": "count",
+   "col": 119,
+   "min": 2.0,
+   "max": 4.0
+  },
+  {
+   "feature": "ts-user-service#index",
+   "slot": "index",
+   "col": 120,
+   "min": 40.0,
+   "max": 40.0
+  },
+  {
+   "feature": "ts-user-service&qps",
+   "slot": "qps",
+   "col": 121,
+   "min": 0.0,
+   "max": 0.0
+  },
+  {
+   "feature": "ts-user-service&count",
+   "slot": "count",
+   "col": 122,
+   "min": 1.0,
+   "max": 1.0
+  },
+  {
+   "feature": "ts-verification-code-service#index",
+   "slot": "index",
+   "col": 123,
+   "min": 41.0,
+   "max": 41.0
+  },
+  {
+   "feature": "ts-verification-code-service&qps",
+   "slot": "qps",
+   "col": 124,
+   "min": 0.2909090909090909,
+   "max": 19.65311613700822
+  },
+  {
+   "feature": "ts-verification-code-service&count",
+   "slot": "count",
+   "col": 125,
+   "min": 1.0,
+   "max": 1.0
+  },
+  {
+   "feature": "ts-voucher-service#index",
+   "slot": "index",
+   "col": 126,
+   "min": 42.0,
+   "max": 42.0
+  },
+  {
+   "feature": "ts-voucher-service&qps",
+   "slot": "qps",
+   "col": 127,
+   "min": 0.0,
+   "max": 0.0
+  },
+  {
+   "feature": "ts-voucher-service&count",
+   "slot": "count",
+   "col": 128,
+   "min": 1.0,
+   "max": 1.0
+  }
+ ]
+}

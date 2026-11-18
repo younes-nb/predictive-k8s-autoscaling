@@ -38,9 +38,10 @@ from preprocessing.build_windows import _CSV_COLUMN_MAP, _CSV_COLUMN_MINMAX
 
 BUILDER_TYPES = ("cnn_bilstm", "dpam", "quantile_ensemble", "linearreg", "dlinear")
 
-DEFAULT_PLOTS_DIR = "/proj/k8sautoscaledl-PG0/analytics_out"
-DEFAULT_PARQUET_ROOT = "/dataset/parquet"
-DEFAULT_CHECKPOINT = "/proj/k8sautoscaledl-PG0/models/model.pt"
+DATASET_ROOT = os.environ.get("DATASET_ROOT", "/dataset")
+DEFAULT_PLOTS_DIR = os.environ.get("ANALYTICS_OUT_DIR", "/proj/k8sautoscaledl-PG0/analytics_out")
+DEFAULT_PARQUET_ROOT = os.environ.get("PARQUET_ROOT", os.path.join(DATASET_ROOT, "parquet"))
+DEFAULT_CHECKPOINT = os.environ.get("CHECKPOINT_PATH", "/proj/k8sautoscaledl-PG0/models/model.pt")
 
 BASE_THRESHOLD = 0.80
 TRAIN_FRAC = 0.7
@@ -60,7 +61,7 @@ def parse_args():
                          "trace mode plotting predicted CPM/CPU/memory")
     ap.add_argument("--profile_json", default="/proj/k8sautoscaledl-PG0/madu/profiling.json",
                     help="§4.2 linear profiling coefficients (madu/profile.py output)")
-    ap.add_argument("--cpm_dir", default="/dataset/ms_call_counts/per_minute")
+    ap.add_argument("--cpm_dir", default=os.path.join(DATASET_ROOT, "ms_call_counts", "per_minute"))
     ap.add_argument("--util_parquet",
                     default="/proj/k8sautoscaledl-PG0/madu/util_per_minute.parquet",
                     help="Per-minute util aggregation (madu/aggregate_util.py output)")
@@ -87,9 +88,10 @@ def parse_args():
     return ap.parse_args()
 
 
-DEFAULT_SERVICE_ARRAYS = "/dataset/windows/_service_arrays.npy"
-DEFAULT_SERVICE_INDEX = "/dataset/windows/_service_index.json"
-DEFAULT_REPLICA_COUNTS = "/dataset/windows/_service_replica_counts.npy"
+_WINDOWS_DIR = os.environ.get("WINDOWS_DIR", os.path.join(DATASET_ROOT, "windows"))
+DEFAULT_SERVICE_ARRAYS = os.path.join(_WINDOWS_DIR, "_service_arrays.npy")
+DEFAULT_SERVICE_INDEX = os.path.join(_WINDOWS_DIR, "_service_index.json")
+DEFAULT_REPLICA_COUNTS = os.path.join(_WINDOWS_DIR, "_service_replica_counts.npy")
 CACHE_FEATURES = ["cpu_utilization", "memory_utilization", "providerrpc_mcr", "http_mcr"]
 
 

@@ -9,11 +9,12 @@ output CSV joins the Run-A dataset dir. Run promptly (~18-20h retention).
 import argparse
 import datetime as dt
 import json
+import os
 import sys
 import time
 import urllib.request
 
-sys.path.insert(0, '/users/younes02/predictive-k8s-autoscaling/pbscaler')
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 from config.Config import Config  # noqa: E402
 
 CFG = Config()
