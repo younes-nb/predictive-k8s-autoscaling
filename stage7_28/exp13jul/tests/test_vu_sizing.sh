@@ -4,18 +4,27 @@
 #
 #   bash /tmp/opencode/test_vu_sizing.sh [TEST_MIN] [TAG]
 set -u
-REPO=/proj/k8sautoscaledl-PG0/src/predictive-k8s-autoscaling
+REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 JS="$REPO/load_testing/k6/trainticket.js"
-OUT="/tmp/opencode/vu_${2:-base}"
+OUT="${OUT_DIR:-/tmp/opencode}/vu_${2:-base}"
 TMIN="${1:-3}"
 PORT=${PORT:-18099}
 rm -rf "$OUT"; mkdir -p "$OUT"
 
-echo "### VU sizing: test_min=$TMIN port=$PORT out=$OUT"
+# The trace slice is generated per run from the NASA archive; the old fixed
+# /opt/loadgen/mcr_jul13_slice.csv no longer exists.
+MCR_CSV=${MCR_CSV:-"$OUT/trace_slice.csv"}
+if [ ! -s "$MCR_CSV" ]; then
+  python3 "$REPO/stage7_28/exp13jul/nasa_trace_slice.py" \
+    --day 1995-07-13 --duration "$TMIN" --out "$MCR_CSV" >/dev/null 2>&1 \
+    || { echo "FATAL: could not generate a trace slice"; exit 1; }
+fi
+
+echo "### VU sizing: test_min=$TMIN port=$PORT out=$OUT slice=$MCR_CSV"
 start=$(date +%s)
 env HOST="http://127.0.0.1:$PORT" \
-    MCR_CSV=/opt/loadgen/mcr_jul13_slice.csv \
-    SEED_FILE=/opt/loadgen/seeds/tt_users.json \
+    MCR_CSV="$MCR_CSV" \
+    SEED_FILE="$REPO/load_testing/seeds/tt_users.json" \
     MAX_REQUESTS=25000 USER_POOL=2999 TRACE_COMPRESS=1 OPEN_LOOP=1 \
     PRE_ALLOCATED_VUS=2999 MAX_VUS=2999 \
     PREFLIGHT=0 ALLOW_SEED_REUSE=0 LOGIN_RETRIES=2 LOGIN_COOLDOWN_MS=30000 \
