@@ -1,13 +1,13 @@
 {
- "created_utc": "2026-11-15T05:05:59.893753+00:00",
+ "created_utc": "2026-11-21T02:52:47.967065+00:00",
  "trainer_version": "rf-train-2.0-stage726",
  "sklearn_version": "1.2.1",
  "numpy_version": "1.22.2",
  "pandas_version": "1.5.3",
  "joblib_version": "1.1.1",
  "seed": 20,
- "data_path": "stage7_28/exp13jul/hpa25k_rr_20261114T200638Z/dataset_hpa25k_rr_20261114T200638Z/train_data_rebuilt.csv",
- "data_sha256": "d4f7c6b849cb995f84a091e02bb86c18fc83acd11b6fb81a1157a2dd27432ec6",
+ "data_path": "stage7_28/exp13jul/step1_hpa_130k_jul13_t4h_20261120T215831Z/dataset_step1_hpa_130k_jul13_t4h_20261120T215831Z/train_data.csv",
+ "data_sha256": "abd5364fb115c48711765825396d2ea5a774e2ec74bcf976faf43785098e11a8",
  "svcs": [
   "train-ticket-gateway-istio",
   "ts-admin-basic-info-service",
@@ -56,55 +56,55 @@
  "n_features": 129,
  "model_n_features_in": 129,
  "split": {
-  "last_train_ts_epoch_s": 1794698939.0,
-  "embargo_end_epoch_s": 1794698999.0,
+  "last_train_ts_epoch_s": 1795222188.0,
+  "embargo_end_epoch_s": 1795222248.0,
   "test_rows_dropped_by_embargo": 11,
   "ts_train_utc": [
-   "2026-11-14T20:17:04+00:00",
-   "2026-11-14T23:28:59+00:00"
+   "2026-11-20T21:59:03+00:00",
+   "2026-11-21T00:49:48+00:00"
   ],
   "ts_test_utc": [
-   "2026-11-14T23:29:59+00:00",
-   "2026-11-15T00:16:59+00:00"
+   "2026-11-21T00:50:48+00:00",
+   "2026-11-21T01:58:58+00:00"
   ],
   "test_frac": 0.2,
-  "embargo_seconds": 60.0,
-  "n_train": 2304,
-  "n_test": 565
+  "embargo_seconds": 60,
+  "n_train": 1844,
+  "n_test": 451
  },
  "rejects": {
-  "invalid_label": 0,
+  "invalid_label": 574,
   "nonfinite_feature": 0
  },
  "n_rows_total": 2880,
- "n_rejected": 0,
+ "n_rejected": 574,
  "class_balance": {
   "train": {
-   "0": 0,
-   "1": 2304
+   "0": 358,
+   "1": 1486
   },
   "test": {
-   "0": 0,
-   "1": 565
+   "0": 2,
+   "1": 449
   }
  },
  "metrics": {
-  "accuracy": 1.0,
+  "accuracy": 0.9955654101995566,
   "recall_violation_pos_label_0": 0.0,
-  "roc_auc": null,
+  "roc_auc": 0.5,
   "confusion_matrix": [
    [
     0,
-    0
+    2
    ],
    [
     0,
-    565
+    449
    ]
   ],
-  "classification_report": "              precision    recall  f1-score   support\n\n           1      1.000     1.000     1.000       565\n\n    accuracy                          1.000       565\n   macro avg      1.000     1.000     1.000       565\nweighted avg      1.000     1.000     1.000       565\n"
+  "classification_report": "              precision    recall  f1-score   support\n\n           0      0.000     0.000     0.000         2\n           1      0.996     1.000     0.998       449\n\n    accuracy                          0.996       451\n   macro avg      0.498     0.500     0.499       451\nweighted avg      0.991     0.996     0.993       451\n"
  },
- "test_ood_fraction": 0.0,
+ "test_ood_fraction": 0.6075388026607539,
  "ood_definition": "fraction of test rows with any [i, qps, count] feature outside the per-feature [min, max] of the training rows",
  "notes": [
   "paper feature semantics: per-service [i, qps, count], default class weight",

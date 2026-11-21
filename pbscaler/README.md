@@ -30,8 +30,23 @@ changed file; logic-level behavior is unchanged.
 ## This cluster's facts (why things were adapted)
 
 - TrainTicket is deployed in the `train-ticket` namespace (43 stateless
-  `ts-*` services + `train-ticket-gateway-istio` + 21 mongo/mysql stores);
-  every stateless deployment has an **HPA (min 1 / max 10, CPU 80%)**.
+  `ts-*` services + 21 mongo/mysql stores); every stateless deployment has an
+  **HPA (min 1 / max 8, CPU 80%)**.
+- **The ingress is `istio-ingressgateway` in `istio-system`** (classic
+  `istio/gateway` Helm chart), not a Deployment in `train-ticket`. It replaced the
+  in-namespace Gateway API proxy `train-ticket-gateway-istio` on 2026-11-21.
+  Consequences for this controller:
+  - `PBS_GATEWAY_NAME` defaults to `istio-ingressgateway`;
+  - the gateway is **outside** `PBS_NAMESPACE`, so the namespaced `Role` cannot
+    patch it. That matches upstream, where the ingress gateway
+    (`istio-ingressgateway`, `istio-system`) is filtered out of the anomaly set
+    (`PBScaler.py:307`) and can never be a GA root. Do not "fix" this by granting
+    cluster-wide patch rights without recording it as a deviation.
+  - istio emits **no destination-side series** for the ingress gateway (it is only
+    ever a `source`), so it has no `front_p90` column and cannot enter the anomaly
+    set even if the filter were removed. Removing the filter alone would raise
+    `KeyError` on the missing latency column in `build_abnormal_subgraph`.
+  - NodePort 80 is pinned to **30080** on `istio-ingressgateway`.
 - Observability: grafana-agent (Alloy) remote-writes cAdvisor, kube-state and
   Istio sidecar metrics into **Mimir**; the Prometheus HTTP API lives under
   `http://mimir.monitoring.svc.cluster.local:8080/prometheus/api/v1/...`.

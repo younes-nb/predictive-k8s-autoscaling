@@ -58,7 +58,7 @@ spec:
             - name: PBS_FRONT_SVC
               value: "ts-ui-dashboard"
             - name: PBS_GATEWAY_NAME
-              value: "train-ticket-gateway-istio"
+              value: "istio-ingressgateway"
             - name: PBS_SUSPEND_HPAS
               value: "true"                 # paper: PBScaler is the autoscaler during its run
             - name: PBS_RESTORE_HPAS
@@ -67,7 +67,11 @@ spec:
               value: "false"
             # in-cluster Mimir, no port-forward needed (monitoring ns)
             - name: PBS_MIMIR_URL
-              value: "http://mimir.monitoring.svc.cluster.local:8080"
+              # Mimir runs OUTSIDE the cluster on the monitoring host (mon1), published on
+              # 18080. The in-cluster Service went away with in-cluster monitoring, which
+              # left PBScaler unable to resolve DNS and therefore unable to make any
+              # scaling decision (2026-11-21).
+              value: "http://10.10.1.2:18080"
           resources:
             requests:
               cpu: "100m"

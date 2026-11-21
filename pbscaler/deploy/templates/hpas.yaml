@@ -1,26 +1,6 @@
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
-  name: train-ticket-gateway-istio-hpa
-  namespace: train-ticket
-spec:
-  maxReplicas: 10
-  metrics:
-  - resource:
-      name: cpu
-      target:
-        averageUtilization: 80
-        type: Utilization
-    type: Resource
-  minReplicas: 5
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: train-ticket-gateway-istio
----
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-metadata:
   name: ts-admin-basic-info-service-hpa
   namespace: train-ticket
 spec:

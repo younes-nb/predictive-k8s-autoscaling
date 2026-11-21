@@ -199,7 +199,9 @@ def main():
             kubectl_ok = 1
             ad = dep_cache.get("ts-auth-service", {})
             auth_rep, auth_avail = ad.get("status"), ad.get("available")
-            gd = dep_cache.get("train-ticket-gateway-istio", {})
+            # the ingress gateway moved to istio-system (2026-11-21); the
+            # train-ticket deployment cache has no gateway entry any more
+            gd = dep_cache.get("istio-ingressgateway", {})
             gw_rep = gd.get("status")
             ud = dep_cache.get("ts-ui-dashboard", {})
             ui_rep = ud.get("status")

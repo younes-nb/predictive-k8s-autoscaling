@@ -9,7 +9,7 @@ Every knob here is env-overridable (PBS_* vars) so the same code runs:
 Defaults below match the live cluster:
 
   - TrainTicket lives in the ``train-ticket`` namespace, every stateless
-    deployment has an HPA (min 1 / max 10, CPU 80%).
+    deployment has an HPA (min 1 / max 8, CPU 80%).
   - Metrics land in Mimir (Alloy remote-writes into it). Mimir serves the
     standard Prometheus HTTP API under the ``/prometheus`` prefix.
   - PDF: "The SLO values for ... Train Ticket were set to 200 ms"
@@ -59,12 +59,12 @@ class Config():
         self.front_svc = get_env("PBS_FRONT_SVC", "ts-ui-dashboard")
         # Istio ingress gateway workload name — filtered out of TopoRank's
         # abnormal subgraph (upstream used 'istio-ingressgateway').
-        self.gateway_name = get_env("PBS_GATEWAY_NAME", "train-ticket-gateway-istio")
+        self.gateway_name = get_env("PBS_GATEWAY_NAME", "istio-ingressgateway")
 
         self.SLO = get_env_float("PBS_SLO", 200.0)  # ms, paper Sec. IV-A4
 
         # Replica bounds (paper限制了8, ours aligned to the cluster's HPAs)
-        self.max_pod = get_env_int("PBS_MAX_POD", 10)
+        self.max_pod = get_env_int("PBS_MAX_POD", 8)
         self.min_pod = get_env_int("PBS_MIN_POD", 1)
 
         # ---- k8s access --------------------------------------------------

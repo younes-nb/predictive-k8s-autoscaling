@@ -212,8 +212,11 @@ def loki_pod_selector(service):
     ns/pod:container). App services: app containers only (negative matcher
     drops istio sidecar streams). The ingress gateway pods run ONLY the
     istio-proxy (Envoy) container, so there the exclusion is dropped."""
-    if "gateway" in service or service == "ts-ui-dashboard":
-        return 'instance=~"train-ticket/train-ticket-gateway-istio-.*"'
+    if "gateway" in service:
+        # Classic istio-ingressgateway lives in istio-system (2026-11-21).
+        return 'instance=~"istio-system/istio-ingressgateway-.*"'
+    if service == "ts-ui-dashboard":
+        return 'instance=~"train-ticket/ts-ui-dashboard-.*"'
     if service.startswith("ts-"):
         pod = "ts-%s-.*" % _re2_escape(service[3:])
     else:

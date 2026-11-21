@@ -471,8 +471,19 @@ class Run:
             k = r.get("slo_reward", "-1")
             c[k] = c.get(k, 0) + 1
         v, ok = c.get("0", 0), c.get("1", 0)
-        return {"viol": v, "ok": ok, "unlab": c.get("-1", 0),
-                "rate": pct(v, v + ok)}
+        unlab = c.get("-1", 0)
+        total = v + ok + unlab
+        return {"viol": v, "ok": ok, "unlab": unlab,
+                "rate": pct(v, v + ok),
+                # Outage-aware view (2026-11-19). A tick with no front traffic
+                # is a FAILED tick, not a missing one: the p90 histogram gets no
+                # new samples when nothing completes, so histogram_quantile
+                # returns NaN and the plain rate silently drops the tick. The
+                # plain rate therefore understates severity exactly when the
+                # system is worst. See
+                # reports/stage7_28/exp13jul/slo_metric_blindness_20261119.md
+                "outage_aware_rate": pct(v + unlab, total),
+                "outage_rate": pct(unlab, total)}
 
     def front_p90(self):
         return stats([fnum(r.get("front_p90")) for r in self.train])
@@ -619,7 +630,10 @@ class Report:
                 f"{i}", f"`{r.name}`", r.autoscaler(),
                 fmt(r.params.get("max_requests"), 0),
                 fmt(dl, 1) + " %",
+                fmt(r.k6("iterations"), 0),
                 fmt(slo["rate"], 1) + " %",
+                fmt(slo["outage_aware_rate"], 1) + " %",
+                fmt(slo["outage_rate"], 1) + " %",
                 fmt(fp.get("p95"), 0) + " ms",
                 fmt(r.req_failed_pct(), 2) + " %",
                 fmt(drop, 0),
@@ -628,11 +642,12 @@ class Report:
                 r.slo_verdict(self.target),
             ])
         self.table(
-            ["#", "run", "autoscaler", "offered/min", "delivered", "SLO viol",
-             "front p95", "req failed", "dropped", "scale evts", "peak rep", "SLO"],
+            ["#", "run", "autoscaler", "offered/min", "delivered", "delivered iters",
+             "SLO viol", "outage-aware", "outage %", "front p95", "req failed",
+             "dropped", "scale evts", "peak rep", "SLO"],
             rows,
             ["---:", "---", "---", "---:", "---:", "---:", "---:", "---:", "---:",
-             "---:", "---:", "---"])
+             "---:", "---:", "---:", "---:", "---:", "---"])
         self.section_0b()
         self.section_0c()
 
@@ -678,6 +693,12 @@ class Report:
             bits.append(f"SLO {rate:.1f} % ({r.slo_verdict(self.target)})"
                         if rate == rate else "no SLO labels")
             bits.append(f"delivery {dl:.1f} %" if dl == dl else "delivery n/a")
+            _s = r.slo()
+            if _s.get("outage_rate") == _s.get("outage_rate"):
+                bits.append(f"outage {_s['outage_rate']:.1f} %")
+            _it = r.k6("iterations")
+            if isinstance(_it, (int, float)):
+                bits.append(f"{int(_it):,} delivered iterations")
             p95 = fp.get("p95", float("nan"))
             bits.append(f"front p95 {p95:.0f} ms" if p95 == p95 else "front p95 n/a")
             if drop:
@@ -732,6 +753,12 @@ class Report:
                f"(`histogram_quantile(0.90, sum(rate(istio_request_duration_milliseconds_bucket"
                f"{{destination_workload=\"ts-ui-dashboard\"}}[1m])) by (le))`).")
         self.w()
+        self.w("`rate` is the benchmark definition (unlabeled ticks excluded). "
+               "`outage-aware` counts a tick with no front traffic as a failure; "
+               "`outage %` is the share of ticks with no front traffic. Prefer "
+               "the outage-aware column when calibrating - the plain rate is "
+               "blind to total outages.")
+        self.w()
         rows = []
         for i, r in enumerate(self.runs, 1):
             s = r.slo()
@@ -739,11 +766,12 @@ class Report:
             best, start = r.violation_streak()
             rows.append([f"{i}", fmt(s["viol"]), fmt(s["ok"]), fmt(s["unlab"]),
                          fmt(s["rate"], 1) + " %",
+                         fmt(s["outage_aware_rate"], 1) + " %",
+                         fmt(s["outage_rate"], 1) + " %",
                          fmt(fp.get("p50"), 0), fmt(fp.get("p95"), 0),
-                         fmt(fp.get("max"), 0),
                          f"{best * 5 / 60:.1f} min" if best else "—"])
-        self.table(["#", "viol", "ok", "unlabeled", "rate", "p50 ms", "p95 ms",
-                    "max ms", "longest run"], rows)
+        self.table(["#", "viol", "ok", "unlabeled", "rate", "outage-aware",
+                    "outage %", "p50 ms", "p95 ms", "longest run"], rows)
 
         self.w("Per-service latency (from `metrics.csv`, 5 s samples):")
         self.w()
@@ -764,6 +792,10 @@ class Report:
     def section_3(self):
         self.w("## 3. Reliability")
         self.w()
+        if not any(r.failures for r in self.runs):
+            self.note("Live collectors were removed (2026-11-20): `failures.jsonl` "
+                      "is no longer produced. Failure evidence lives in Loki/Mimir "
+                      "for 60 days - query it there.")
         rows = []
         for i, r in enumerate(self.runs, 1):
             ev = [e for e in r.failures if e.get("type") == "FAILURE_EVENT"]
@@ -807,6 +839,9 @@ class Report:
             if rows:
                 self.table(["#", "service", "avg 5xx/s", "peak 5xx/s"], rows)
 
+        if not any(r.live for r in self.runs):
+            self.note("`live.csv` is no longer produced (collectors removed "
+                      "2026-11-20); per-pod restarts come from KSM in Mimir.")
         self.w("Restarts and OOM (from `live.csv` and KSM):")
         self.w()
         rows = []

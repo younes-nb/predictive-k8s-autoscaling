@@ -28,6 +28,7 @@
 #   --shape hpa|pbscaler   label only (default hpa)
 #   --name NAME            run-id prefix (default <shape><maxreq>_<day>)
 #   --source jul|aug       NASA-HTTP archive file (default jul)
+#   --select transitions  window objective: transitions|std|tv (default transitions)
 #   --seed-pool N          account/VU budget (default 2999)
 #   --trace-only           print the selected slice and exit
 #   --dry                  stop after the cold gate
@@ -52,6 +53,8 @@ MAX_REQUESTS=""
 SHAPE=hpa
 NAME=""
 TRACE_SOURCE=jul
+# Trace window selection objective (nasa_trace_slice.py --select).
+TRACE_SELECT=${TRACE_SELECT:-transitions}
 SEED_POOL=2999
 TRACE_ONLY=0
 
@@ -177,6 +180,7 @@ fi
 echo "selecting trace: day=$TRACE_DAY duration=${DURATION}m source=$TRACE_SOURCE"
 TRACE_JSON=$(python3 "$TOOLS/nasa_trace_slice.py" \
   --day "$TRACE_DAY" --duration "$DURATION" --source "$TRACE_SOURCE" \
+  --select "$TRACE_SELECT" \
   --cache "$TRACE_CACHE" --out "$MCR_SLICE_LOCAL") || {
   echo "FATAL: trace selection failed" >&2; exit 2; }
 echo "$TRACE_JSON"
@@ -234,8 +238,6 @@ log() { echo "$(date -u +%FT%TZ) $*" >> "$LOG"; }
 # reasons recorded, so a partial run can never be mistaken for a clean one.
 RUN_STATUS="running"
 STATUS_REASONS=()
-COLLECTOR_PIDS=()
-COLLECTOR_NAMES=()
 K6_PID=""
 K6_RC=""
 K6_KIND=""
@@ -295,36 +297,13 @@ cleanup() {
     log "stopping k6 pid=$K6_PID"
     k6_signal_int || true
   fi
-  local i p
-  for i in "${!COLLECTOR_PIDS[@]}"; do
-    p=${COLLECTOR_PIDS[$i]}
-    kill -0 "$p" 2>/dev/null || continue
-    log "stopping collector ${COLLECTOR_NAMES[$i]:-pid $p} (pid $p)"
-    kill -TERM "$p" 2>/dev/null || true
-  done
-  sleep 3
-  for p in ${COLLECTOR_PIDS[@]+"${COLLECTOR_PIDS[@]}"}; do
-    kill -0 "$p" 2>/dev/null && kill -KILL "$p" 2>/dev/null || true
-  done
-  # log_streamer's per-pod kubectl streams live in their own sessions, so they
-  # survive the streamer's death. Reap them by the pidfiles it wrote.
-  local pf sid p
-  for pf in "$RUN_DIR"/.pids/*.pid; do
-    [ -s "$pf" ] || continue
-    sid=$(cat "$pf" 2>/dev/null)
-    [ -n "$sid" ] || continue
-    for p in $(pgrep -s "$sid" 2>/dev/null); do
-      kill -KILL "$p" 2>/dev/null || true
-    done
-  done
+  # No collectors to stop any more; only the k6 process group is run-owned.
   write_status
   log "=== run_experiment ABORTED runid=$RUNID ==="
   exit "$code"
 }
 trap 'cleanup INT 130' INT
 trap 'cleanup TERM 143' TERM
-
-track_collector() { COLLECTOR_NAMES+=("$1"); COLLECTOR_PIDS+=("$2"); }
 
 # k6 liveness must ignore zombies: a k6 killed outside this script can survive
 # as <defunct> under an unrelated reaper, and `pgrep -x k6` still lists it.
@@ -353,7 +332,7 @@ die() { log "FATAL: $*"; status_reason "fatal: $*"; write_status; exit 1; }
 
 log "=== run_experiment START runid=$RUNID mode=$MODE dry=${DRY:-no} ==="
 log "transport: $( [ "$MODE" = local ] && echo "loadgen=localhost (this node; ssh disabled)" || echo "loadgen over ssh ($SSH_CFG)" )"
-log "log_streamer: MAX_STREAMS=$MAX_STREAMS (one kubectl per pod, ~50 MB RSS each)"
+log "collectors: none (all capture is post-hoc from Mimir/Loki)"
 log "periodic dumps: every ${PERIODIC_DUMP_EVERY}s (0 = end of run only)"
 log "params: MAX_REQUESTS=$MAX_REQUESTS USER_POOL=$USER_POOL PRE_ALLOCATED_VUS=$PRE_ALLOC MAX_VUS=$MAX_VUS START_MIN=$START_MIN TEST_MIN=$TEST_MIN COMPRESS=1 WARMUP_S=$WARMUP_S TARGET_URL=${TARGET_URL:-<default>}"
 log "thresholds: 5XX_RATE_MIN=$S5XX 4XX_RATE_MIN=$S4XX COOLDOWN=$SCOOL"
@@ -376,8 +355,7 @@ fi
 
 # ---------- phase -1: preflight (files, hashes, k6 config) ----------
 log "phase -1: preflight"
-for f in "$MCR_SLICE_LOCAL" "$TOOLS/failure_recorder.py" "$TOOLS/monitor_v2.py" \
-         "$TOOLS/log_streamer.sh" "$TOOLS/rebuild_train_data.py" \
+for f in "$MCR_SLICE_LOCAL" "$TOOLS/rebuild_train_data.py" \
          "$TOOLS/dump_mimir.sh" "$TOOLS/dump_loki.sh" "$PY"; do
   [ -f "$f" ] || die "missing required file: $f"
 done
@@ -393,9 +371,44 @@ log "preflight OK: slice md5, k6 sha256=$K6_SHA, launcher sha256=$LAUNCH_SHA"
 
 SEED_N=$(on_loadgen "python3 -c \"import json;print(len(json.load(open('$SEED_FILE_LOADGEN'))))\"" 2>/dev/null | grep -E '^[0-9]+$' | tail -1)
 case "${SEED_N:-}" in (''|*[!0-9]*) die "cannot read seed pool size from loadgen" ;; esac
+
+# ---- VU sizing: auto = derived from the offered load (2026-11-19) ----------
+# A fixed pool equal to the seed count (2999) is simultaneously far more than the
+# run needs at low load (120k used 7-94 active VUs) and the binding constraint at
+# high load (480k pinned 2999 and still dropped 63 % of iterations). Size the cap
+# from the offered peak instead:
+#
+#   VUs = ceil(peak_iterations_per_s * VUS_D_MAX * VUS_SAFETY)
+#
+# VUS_D_MAX is a conservative per-iteration wall-clock estimate (0.5 s covers the
+# 30 s-timeout regime only partially, which is why SAFETY exists). Set
+# VUS_MODE=static to pin PRE_ALLOCATED_VUS/MAX_VUS as before.
+VUS_MODE=${VUS_MODE:-auto}
+VUS_D_MAX=${VUS_D_MAX:-0.5}
+VUS_SAFETY=${VUS_SAFETY:-2}
+if [ "$VUS_MODE" = auto ] && [ -z "${MAX_VUS_OVERRIDE:-}" ] && [ -z "${PRE_ALLOCATED_VUS_OVERRIDE:-}" ]; then
+  _vu_need=$(python3 -c "
+import math
+peak = max(1.0, $MAX_REQUESTS / 60.0)
+print(int(math.ceil(peak * $VUS_D_MAX * $VUS_SAFETY)))")
+  MAX_VUS=$_vu_need
+  PRE_ALLOC=$_vu_need
+  unset _vu_need
+fi
+PRE_ALLOC=${PRE_ALLOCATED_VUS_OVERRIDE:-$PRE_ALLOC}
+MAX_VUS=${MAX_VUS_OVERRIDE:-$MAX_VUS}
+# The VU cap is derived from the offered load, NOT from the seed count: the
+# generator must be able to deliver the requested rate and the CLUSTER must be
+# the bottleneck. One VU owns one account, so the seed pool has to be large
+# enough -- fail closed with the exact number needed rather than silently
+# clamping the load down.
+if [ "$MAX_VUS" -gt "$SEED_N" ] && [ "${ALLOW_SEED_REUSE:-0}" != "1" ]; then
+  die "VU sizing needs MAX_VUS=$MAX_VUS accounts but the seed pool has $SEED_N. Generate more seeds (load_testing/seed_tt_users.py --count $MAX_VUS --out <file>), or set ALLOW_SEED_REUSE=1 to share accounts."
+fi
 [ "$SEED_N" -ge "$USER_POOL" ] || die "seed pool too small: loadgen has $SEED_N accounts, USER_POOL=$USER_POOL"
 [ "$SEED_N" -ge "$PRE_ALLOC" ] || die "seed pool too small: loadgen has $SEED_N accounts, PRE_ALLOCATED_VUS=$PRE_ALLOC"
 log "seed pool: $SEED_N unique accounts (>= USER_POOL=$USER_POOL, >= PRE_ALLOCATED_VUS=$PRE_ALLOC)"
+log "VU sizing: mode=$VUS_MODE d_max=${VUS_D_MAX}s safety=$VUS_SAFETY -> PRE_ALLOCATED_VUS=$PRE_ALLOC MAX_VUS=$MAX_VUS for MAX_REQUESTS=$MAX_REQUESTS"
 
 on_loadgen "env MCR_CSV=$MCR_SLICE_LOADGEN SEED_FILE=$SEED_FILE_LOADGEN \
   MAX_REQUESTS=$MAX_REQUESTS USER_POOL=$USER_POOL PRE_ALLOCATED_VUS=$PRE_ALLOC MAX_VUS=$MAX_VUS \
@@ -423,7 +436,7 @@ cat > "$RUN_DIR/params.json" <<EOF
  "max_requests": $MAX_REQUESTS, "user_pool": $USER_POOL, "pre_allocated_vus": $PRE_ALLOC, "max_vus": $MAX_VUS,
  "start_min": $START_MIN, "test_min": $TEST_MIN, "warmup_s": $WARMUP_S, "k6_run_s": $K6_RUN_S,
  "target_url": "${TARGET_URL:-<launch_k6.sh default>}", "transport": "$MODE",
- "trace_day": "$TRACE_DAY", "trace_source": "$TRACE_SOURCE", "trace_duration_min": $DURATION,
+ "trace_day": "$TRACE_DAY", "trace_source": "$TRACE_SOURCE", "trace_select": "$TRACE_SELECT", "trace_duration_min": $DURATION,
  "trace_window_start_utc": "$TRACE_START", "trace_window_end_utc": "$TRACE_END", "trace_window_std": ${TRACE_STD:-0},
  "trace_window_peak_per_min": ${TRACE_PEAK:-0}, "trace_slice_sha256": "$TRACE_SHA",
  "trace_slice_rows": $DURATION, "shape": "$SHAPE", "seed_pool": $SEED_POOL,
@@ -443,10 +456,14 @@ pgrep -f "kube_tunnel.sh"  > /dev/null || setsid bash "$PWD/stage7_28/kube_tunne
 # the tunnel and the local container fight for the port, the tunnel loses with
 # "address already in use", and the checks below silently read the tunnel's dead
 # socket instead of Mimir.
-if ! curl -fsS -m 5 "http://127.0.0.1:18080/ready" > /dev/null 2>&1; then
+# Mimir answers slowly while it drains a query backlog (measured 9-16 s on
+# 2026-11-20 after a heavy post-hoc collection), so the health check has to be
+# patient: a short timeout here used to abort perfectly good runs.
+MIMIR_TIMEOUT=${MIMIR_TIMEOUT:-40}
+if ! curl -fsS -m "$MIMIR_TIMEOUT" "http://127.0.0.1:18080/ready" > /dev/null 2>&1; then
   pgrep -f "mimir_tunnel.sh" > /dev/null || setsid bash "$PWD/stage7_28/mimir_tunnel.sh" < /dev/null > /dev/null 2>&1 &
 fi
-if ! curl -fsS -m 5 "http://127.0.0.1:3100/ready" > /dev/null 2>&1; then
+if ! curl -fsS -m 10 "http://127.0.0.1:3100/ready" > /dev/null 2>&1; then
   pgrep -f "loki_tunnel.sh"  > /dev/null || setsid bash "$PWD/stage7_28/loki_tunnel.sh"  < /dev/null > /dev/null 2>&1 &
 fi
 for i in $(seq 1 30); do
@@ -454,9 +471,15 @@ for i in $(seq 1 30); do
   sleep 2
 done
 kubectl get nodes >/dev/null 2>&1 || die "kube apiserver forward (127.0.0.1:16443) not reachable"
-curl -fsS -m 8 "http://127.0.0.1:18080/prometheus/api/v1/query" --data 'query=up' > /dev/null \
-  || die "mimir tunnel not reachable"
-curl -fsS -m 8 "http://127.0.0.1:3100/ready" > /dev/null || die "loki tunnel not reachable"
+MIMIR_UP=0
+for i in $(seq 1 6); do
+  if curl -fsS -m "$MIMIR_TIMEOUT" "http://127.0.0.1:18080/prometheus/api/v1/query" \
+       --data 'query=up' > /dev/null 2>&1; then MIMIR_UP=1; break; fi
+  log "mimir not answering yet (attempt $i/6), retrying"
+  sleep 10
+done
+[ "$MIMIR_UP" = "1" ] || die "mimir tunnel not reachable after 6 attempts"
+curl -fsS -m 15 "http://127.0.0.1:3100/ready" > /dev/null || die "loki tunnel not reachable"
 log "tunnels verified up (kube + mimir + loki)"
 
 if ! "$PY" pbscaler/scripts/launchers/reset_cluster_cold.py --assert-only \
@@ -465,13 +488,26 @@ if ! "$PY" pbscaler/scripts/launchers/reset_cluster_cold.py --assert-only \
 fi
 log "cold gate passed: $(grep -m1 'ASSERT cold_ok' "$RUN_DIR/cold_gate.log")"
 
+# ---------- phase 0c: optional pre-k6 hook ----------
+# Used to bring up an active autoscaler (PBScaler) AFTER the cold gate has
+# asserted a clean cluster, because PBScaler suspends the HPAs on start and the
+# cold gate requires them to be present. Nothing else runs in this window.
+if [ -n "${PRE_K6_HOOK:-}" ]; then
+  log "phase 0c: running PRE_K6_HOOK"
+  if bash -c "$PRE_K6_HOOK" >> "$RUN_DIR/pre_k6_hook.log" 2>&1; then
+    log "phase 0c: PRE_K6_HOOK OK"
+  else
+    die "PRE_K6_HOOK failed (see pre_k6_hook.log)"
+  fi
+fi
+
 # ---------- resolve the gateway address ----------
 # Used to be hardcoded (http://10.10.1.2:30080). That was master1's IP on the
 # OLD cluster; on the new one 10.10.1.2 is the monitoring node and the gateway
 # NodePort is whatever the Service has. Derive both from the live Service so a
 # new cluster needs no edit here.
 if [ -z "$TARGET_URL" ]; then
-  _gw=$(kubectl -n train-ticket get svc train-ticket-gateway-istio -o json 2>/dev/null)
+  _gw=$(kubectl -n istio-system get svc istio-ingressgateway -o json 2>/dev/null)
   if [ -n "$_gw" ]; then
     _ip=$(printf '%s' "$_gw" | python3 -c 'import json,sys
 try:
@@ -499,6 +535,30 @@ except Exception:
   [ -z "$TARGET_URL" ] && log "WARN: could not resolve the gateway address; launch_k6.sh default will be used"
 fi
 
+# ---------- phase 0b: mongo-path smoke probe ----------
+# A cold reset recreates every stateless pod, so every service builds a fresh
+# connection pool. If a pooled connection is already dead (2026-11-20: the first
+# request after an idle period returned 500 "Prematurely reached end of stream"),
+# the run would start with a login storm that has nothing to do with the load.
+# Probe a mongo-backed read path before any k6 traffic is generated.
+MONGO_PROBE_OK=0
+for _i in $(seq 1 12); do
+  # login with bogus credentials exercises ts-auth-service -> ts-auth-mongo and
+  # returns HTTP 200 with status=0 in the body, so it is safe and repeatable.
+  _code=$(curl -s -m 15 -o /dev/null -w '%{http_code}' -X POST \
+    "$TARGET_URL/api/v1/users/login" -H 'Content-Type: application/json' \
+    -d '{"username":"coldgate_probe_nope","password":"wrong"}' 2>/dev/null || echo 000)
+  if [ "$_code" = "200" ]; then MONGO_PROBE_OK=1; break; fi
+  log "mongo probe attempt $_i: HTTP $_code"
+  sleep 10
+done
+if [ "$MONGO_PROBE_OK" = "1" ]; then
+  log "mongo-path probe OK (ts-auth-service -> ts-auth-mongo)"
+else
+  log "FATAL: mongo-path probe failed after 12 attempts (see above)"
+  die "mongo-path probe failed - refusing to start a run on a stale connection pool"
+fi
+
 UPNOW=$(curl -s -m 10 "http://127.0.0.1:18080/prometheus/api/v1/query" \
         --data-urlencode 'query=up' 2>/dev/null \
         | python3 -c 'import json,sys
@@ -524,34 +584,7 @@ log "mimir up@now=$UPNOW — healthy"
 # Kill collectors orphaned by a previous interrupted run. Without this, each
 # interrupted run leaves a full set of kubectl log streams behind; two or three
 # of those exhaust this 11 GB node (each kubectl is ~50 MB RSS).
-kill_stale_collectors() {
-  local pat p cmdline
-  local -a victims=()
-  for pat in 'log_streamer.sh' 'failure_recorder.py' 'monitor_v2.py'; do
-    for p in $(pgrep -f "$pat" 2>/dev/null); do
-      [ "$p" = "$$" ] && continue
-      cmdline=$(tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null)
-      case "$cmdline" in *"$RUN_DIR"*) continue ;; esac
-      victims+=("$p")
-    done
-  done
-  [ "${#victims[@]}" -eq 0 ] && return 0
-  log "killing ${#victims[@]} stale collector(s) from a previous run: ${victims[*]}"
-  for p in "${victims[@]}"; do
-    pkill -TERM -P "$p" 2>/dev/null
-    kill -TERM "$p" 2>/dev/null
-  done
-  sleep 3
-  for p in "${victims[@]}"; do
-    pkill -KILL -P "$p" 2>/dev/null
-    kill -KILL "$p" 2>/dev/null
-  done
-  # and any kubectl log stream that outlived its streamer
-  local left
-  left=$(pgrep -f 'kubect[l].*logs -f --timestamps --all-containers' 2>/dev/null | wc -l)
-  log "kubectl log streams still running after stale cleanup: $left"
-}
-kill_stale_collectors
+# collectors removed (2026-11-20): all capture is post-hoc from Mimir/Loki
 
 # loadgen must be idle
 K6_PRE=$(loadgen_k6_pids | head -1)
@@ -563,177 +596,15 @@ if [ "$DRY" = "--dry" ]; then
   exit 0
 fi
 
-# ---------- phase 2: capture tools (all stop at END_EPOCH) ----------
+# ---------- phase 2: window anchors ----------
+# No live collectors. Everything is queried post-hoc from Mimir/Loki (60-day
+# retention): the dataset comes from rebuild_train_data.py in phase 5b, the
+# report from build_run_report.py in phase 9.
 LAUNCH_EPOCH=$(date +%s)
 END_EPOCH=$((LAUNCH_EPOCH + TOOLS_END_OFFSET))
 echo "$LAUNCH_EPOCH" > "$RUN_DIR/launch_epoch"
 echo "$END_EPOCH" > "$RUN_DIR/end_epoch"
-log "phase 2: tools start (launch=$LAUNCH_EPOCH end=$END_EPOCH)"
-
-# MAX_STREAMS caps how many pods get a log stream. A fixed 96 was fine for 65
-# pods but silently skips pods on a bigger cluster (they are recorded in
-# logs_skipped.txt, so a run looks complete while missing logs). Derive it from
-# the live pod count: one stream per pod, plus headroom. Explicit override wins.
-if [ "$MAX_STREAMS" -eq 0 ]; then
-  _npods=$(kubectl -n train-ticket get pods --no-headers 2>/dev/null | grep -c . || echo 0)
-  case "$_npods" in ''|*[!0-9]*) _npods=0 ;; esac
-  MAX_STREAMS=$(( _npods + 32 ))
-  [ "$MAX_STREAMS" -lt 96 ] && MAX_STREAMS=96
-  [ "$MAX_STREAMS" -gt 400 ] && MAX_STREAMS=400
-  unset _npods
-  log "MAX_STREAMS derived from live pod count -> $MAX_STREAMS"
-fi
-
-MAX_STREAMS="$MAX_STREAMS" bash "$TOOLS/log_streamer.sh" "$RUN_DIR" "$END_EPOCH" \
-  < /dev/null >> "$RUN_DIR/log_streamer.out" 2>&1 &
-LS_PID=$!
-track_collector log_streamer "$LS_PID"
-log "log_streamer started (pid $LS_PID)"
-
-env PBS_MIMIR_URL=http://127.0.0.1:18080 python3 \
-  "$TOOLS/monitor_v2.py" --run-dir "$RUN_DIR" --t0 0 \
-  --end "$END_EPOCH" --mcr "$MCR_SLICE_LOCAL" --max-requests "$MAX_REQUESTS" \
-  --start-min "$START_MIN" < /dev/null >> "$RUN_DIR/monitor_v2.out" 2>&1 &
-MON_PID=$!
-track_collector monitor_v2 "$MON_PID"
-log "monitor_v2 started (pid $MON_PID)"
-
-env PBS_MIMIR_URL=http://127.0.0.1:18080 LOKI_URL=http://127.0.0.1:3100 \
-  KUBECTL="$KUBECTL_BIN" KUBECONFIG="$KUBECONFIG" \
-  5XX_RATE_MIN="$S5XX" 4XX_RATE_MIN="$S4XX" EVENT_COOLDOWN_S="$SCOOL" \
-  python3 "$TOOLS/failure_recorder.py" --run-dir "$RUN_DIR" \
-  --end "$END_EPOCH" --runid "$RUNID" < /dev/null >> "$RUN_DIR/failure_recorder.out" 2>&1 &
-FR_PID=$!
-track_collector failure_recorder "$FR_PID"
-log "failure_recorder started (pid $FR_PID)"
-
-# k6 console offset-pull (loadgen -> RUN_DIR/k6_console.log)
-(
-  # `off` = bytes already copied (0-based): data exists iff sz > off, and the
-  # file was truncated iff sz < off.
-  off=0
-  while [ "$(date +%s)" -lt $((END_EPOCH + 120)) ]; do
-    sz=$(on_loadgen "wc -c < '$CONSOLE_SRC' 2>/dev/null" 2>/dev/null || echo 0)
-    case "$sz" in (''|*[!0-9]*) sz=0;; esac
-    # Truncation / rotation: the offset would otherwise be past EOF forever and
-    # every later line would be lost silently.
-    if [ "$sz" -lt "$off" ]; then
-      echo "$(date -u +%FT%TZ) console truncated ($sz < $off copied) -- restarting" >> "$RUN_DIR/console_shipper.out"
-      off=0
-    fi
-    if [ "$sz" -gt "$off" ]; then
-      # Copy to a temp file first, then advance by the bytes ACTUALLY copied.
-      # Advancing to the pre-copy size re-reads anything k6 wrote during the
-      # copy and duplicates output (measured 17x on the integration run).
-      tmp="${TMPDIR:-/tmp}/console_chunk_${RUNID}.$$"
-      on_loadgen "tail -c +$((off + 1)) '$CONSOLE_SRC'" > "$tmp" 2>/dev/null
-      n=$(stat -c%s "$tmp" 2>/dev/null || echo 0)
-      case "$n" in (''|*[!0-9]*) n=0;; esac
-      if [ "$n" -gt 0 ]; then
-        cat "$tmp" >> "$RUN_DIR/k6_console.log"
-        off=$((off + n))
-      fi
-      rm -f "$tmp"
-      echo "$(date -u +%FT%TZ) shipped console bytes $n (offset now $off, size $sz)" >> "$RUN_DIR/console_shipper.out"
-    fi
-    sleep 15
-  done
-) < /dev/null > /dev/null 2>&1 &
-log "console shipper started (pid $!)"
-
-# failures.jsonl offset-push (RUN_DIR -> loadgen, live during the run)
-on_loadgen "mkdir -p $FAILURE_LOG_DIR/$RUNID" 2>/dev/null
-(
-  foff=0
-  while [ "$(date +%s)" -lt $((END_EPOCH + 60)) ]; do
-    if [ -f "$RUN_DIR/failures.jsonl" ]; then
-      fsz=$(stat -c%s "$RUN_DIR/failures.jsonl" 2>/dev/null || echo 0)
-      if [ "$fsz" -gt "$foff" ]; then
-        if [ "$MODE" = local ]; then
-          # loadgen is this node: the ledger is already local, so snapshot it.
-          # `tail | cat >>` would append the file onto itself and duplicate rows.
-          cp -f "$RUN_DIR/failures.jsonl" \
-                "$FAILURE_LOG_DIR/$RUNID/failures.jsonl" 2>/dev/null
-        else
-          tail -c +$((foff + 1)) "$RUN_DIR/failures.jsonl" \
-            | $SSH loadgen "cat >> $FAILURE_LOG_DIR/$RUNID/failures.jsonl" 2>/dev/null
-        fi
-        echo "$(date -u +%FT%TZ) pushed failures bytes $((fsz - foff)) (total $fsz)" >> "$RUN_DIR/failures_shipper.out"
-        foff=$fsz
-      fi
-    fi
-    sleep 10
-  done
-) < /dev/null > /dev/null 2>&1 &
-log "failures shipper started -> $FAILURE_LOG_DIR/$RUNID/failures.jsonl (pid $!)"
-
-# ---------- phase 2a: disk watchdog ----------
-if [ "${DISK_WATCHDOG:-1}" = "1" ]; then
-  (
-    while [ "$(date +%s)" -lt "$END_EPOCH" ]; do
-      free_gb=$(df -BG --output=avail "$RUN_DIR" 2>/dev/null | tail -1 | tr -dc '0-9')
-      case "$free_gb" in ''|*[!0-9]*) free_gb=99 ;; esac
-      if [ "$free_gb" -lt "$DISK_CRITICAL_GB" ]; then
-        echo "$(date -u +%FT%TZ) CRITICAL free=${free_gb}G -- pruning periodic snapshots" >> "$RUN_DIR/disk_watchdog.log"
-        rm -rf "$RUN_DIR"/dumps_periodic/* 2>/dev/null
-        status_reason "disk free ${free_gb}G below critical ${DISK_CRITICAL_GB}G"
-      elif [ "$free_gb" -lt "$DISK_PRUNE_BELOW_GB" ]; then
-        echo "$(date -u +%FT%TZ) LOW free=${free_gb}G -- removing oldest periodic snapshot" >> "$RUN_DIR/disk_watchdog.log"
-        oldest=$(ls -d "$RUN_DIR"/dumps_periodic/*/ 2>/dev/null | sort | head -1)
-        [ -n "$oldest" ] && rm -rf "$oldest"
-      fi
-      sleep 60
-    done
-  ) < /dev/null > /dev/null 2>&1 &
-  track_collector disk_watchdog "$!"
-  log "phase 2a: disk watchdog started (prune below ${DISK_PRUNE_BELOW_GB}G, critical ${DISK_CRITICAL_GB}G)"
-fi
-
-# ---------- phase 2b: periodic Mimir/Loki snapshots ----------
-if [ "$PERIODIC_DUMP_EVERY" -gt 0 ]; then
-  (
-    last=$LAUNCH_EPOCH
-    while [ "$(date +%s)" -lt "$END_EPOCH" ]; do
-      # Sleep in short slices: a single `sleep 1800` overshoots END_EPOCH, so the
-      # collector was still napping when phase 7 killed it (rc=143, "did not stop
-      # at END_EPOCH"). Waking every 60 s makes the exit land on the boundary.
-      s=0
-      while [ "$s" -lt "$PERIODIC_DUMP_EVERY" ] && [ "$(date +%s)" -lt "$END_EPOCH" ]; do
-        sleep 60; s=$((s + 60))
-      done
-      now=$(date +%s)
-      [ "$now" -ge "$END_EPOCH" ] && break
-      # Skip a snapshot that cannot finish before END_EPOCH: phase 7 would kill
-      # it mid-dump and leave a partial snapshot behind.
-      if [ $((END_EPOCH - now)) -lt 420 ]; then
-        echo "$(date -u +%FT%TZ) skipping periodic dump: only $((END_EPOCH - now))s left" \
-          >> "$RUN_DIR/periodic_dump.out"
-        break
-      fi
-      d="$RUN_DIR/dumps_periodic/$(date -u +%Y%m%dT%H%M%SZ)"
-      mkdir -p "$d"
-      bash "$TOOLS/dump_mimir.sh" "$last" "$now" "$d/mimir" \
-        >> "$RUN_DIR/periodic_dump.out" 2>&1
-      bash "$TOOLS/dump_loki.sh" "$last" "$now" "$d/loki" \
-        >> "$RUN_DIR/periodic_dump.out" 2>&1
-      echo "$(date -u +%FT%TZ) periodic dump $d (window ${last}..${now})" \
-        >> "$RUN_DIR/periodic_dump.out"
-      last=$now
-    done
-  ) < /dev/null > /dev/null 2>&1 &
-  track_collector periodic_dump "$!"
-  log "phase 2b: periodic Mimir+Loki dumps every ${PERIODIC_DUMP_EVERY}s -> dumps_periodic/"
-fi
-
-# ---------- phase 2c: log rotation ----------
-# log_streamer's per-pod files are the fastest-growing thing in RUN_DIR and the
-# disk watchdog does not cover them. Rotate them into .tgz archives instead.
-if [ "${LOG_ROTATE_MB:-0}" -gt 0 ]; then
-  bash "$TOOLS/rotate_run_logs.sh" "$RUN_DIR" "$LOG_ROTATE_MB" \
-    < /dev/null > /dev/null 2>&1 &
-  track_collector log_rotation "$!"
-  log "phase 2c: log rotation started (gzip+truncate logs/ above ${LOG_ROTATE_MB} MB)"
-fi
+log "phase 2: window anchors set (launch=$LAUNCH_EPOCH end=$END_EPOCH); no live collectors"
 
 # ---------- phase 3: launch k6 on the load generator ----------
 # Local mode runs k6 as a direct child of this script so its real exit status
@@ -746,10 +617,14 @@ launch_k6_local() {
       MAX_REQUESTS="$MAX_REQUESTS" USER_POOL="$USER_POOL" TRACE_COMPRESS=1 OPEN_LOOP=1 \
       K6_OUT_DIR="$K6_CONSOLE_DIR" \
       PRE_ALLOCATED_VUS="$PRE_ALLOC" MAX_VUS="$MAX_VUS" \
-      PREFLIGHT=0 ALLOW_SEED_REUSE=0 LOGIN_RETRIES=2 LOGIN_COOLDOWN_MS=30000 \
+      PREFLIGHT=0 ALLOW_SEED_REUSE="${ALLOW_SEED_REUSE:-0}" \
+      LOGIN_RETRIES=2 LOGIN_COOLDOWN_MS=30000 \
+      LOGIN_START_JITTER_S="${LOGIN_START_JITTER_S:-900}" \
+      LOGIN_BACKOFF_JITTER="${LOGIN_BACKOFF_JITTER:-0.5}" \
       START_MIN="$START_MIN" TEST_MIN="$TEST_MIN" \
       TARGET_URL="$TARGET_URL" \
       MCR_CSV="$MCR_SLICE_LOADGEN" \
+      SEED_FILE="$SEED_FILE_LOADGEN" \
       bash "$LAUNCH_K6_SH"
   ) > "$CONSOLE_SRC" 2>&1 < /dev/null &
   K6_PID=$!
@@ -760,10 +635,13 @@ launch_k6_ssh() {
   on_loadgen "ulimit -n 65536; nohup setsid env RUNID='$RUNID' K6_OUT_DIR='$K6_CONSOLE_DIR' \
     MAX_REQUESTS=$MAX_REQUESTS USER_POOL=$USER_POOL TRACE_COMPRESS=1 OPEN_LOOP=1 \
     PRE_ALLOCATED_VUS=$PRE_ALLOC MAX_VUS=$MAX_VUS \
-    PREFLIGHT=0 ALLOW_SEED_REUSE=0 LOGIN_RETRIES=2 LOGIN_COOLDOWN_MS=30000 \
+    PREFLIGHT=0 ALLOW_SEED_REUSE=${ALLOW_SEED_REUSE:-0} \
+    LOGIN_RETRIES=2 LOGIN_COOLDOWN_MS=30000 \
+    LOGIN_START_JITTER_S=${LOGIN_START_JITTER_S:-900} \
+    LOGIN_BACKOFF_JITTER=${LOGIN_BACKOFF_JITTER:-0.5} \
     START_MIN=$START_MIN TEST_MIN=$TEST_MIN \
     TARGET_URL='$TARGET_URL' \
-    MCR_CSV=$MCR_SLICE_LOADGEN bash $LAUNCH_K6_SH \
+    MCR_CSV=$MCR_SLICE_LOADGEN SEED_FILE='$SEED_FILE_LOADGEN' bash $LAUNCH_K6_SH \
     > '$CONSOLE_SRC' 2>&1 < /dev/null &" 2>&1 | sed 's/^/k6launch: /' >> "$LOG"
 }
 
@@ -788,21 +666,6 @@ KSZ=$(on_loadgen "wc -c < '$CONSOLE_SRC' 2>/dev/null" 2>/dev/null || echo 0)
 case "$KSZ" in (''|*[!0-9]*) KSZ=0;; esac
 [ "$KSZ" -lt 100 ] && die "k6 console log size=$KSZ after 25 s — k6 did not start"
 log "k6 console confirmed growing (size=$KSZ)"
-
-# ---------- phase 3.5: capture-tool liveness ----------
-sleep 45
-kill -0 "$FR_PID" 2>/dev/null || die "failure_recorder died at startup (see failure_recorder.out)"
-[ -f "$RUN_DIR/failures.jsonl" ] || die "failure_recorder produced no failures.jsonl"
-log "capture tools alive; failures.jsonl present ($(stat -c%s "$RUN_DIR/failures.jsonl") B)"
-for i in "${!COLLECTOR_PIDS[@]}"; do
-  p=${COLLECTOR_PIDS[$i]}; n=${COLLECTOR_NAMES[$i]}
-  if kill -0 "$p" 2>/dev/null; then
-    log "  $n running (pid $p)"
-  else
-    log "  WARN: $n (pid $p) not running"
-    [ "$n" = log_streamer ] || status_reason "$n died during startup"
-  fi
-done
 
 # ---------- phase 4: traffic detection ----------
 if [ "$SKIP_TRAFFIC_GATE" = "1" ]; then
@@ -891,7 +754,6 @@ fi
 
 # mid-run snapshot of the failure timeline for the report
 timeout 300 timeout 300 timeout 600 cp -f "$CONSOLE_SRC" "$RUN_DIR/k6_console_full.log" 2>/dev/null \
-log "failure events so far: $(grep -c FAILURE_EVENT "$RUN_DIR/failures.jsonl" 2>/dev/null || echo 0)"
 
 # wait for k6 to flush its summary (remote only: local k6 was already reaped)
 if [ "$MODE" != local ]; then
@@ -935,51 +797,6 @@ else
   fi
   tail -14 "$RUN_DIR/rebuild_collection.log" >> "$LOG" 2>/dev/null
 fi
-
-# ---------- phase 7: wait for tools to finish ----------
-WAIT=$((END_EPOCH + 90 - $(date +%s)))
-log "phase 7: waiting ${WAIT}s for tools to finish (END_EPOCH+90)"
-[ "$WAIT" -gt 0 ] && sleep "$WAIT"
-
-# Reap only the collectors this run started. A collector still alive past
-# END_EPOCH+90 is a failure, not something to leave behind.
-: > "$RUN_DIR/collector_exit_codes.txt"
-for i in "${!COLLECTOR_PIDS[@]}"; do
-  p=${COLLECTOR_PIDS[$i]}; n=${COLLECTOR_NAMES[$i]}
-  if kill -0 "$p" 2>/dev/null; then
-    # log_rotation is designed to still be running at END_EPOCH -- it is not a
-    # "did not stop" failure. Everything else is.
-    #
-    # disk_watchdog and periodic_dump are backgrounded *subshells* containing
-    # loops, so $! is the subshell and its children (sleep, dump_mimir.sh,
-    # dump_loki.sh, xargs, curl) are NOT killed with it -- they survive as
-    # orphans and keep hammering Mimir/Loki after the run. Reap the children
-    # first, then the collector.
-    pkill -TERM -P "$p" 2>/dev/null || true
-    if [ "$n" = log_rotation ]; then
-      log "  $n (pid $p) still running as designed -- stopping"
-      kill -TERM "$p" 2>/dev/null || true
-    else
-      log "  WARN: $n (pid $p) still running past END_EPOCH+90 -- terminating"
-      kill -TERM "$p" 2>/dev/null || true
-      status_reason "$n did not stop at END_EPOCH"
-    fi
-  fi
-  wait "$p" 2>/dev/null; rc=$?
-  echo "$n $rc" >> "$RUN_DIR/collector_exit_codes.txt"
-  log "  collector $n exit=$rc"
-  [ "$rc" -eq 0 ] || status_reason "$n exited rc=$rc"
-done
-# Collector completion markers (independent of exit codes).
-grep -q "log_streamer: stopped" "$RUN_DIR/log_streamer.out" 2>/dev/null \
-  || status_reason "log_streamer has no stop marker (see log_streamer.out)"
-grep -q '"type": "RECORDER_STOP"' "$RUN_DIR/failures.jsonl" 2>/dev/null \
-  || status_reason "failure_recorder has no RECORDER_STOP record"
-[ -s "$RUN_DIR/live.csv" ] || status_reason "monitor_v2 produced no live.csv rows"
-log "collector completion markers checked"
-
-grep -c FAILURE_EVENT "$RUN_DIR/failures.jsonl" 2>/dev/null | xargs -I{} echo "failure events captured: {}" >> "$LOG"
-log "failure event types: $(grep -o '"type": "[A-Z_]*"' "$RUN_DIR/failures.jsonl" 2>/dev/null | sort | uniq -c | tr '\n' ' ')"
 
 # ---------- phase 8: validate dataset ----------
 if [ "$SKIP_DATASET" = "1" ]; then
@@ -1053,7 +870,7 @@ log "archive manifest: $(wc -l < "$MANIFEST") files"
 archive_ok=0
 tar_rc=0
 # tar exits 1 when a file changes while it is being read. RUN_DIR still holds
-# the log_streamer files, so that is expected and benign; integrity is proven
+# the log files, so that is expected and benign; integrity is proven
 # below by `gzip -t` plus a member count. rc >= 2 is a real error.
 if [ "$MODE" = local ]; then
   tar czf "$ARCHIVE" -C "$(dirname "$RUN_DIR")" "$(basename "$RUN_DIR")" \
@@ -1093,6 +910,19 @@ if [ "$archive_ok" -eq 1 ]; then
 else
   log "WARN: archive creation failed"
   status_reason "archive creation failed"
+fi
+
+# ---------- phase 11b: optional post-run hook ----------
+# Tears down whatever PRE_K6_HOOK started, before the cold reset so the reset
+# sees the namespace the next experiment expects.
+if [ -n "${POST_RUN_HOOK:-}" ]; then
+  log "phase 11b: running POST_RUN_HOOK"
+  if bash -c "$POST_RUN_HOOK" >> "$RUN_DIR/post_run_hook.log" 2>&1; then
+    log "phase 11b: POST_RUN_HOOK OK"
+  else
+    log "WARN: POST_RUN_HOOK failed (see post_run_hook.log)"
+    status_reason "post-run hook failed"
+  fi
 fi
 
 # ---------- phase 12: final cold reset ----------

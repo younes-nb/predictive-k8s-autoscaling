@@ -113,6 +113,22 @@ const PREFLIGHT = __ENV.PREFLIGHT === '1';
 const ALLOW_SEED_REUSE = __ENV.ALLOW_SEED_REUSE === '1';
 const LOGIN_RETRIES = envInt('LOGIN_RETRIES', 2, 0);
 const LOGIN_COOLDOWN_MS = envInt('LOGIN_COOLDOWN_MS', 30 * 1000, 0);
+// Login-herd control (2026-11-19).
+//
+// Every VU starts at t=0, and the first AUTH_ONLY action calls ensureLogin(), so
+// all PRE_ALLOCATED_VUS logged in within the first seconds. That herd saturates
+// ts-auth-service, logins time out, and the deterministic 30/60/120/240/300 s
+// backoff then re-synchronises every retry wave. The result is a load profile
+// whose auth traffic arrives in spikes unrelated to the trace.
+//
+// LOGIN_START_JITTER_S spreads the FIRST login of each VU uniformly over that
+// many seconds. The offset is derived deterministically from __VU, so no
+// cross-VU coordination is needed and it is stable for the VU's lifetime.
+// 0 restores the old behaviour (everyone logs in at t=0).
+const LOGIN_START_JITTER_S = envInt('LOGIN_START_JITTER_S', 900, 0);
+// LOGIN_BACKOFF_JITTER is the +/- fraction applied to the exponential backoff,
+// decorrelating retry waves. 0 = deterministic backoff (the old behaviour).
+const LOGIN_BACKOFF_JITTER = envNum('LOGIN_BACKOFF_JITTER', 0.5, 0);
 // CORRELATION_LOG=1 emits one CORREL line per request with BOTH the k6 client
 // id and the mesh-issued X-Request-ID. Off by default: at benchmark volume a
 // per-request console line is prohibitive. The correlation test uses it.
@@ -124,8 +140,11 @@ if (LOGIN_RETRIES > 5) {
 if (MAX_VUS < PRE_ALLOC) {
   throw new Error(`MAX_VUS=${MAX_VUS} < PRE_ALLOCATED_VUS=${PRE_ALLOC} (k6 requires maxVUs >= preAllocatedVUs)`);
 }
-if (MAX_VUS > POOL) {
-  throw new Error(`MAX_VUS=${MAX_VUS} > USER_POOL=${POOL} (would exceed the declared account/VU budget)`);
+if (MAX_VUS > POOL && !ALLOW_SEED_REUSE) {
+  throw new Error(
+    `MAX_VUS=${MAX_VUS} > USER_POOL=${POOL} and ALLOW_SEED_REUSE!=1 ` +
+    `(one VU owns one account, so the VU cap cannot exceed the account budget). ` +
+    `Lower MAX_VUS, raise USER_POOL, or set ALLOW_SEED_REUSE=1 to share accounts.`);
 }
 // COMPRESS < 1 is rejected rather than silently producing a longer run.
 // With the old formula (rows = TEST_MIN, idx = floor(m*C), hold = 60/C) a
@@ -554,7 +573,21 @@ function newSession() {
   return {
     token: null, exp: 0, iat: 0, renewAt: 0,
     failures: 0, retryAt: 0, state: AUTH_NEW,
+    // Earliest wall-clock second at which this session may attempt its FIRST
+    // login. Stamped per VU in state(); 0 = no hold.
+    loginNotBefore: 0,
   };
+}
+
+// Deterministic per-VU pseudo-random in [0,1). Stable for the VU's lifetime, so
+// a VU keeps the same login offset and backoff jitter across iterations, and no
+// random-number coordination between VUs is required.
+function vuUnit(salt) {
+  let h = (2166136261 ^ Math.imul(__VU | 0, 2654435761) ^ Math.imul(salt | 0, 40503)) | 0;
+  h = Math.imul(h ^ (h >>> 15), 2246822507);
+  h = Math.imul(h ^ (h >>> 13), 3266489909);
+  h ^= h >>> 16;
+  return (h >>> 0) / 4294967296;
 }
 
 // isRenew distinguishes a renewal from the initial issuance so that
@@ -613,7 +646,12 @@ function H(st) {
 }
 
 function backoffSeconds(failures) {
-  return Math.min(300, 30 * Math.pow(2, Math.min(4, Math.max(0, failures - 1))));
+  const base = Math.min(300, 30 * Math.pow(2, Math.min(4, Math.max(0, failures - 1))));
+  // Decorrelate retry waves. Without this every VU that failed together retries
+  // together, which is what turned a login hiccup into a load-wide auth storm.
+  if (LOGIN_BACKOFF_JITTER <= 0) return base;
+  const span = 1 + LOGIN_BACKOFF_JITTER * (2 * vuUnit(100 + failures) - 1);
+  return Math.max(1, base * span);
 }
 
 function sessionFail(sess, now) {
@@ -631,6 +669,9 @@ function sessionEnsure(st, sess, kind, loginFn) {
   if (sess.state === AUTH_UNAVAILABLE) return false;
   if (!sess.token || now >= sess.exp) {
     if (sess.retryAt && now < sess.retryAt) return false;
+    // First-login hold (LOGIN_START_JITTER_S): do not let every VU create its
+    // session at t=0. Public actions still run; AUTH_ONLY actions skip this tick.
+    if (!sess.token && sess.loginNotBefore && now < sess.loginNotBefore) return false;
     if (loginFn(st, sess, kind, false)) return true;
     sessionFail(sess, now);
     authUnavailable.add(1);
@@ -657,6 +698,7 @@ function sessionPreambleOne(st, sess, kind) {
   if (sess.state === AUTH_UNAVAILABLE) {
     // Try to recover, but only on the bounded backoff schedule.
     if (sess.retryAt && now < sess.retryAt) return;
+    if (!sess.token && sess.loginNotBefore && now < sess.loginNotBefore) return;
     if (loginRequest(st, sess, kind, false)) return;
     sessionFail(sess, now);
     return;
@@ -1094,6 +1136,17 @@ function state() {
   const vu = __VU > 0 ? __VU : 1;
   const idx = (vu - 1) % SEEDS.length; // one-based VU -> zero-based seed
   const s = SEEDS[idx];
+  const sess = newSession();
+  const admin = newSession();
+  // Spread the first login of every VU over LOGIN_START_JITTER_S seconds instead
+  // of letting all of them hit ts-auth-service at t=0. The user session and the
+  // admin session get independent offsets (the admin account is shared, so its
+  // offset matters much less, but keeping them apart avoids a second herd).
+  if (LOGIN_START_JITTER_S > 0) {
+    const t0 = (RUN_T0 || Date.now()) / 1000;
+    sess.loginNotBefore = t0 + vuUnit(1) * LOGIN_START_JITTER_S;
+    admin.loginNotBefore = t0 + vuUnit(2) * LOGIN_START_JITTER_S;
+  }
   return {
     vu: vu,
     seedIndex: idx,
@@ -1102,8 +1155,8 @@ function state() {
     contacts: s.contactsId,
     // Independent per-VU sessions. The admin session is renewed on its own
     // schedule with its own jitter, even though all VUs share the admin account.
-    sess: newSession(),
-    admin: newSession(),
+    sess: sess,
+    admin: admin,
     authState: AUTH_NEW,
     loginAttempts: 0,
     loginSuccesses: 0,

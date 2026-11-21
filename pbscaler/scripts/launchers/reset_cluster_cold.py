@@ -2,7 +2,7 @@
 """Deep cold/clean reset of the TrainTicket namespace between experiment runs.
 
 Protocol (matched between runs so every k6 replay starts from the same state):
-  1. ensure the 43 HPAs exist (restore from the saved hpa_state file if a
+  1. ensure the 42 HPAs exist (restore from the saved hpa_state file if a
      suspended run left them deleted)  — HPAs stay untouched when present
   2. scale every stateless deployment (ts-*, gateway) to replicas=1
      (the `pbscaler` controller deployment is scaled to 0)
@@ -30,7 +30,7 @@ import kubernetes
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 
-STATELESS_PREFIXES = ("ts-", "train-ticket-gateway-istio")
+STATELESS_PREFIXES = ("ts-",)   # the ingress gateway is istio-ingressgateway in istio-system now
 STORE_HINTS = ("mongo", "mysql", "zookeeper", "rabbitmq")
 
 
@@ -133,7 +133,9 @@ def main():
                     os.path.expanduser("~/admin.conf")))
     ap.add_argument("--namespace", default="train-ticket")
     ap.add_argument("--assert-only", action="store_true")
-    ap.add_argument("--hpa-expected", type=int, default=43)
+    ap.add_argument("--hpa-expected", type=int, default=42,
+                    help="expected HPA count in train-ticket (43 stateless deployments minus "
+                         "the ingress gateway, which is istio-ingressgateway in istio-system since 2026-11-21)")
     ap.add_argument("--wait-timeout", type=int, default=900)
     ap.add_argument("--out", default=None, help="write summary json here")
     args = ap.parse_args()

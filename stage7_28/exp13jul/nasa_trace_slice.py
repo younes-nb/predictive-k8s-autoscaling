@@ -1,11 +1,21 @@
 #!/usr/bin/env python3
-"""Select the highest-standard-deviation slice of a NASA-HTTP day.
+"""Select the spikiest slice of a NASA-HTTP day.
 
 Given a day (e.g. 1995-07-13) and a duration in minutes, compute the
 per-minute request counts for that day and slide a window of that duration
-across it, scoring each window by the standard deviation of its per-minute
-counts. The window with the highest std is the "spikiest" window of that
-length — the one that exercises autoscaling hardest for that duration.
+across it, scores every candidate window and keeps the best.
+
+Objective (--select):
+  transitions (default)  most direction changes in the per-minute rate, i.e.
+                         the most shape churn for the autoscaler to chase.
+                         Scale-invariant: it does not reward a window merely
+                         for carrying more traffic.
+  std                    original objective: highest standard deviation of
+                         the per-minute counts.
+  tv                     highest total variation (sum of |delta|). Load
+                         dependent, so it also rewards a busier window.
+
+Ties always break on std, so the choice is deterministic.
 
 Output is a slice CSV in the schema the k6 generator consumes:
     msname,timestamp,http_mcr
@@ -14,6 +24,7 @@ load_testing/nasa_workload.py.
 
 Usage:
   nasa_trace_slice.py --day 1995-07-13 --duration 240 --out slice.csv
+  nasa_trace_slice.py --day 1995-07-13 --duration 240 --select std --out slice.csv
   nasa_trace_slice.py --day 1995-07-13 --duration 240 --top 5      # alternatives
 """
 import argparse
@@ -118,6 +129,41 @@ def rolling_std(series, window):
             sq += series[i] ** 2 - series[i - window] ** 2
 
 
+def count_transitions(w):
+    """Sign changes in the first difference: up->down->up ... .
+
+    This is the 'shape churn' the autoscaler actually has to chase. It is
+    scale-invariant, so it does not reward a window merely for having more
+    traffic (unlike total variation, which grows with the mean).
+    """
+    d = [w[i + 1] - w[i] for i in range(len(w) - 1)]
+    return sum(1 for i in range(len(d) - 1) if d[i] * d[i + 1] < 0)
+
+
+def stddev(w):
+    m = sum(w) / len(w)
+    return math.sqrt(max(0.0, sum((v - m) ** 2 for v in w) / len(w)))
+
+
+def total_variation(w):
+    """Sum of absolute minute-to-minute changes (spikiness, load-dependent)."""
+    return sum(abs(w[i + 1] - w[i]) for i in range(len(w) - 1))
+
+
+def window_key(w, select):
+    """Sort key for one candidate window; larger is better.
+
+    Ties break on std, so the choice stays deterministic and still prefers a
+    spiky window when the primary metric is flat.
+    """
+    sd = stddev(w)
+    if select == "transitions":
+        return (count_transitions(w), sd)
+    if select == "tv":
+        return (total_variation(w), sd)
+    return (sd,)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--day", required=True, help="YYYY-MM-DD, e.g. 1995-07-13")
@@ -126,6 +172,9 @@ def main():
     ap.add_argument("--out", required=True, help="output slice CSV")
     ap.add_argument("--source", default="jul", choices=sorted(SOURCES))
     ap.add_argument("--cache", default=DEFAULT_CACHE)
+    ap.add_argument("--select", default="transitions",
+                    choices=["transitions", "std", "tv"],
+                    help="window objective: transitions (default), std, or tv")
     ap.add_argument("--top", type=int, default=0,
                     help="also print the N best-scoring windows")
     a = ap.parse_args()
@@ -145,15 +194,29 @@ def main():
     log("parsed %d requests for %s in %.1fs" % (matched, a.day, time.time() - t0))
 
     series = [counts.get(i, 0) for i in range(1440)]
-    best_std, best_i = -1.0, None
+
+    # Window selection. `transitions` (the default) maximises shape churn — the
+    # number of times the per-minute rate reverses direction — which is what the
+    # autoscaler actually has to chase. `std` is the original objective and `tv`
+    # maximises total variation (load-dependent: it rewards a window for having
+    # more traffic, not only for being spikier).
     scored = []
+    best_key, best_i = None, None
     for i, sd in rolling_std(series, a.duration):
-        scored.append((sd, i))
-        if sd > best_std:
-            best_std, best_i = sd, i
+        w = series[i:i + a.duration]
+        if a.select == "transitions":
+            key = (count_transitions(w), sd)
+        elif a.select == "tv":
+            key = (total_variation(w), sd)
+        else:
+            key = (sd,)
+        scored.append((key, i))
+        if best_key is None or key > best_key:
+            best_key, best_i = key, i
     if best_i is None:
         raise SystemExit("day %s has %d minutes < duration %d"
                          % (a.day, len(series), a.duration))
+    best_std = stddev(series[best_i:best_i + a.duration])
 
     window = series[best_i:best_i + a.duration]
     peak = max(window) or 1
@@ -177,7 +240,11 @@ def main():
                                           time.gmtime(start_epoch)),
         "window_end_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ",
                                         time.gmtime(end_epoch)),
+        "select": a.select,
         "window_std": round(best_std, 4),
+        "window_transitions": count_transitions(window),
+        "window_total_variation": total_variation(window),
+        "window_mean_peak_ratio": round((sum(window) / a.duration) / peak, 4),
         "window_peak_per_min": peak,
         "window_mean_per_min": round(sum(window) / a.duration, 3),
         "window_min_per_min": min(window),
@@ -187,18 +254,25 @@ def main():
         "output_rows": a.duration,
     }
     if a.top > 0:
-        scored.sort(key=lambda x: -x[0])
+        scored.sort(key=lambda x: x[0], reverse=True)
         summary["top_windows"] = [
-            {"start_minute_of_day": i, "std": round(sd, 3),
+            {"start_minute_of_day": i,
+             "select": a.select,
+             "score": round(float(k[0]), 3),
+             "std": round(stddev(series[i:i + a.duration]), 3),
+             "transitions": count_transitions(series[i:i + a.duration]),
+             "total_variation": total_variation(series[i:i + a.duration]),
+             "mean_per_min": round(sum(series[i:i + a.duration]) / a.duration, 3),
              "start_utc": time.strftime(
                  "%Y-%m-%dT%H:%M:%SZ",
                  time.gmtime(local_minutes_to_epoch(y, m, d, i, tz)))}
-            for sd, i in scored[:a.top]]
+            for k, i in scored[:a.top]]
 
     print(json.dumps(summary, indent=2))
-    log("wrote %d rows -> %s (window %s..%s, std=%.1f, peak=%d/min)"
+    log("wrote %d rows -> %s (window %s..%s, select=%s, std=%.1f, transitions=%d, peak=%d/min)"
         % (a.duration, a.out, summary["window_start_utc"],
-           summary["window_end_utc"], best_std, peak))
+           summary["window_end_utc"], a.select, best_std,
+           summary["window_transitions"], peak))
     return 0
 
 

@@ -28,13 +28,17 @@ import json
 import os
 import subprocess
 import sys
+import time
+import http.client
+import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 
 NS = "train-ticket"
 FRONT = "ts-ui-dashboard"
-GATEWAY = "train-ticket-gateway-istio"
+# Ingress gateway is the classic istio-ingressgateway in istio-system (2026-11-21).
+GATEWAY = "istio-ingressgateway"
 SLO_DEFAULT = 200.0
 
 
@@ -43,14 +47,47 @@ def parse_iso(s):
     return datetime.fromisoformat(str(s).replace("Z", "+00:00"))
 
 
-def q(url, params, timeout=300):
+def q(url, params, timeout=300, retries=8):
+    """One range query with bounded retry.
+
+    Mimir answers HTTP 429 (limiter) when a post-hoc collection re-issues every
+    query of the window at once. A single 429 used to abort the whole dataset
+    (2026-11-20, 240k probe) even though the samples were still in Mimir. Back
+    off and retry instead of failing the run.
+    """
     qs = urllib.parse.urlencode(params)
-    req = urllib.request.Request(f"{url}/api/v1/query_range?{qs}")
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        d = json.load(r)
-    if d.get("status") != "success":
-        raise RuntimeError(f"query failed: {params.get('query')}")
-    return d["data"]["result"]
+    delay = 2.0
+    last = None
+    for attempt in range(retries):
+        req = urllib.request.Request(f"{url}/api/v1/query_range?{qs}")
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                d = json.load(r)
+        except urllib.error.HTTPError as exc:
+            last = exc
+            if exc.code not in (429, 500, 502, 503, 504):
+                raise
+            print(f"  query HTTP {exc.code}, retry {attempt + 1}/{retries} "
+                  f"in {delay:.0f}s", file=sys.stderr, flush=True)
+            time.sleep(delay)
+            delay = min(delay * 2, 60.0)
+            continue
+        except (urllib.error.URLError, TimeoutError, ConnectionError,
+                http.client.HTTPException, OSError) as exc:
+            # Mimir drops connections when its query-frontend queue is deep
+            # (2026-11-20: RemoteDisconnected + context deadline exceeded).
+            last = exc
+            print(f"  query connection error {type(exc).__name__}, retry "
+                  f"{attempt + 1}/{retries} in {delay:.0f}s", file=sys.stderr,
+                  flush=True)
+            time.sleep(delay)
+            delay = min(delay * 2, 60.0)
+            continue
+        if d.get("status") != "success":
+            raise RuntimeError(f"query failed: {params.get('query')}")
+        return d["data"]["result"]
+    raise RuntimeError(f"query failed after {retries} attempts: "
+                       f"{params.get('query')} ({last})")
 
 
 def series_map(result):
@@ -254,9 +291,16 @@ def collect_window(args, svcs, t0, duration, interval, slo, front, gateway):
         rows_train.append(rt)
         rows_full.append(rf)
 
+    total = n_viol + n_noviol + n_nodata
     return rows_train, rows_full, {
         "front_p90_samples": front_seen, "no_data_rows": n_nodata,
         "labels_violation": n_viol, "labels_no_violation": n_noviol,
+        # Outage-aware reporting (2026-11-19): a tick with no front traffic is a
+        # FAILED tick, not a missing one. The plain rate is blind to total
+        # outages because the p90 histogram gets no samples. See
+        # reports/stage7_28/exp13jul/slo_metric_blindness_20261119.md
+        "outage_aware_rate": round(100.0 * (n_viol + n_nodata) / total, 3) if total else None,
+        "outage_rate": round(100.0 * n_nodata / total, 3) if total else None,
     }
 
 
@@ -336,6 +380,8 @@ def main():
              "coverage_pct": round(cov, 2),
              "labels_violation": stats["labels_violation"],
              "labels_no_violation": stats["labels_no_violation"],
+             "outage_aware_rate": stats.get("outage_aware_rate"),
+             "outage_rate": stats.get("outage_rate"),
              "SLO_ms": slo, "front_svc": front}
     if args.dataset:
         # mode A: keep the recovery report next to the originals

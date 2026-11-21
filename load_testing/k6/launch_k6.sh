@@ -36,10 +36,29 @@ START_MIN="${START_MIN:-0}"
 TEST_MIN="${TEST_MIN:-0}"
 TRACE_COMPRESS="${TRACE_COMPRESS:-1}"
 OPEN_LOOP="${OPEN_LOOP:-1}"
+PRE_ALLOCATED_VUS="${PRE_ALLOCATED_VUS:-}"
+# Open-loop execution capacity. When VUS_MODE=auto (default) and neither VU knob is
+# pinned, the cap is derived from the offered load rather than from the account
+# pool: VUs = ceil(peak_iterations_per_s * VUS_D_MAX * VUS_SAFETY). A pool sized to
+# the seed count is simultaneously oversized at low load and the binding constraint
+# at high load. Set VUS_MODE=static (or pass PRE_ALLOCATED_VUS explicitly) for the
+# old behaviour.
+VUS_MODE="${VUS_MODE:-auto}"
+VUS_D_MAX="${VUS_D_MAX:-0.5}"
+VUS_SAFETY="${VUS_SAFETY:-2}"
+if [ "$VUS_MODE" = auto ] && [ -z "$PRE_ALLOCATED_VUS" ] && [ -z "${MAX_VUS:-}" ]; then
+  PRE_ALLOCATED_VUS=$(python3 -c "
+import math
+peak = max(1.0, ${MAX_REQUESTS:-5000} / 60.0)
+print(int(math.ceil(peak * $VUS_D_MAX * $VUS_SAFETY)))")
+fi
 PRE_ALLOCATED_VUS="${PRE_ALLOCATED_VUS:-100}"
-# Open-loop execution capacity. maxVUs defaults to preAllocatedVUs: no hidden
-# dependency on runtime VU allocation. USER_POOL is the account/VU budget.
+# maxVUs defaults to preAllocatedVUs: no hidden dependency on runtime VU allocation.
+# USER_POOL is the account/VU budget (seeds), not the execution cap.
 MAX_VUS="${MAX_VUS:-$PRE_ALLOCATED_VUS}"
+# One VU owns one account. The VU cap comes from the offered load, so the seed
+# pool must be large enough; the generator enforces this and fails with a clear
+# message rather than silently delivering less than asked.
 # Preflight traffic is opt-in and outside the measured arrival schedule.
 PREFLIGHT="${PREFLIGHT:-0}"
 # Account sharing is forbidden unless explicitly requested.
