@@ -122,10 +122,11 @@ const LOGIN_COOLDOWN_MS = envInt('LOGIN_COOLDOWN_MS', 30 * 1000, 0);
 // whose auth traffic arrives in spikes unrelated to the trace.
 //
 // LOGIN_START_JITTER_S spreads the FIRST login of each VU uniformly over that
-// many seconds. The offset is derived deterministically from __VU, so no
+// many seconds. Default 300 s (was 900): with 1 h runs the whole fleet must be
+// logged in well before the window ends, and 900 s distorted a third of it. The offset is derived deterministically from __VU, so no
 // cross-VU coordination is needed and it is stable for the VU's lifetime.
 // 0 restores the old behaviour (everyone logs in at t=0).
-const LOGIN_START_JITTER_S = envInt('LOGIN_START_JITTER_S', 900, 0);
+const LOGIN_START_JITTER_S = envInt('LOGIN_START_JITTER_S', 300, 0);
 // LOGIN_BACKOFF_JITTER is the +/- fraction applied to the exponential backoff,
 // decorrelating retry waves. 0 = deterministic backoff (the old behaviour).
 const LOGIN_BACKOFF_JITTER = envNum('LOGIN_BACKOFF_JITTER', 0.5, 0);

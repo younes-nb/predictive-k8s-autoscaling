@@ -226,26 +226,62 @@ def load_dataset(path: str, window_start=None, window_end=None):
     }
 
 
-def chronological_split(ts: np.ndarray, test_frac: float, embargo_seconds: float):
+def chronological_split(ts: np.ndarray, y: np.ndarray, test_frac: float,
+                        embargo_seconds: float, min_test_violations: int = 0):
     """Hold out the most recent test_frac of rows; drop test rows inside the
-    embargo window after the last training timestamp."""
+    embargo window after the last training timestamp.
+
+    min_test_violations guards against a degenerate holdout. A chronological
+    split takes the *tail* of the run as the test set, so if the violations all
+    happened early (e.g. one cold-start episode) the test set can end up with
+    zero violations and every metric (recall, AUC) becomes meaningless. When that
+    happens the split point is moved earlier until the test set contains enough
+    violations, or the run is rejected outright (2026-11-21).
+    """
     n = len(ts)
     if n < 2:
         raise TrainerError(f'need >= 2 labeled rows, got {n}')
-    k = int(np.floor(n * (1.0 - test_frac)))
-    k = min(max(k, 1), n - 1)
-    last_train_ts = float(ts[k - 1])
-    embargo_end = last_train_ts + float(embargo_seconds)
-    test_start = int(np.searchsorted(ts, embargo_end, side='left'))
+
+    def split_at(k):
+        last_train_ts = float(ts[k - 1])
+        embargo_end = last_train_ts + float(embargo_seconds)
+        test_start = int(np.searchsorted(ts, embargo_end, side='left'))
+        return k, test_start, last_train_ts, embargo_end
+
+    k = min(max(int(np.floor(n * (1.0 - test_frac))), 1), n - 1)
+    k, test_start, last_train_ts, embargo_end = split_at(k)
     if test_start >= n:
         raise TrainerError(
             f'embargo of {embargo_seconds:g}s removes the entire test set '
             f'(last train ts={last_train_ts:.0f}, embargo end={embargo_end:.0f}, '
             f'last row ts={ts[-1]:.0f})')
+
+    requested_k = k
+    n_test_viol = int((y[test_start:] == 0).sum())
+    if min_test_violations > 0:
+        while n_test_viol < min_test_violations and k > 1:
+            k -= 1
+            k2, ts2, lt, ee = split_at(k)
+            if ts2 >= n:
+                break
+            k, test_start, last_train_ts, embargo_end = k2, ts2, lt, ee
+            n_test_viol = int((y[test_start:] == 0).sum())
+        if n_test_viol < min_test_violations:
+            raise TrainerError(
+                f'test set has only {n_test_viol} violation(s), fewer than '
+                f'--min-test-violations={min_test_violations}. The run does not '
+                f'contain enough spread-out violations for a chronological '
+                f'holdout; pick a load level or window that violates SLO outside '
+                f'the cold-start minutes.')
+
     return (np.arange(0, k), np.arange(test_start, n),
             {'last_train_ts_epoch_s': last_train_ts,
              'embargo_end_epoch_s': embargo_end,
-             'test_rows_dropped_by_embargo': test_start - k})
+             'test_rows_dropped_by_embargo': test_start - k,
+             'requested_split_index': int(requested_k),
+             'used_split_index': int(k),
+                'test_violations': int(n_test_viol),
+                'min_test_violations': int(min_test_violations)})
 
 
 def feature_bounds(X: np.ndarray, svcs: list) -> list:
@@ -394,7 +430,8 @@ def train_from_args(args) -> dict:
         raise TrainerError('no usable labeled rows after rejection')
 
     train_idx, test_idx, split_info = chronological_split(
-        data['ts'], args.test_frac, args.embargo_seconds)
+        data['ts'], data['y'], args.test_frac, args.embargo_seconds,
+        args.min_test_violations)
     X_train, y_train = data['X'][train_idx], data['y'][train_idx]
     X_test, y_test = data['X'][test_idx], data['y'][test_idx]
     print(f"samples: {len(y_train)} train / {len(y_test)} test "
@@ -460,6 +497,9 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument('--embargo-seconds', type=float, default=EMBARGO_FLOOR_SECONDS,
                     help=f'embargo between train and test (hard floor '
                          f'{EMBARGO_FLOOR_SECONDS}s = collector [1m] PromQL windows)')
+    ap.add_argument('--min-test-violations', type=int, default=30,
+                    help='reject a chronological holdout whose test set has fewer '
+                         'violations than this (default 30; 0 disables the guard)')
     ap.add_argument('--expect-svcs',
                     help='comma-separated svc order that MUST match the CSV-derived '
                          'order exactly (hard fail otherwise; re-bake safety)')

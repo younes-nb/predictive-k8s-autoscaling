@@ -35,7 +35,7 @@ spec:
             - name: PBS_SLO_PREDICTOR_SVCS
               value: "/app/simulation/train_ticket/RandomForestClassify.svcs"
             - name: PBS_MAX_POD
-              value: "8"                  # parity with live HPAs (min1/max8)
+              value: "10"                 # parity with live HPAs (min1/max10)
             - name: PBS_MIN_POD
               value: "1"
             - name: PBS_NAMESPACE

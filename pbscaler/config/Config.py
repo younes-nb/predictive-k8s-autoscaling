@@ -64,7 +64,7 @@ class Config():
         self.SLO = get_env_float("PBS_SLO", 200.0)  # ms, paper Sec. IV-A4
 
         # Replica bounds (paper限制了8, ours aligned to the cluster's HPAs)
-        self.max_pod = get_env_int("PBS_MAX_POD", 8)
+        self.max_pod = get_env_int("PBS_MAX_POD", 10)
         self.min_pod = get_env_int("PBS_MIN_POD", 1)
 
         # ---- k8s access --------------------------------------------------

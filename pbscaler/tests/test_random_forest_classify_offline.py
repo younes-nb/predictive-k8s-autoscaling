@@ -87,6 +87,12 @@ class TempDirs(unittest.TestCase):
         return write_csv(os.path.join(self.tmp, name), **kw)
 
     def quiet_train(self, argv):
+        # The synthetic fixtures are tiny and deliberately have almost no
+        # violations, so the production guard (--min-test-violations, default 30)
+        # would reject them. Opt out unless the test asks for it explicitly.
+        argv = list(argv)
+        if '--min-test-violations' not in argv:
+            argv += ['--min-test-violations', '0']
         out, errout = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(errout):
             rc = rfc.run_cli(argv)
@@ -115,7 +121,7 @@ class TestChronologicalSplit(TempDirs):
         ts = np.arange(80, dtype=float) * SPACING_S          # n=100 -> k=80 train rows
         tail = ts[79] + 6.0 * np.arange(1, 21)               # test candidates +6..+120 s
         ts_full = np.concatenate([ts, tail])
-        train_idx, test_idx, info = rfc.chronological_split(ts_full, 0.2, 60)
+        train_idx, test_idx, info = rfc.chronological_split(ts_full, np.zeros(len(ts_full), dtype=int), 0.2, 60)
         self.assertEqual(info['test_rows_dropped_by_embargo'], 9)   # +6..+54 s dropped
         self.assertEqual(test_idx[0], 89)                    # first row >= ts[79]+60
         self.assertAlmostEqual(ts_full[89], ts[79] + 60.0)
@@ -124,7 +130,49 @@ class TestChronologicalSplit(TempDirs):
     def test_embargo_consumes_test_set_fails(self):
         ts = np.arange(100, dtype=float)                      # 1 s spacing
         with self.assertRaises(rfc.TrainerError):
-            rfc.chronological_split(ts, 0.2, 60)
+            rfc.chronological_split(ts, np.zeros(len(ts), dtype=int), 0.2, 60)
+
+    def test_min_test_violations_guard_rejects_degenerate_holdout(self):
+        """A run with no violations at all must be rejected, not trained on."""
+        n = 360
+        ts = np.arange(n, dtype=float) * 5.0
+        y = np.ones(n, dtype=int)          # no violations anywhere
+        with self.assertRaises(rfc.TrainerError) as ctx:
+            rfc.chronological_split(ts, y, 0.2, 60, min_test_violations=10)
+        self.assertIn('violation', str(ctx.exception))
+
+    def test_min_test_violations_walks_back_when_tail_is_clean(self):
+        """Violations only early: the split moves back rather than returning a clean tail."""
+        n = 360
+        ts = np.arange(n, dtype=float) * 5.0
+        y = np.ones(n, dtype=int)
+        y[:120] = 0
+        train_idx, test_idx, info = rfc.chronological_split(
+            ts, y, 0.2, 60, min_test_violations=10)
+        self.assertLess(info['used_split_index'], info['requested_split_index'])
+        self.assertGreaterEqual(int((y[test_idx] == 0).sum()), 10)
+
+    def test_min_test_violations_moves_split_earlier(self):
+        """When the tail is clean the split walks back until the test set has violations."""
+        n = 360
+        ts = np.arange(n, dtype=float) * 5.0
+        y = np.ones(n, dtype=int)
+        y[:120] = 0                       # violations in the first third only
+        train_idx, test_idx, info = rfc.chronological_split(
+            ts, y, 0.2, 60, min_test_violations=10)
+        self.assertGreaterEqual(int((y[test_idx] == 0).sum()), 10)
+        self.assertLess(info['used_split_index'], info['requested_split_index'])
+        # still chronological and disjoint
+        self.assertLess(train_idx[-1], test_idx[0])
+
+    def test_min_test_violations_zero_keeps_old_behaviour(self):
+        n = 360
+        ts = np.arange(n, dtype=float) * 5.0
+        y = np.ones(n, dtype=int)
+        y[:120] = 0
+        train_idx, test_idx, info = rfc.chronological_split(ts, y, 0.2, 60, 0)
+        self.assertEqual(info['used_split_index'], info['requested_split_index'])
+        self.assertEqual(int((y[test_idx] == 0).sum()), 0)
 
     def test_embargo_below_floor_rejected_by_cli(self):
         csv = self.csv(n_rows=50)
@@ -149,7 +197,7 @@ class TestEmbargoAtCollectorSpacing(TempDirs):
     def test_embargo_makes_train_and_test_windows_disjoint(self):
         n = 360                                   # cal10500 shape: 30 min at 5 s
         ts = self._ts(n)
-        train_idx, test_idx, info = rfc.chronological_split(ts, 0.2, 60)
+        train_idx, test_idx, info = rfc.chronological_split(ts, np.zeros(len(ts), dtype=int), 0.2, 60)
         self.assertEqual(train_idx[0], 0)
         self.assertEqual(train_idx[-1], 287)      # first 80 %, contiguous block
         self.assertEqual(test_idx[-1], n - 1)     # test = last block, contiguous
@@ -161,8 +209,8 @@ class TestEmbargoAtCollectorSpacing(TempDirs):
 
     def test_split_is_deterministic_and_not_random(self):
         ts = self._ts(360)
-        a = rfc.chronological_split(ts, 0.2, 60)
-        b = rfc.chronological_split(ts, 0.2, 60)
+        a = rfc.chronological_split(ts, np.zeros(len(ts), dtype=int), 0.2, 60)
+        b = rfc.chronological_split(ts, np.zeros(len(ts), dtype=int), 0.2, 60)
         self.assertEqual(a[0].tolist(), b[0].tolist())
         self.assertEqual(a[1].tolist(), b[1].tolist())
         self.assertTrue(np.all(np.diff(a[0]) == 1) and np.all(np.diff(a[1]) == 1))
