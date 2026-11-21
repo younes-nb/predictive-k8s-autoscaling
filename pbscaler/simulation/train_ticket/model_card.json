@@ -1,15 +1,14 @@
 {
- "created_utc": "2026-11-21T02:52:47.967065+00:00",
+ "created_utc": "2026-11-21T20:55:09.718335+00:00",
  "trainer_version": "rf-train-2.0-stage726",
  "sklearn_version": "1.2.1",
  "numpy_version": "1.22.2",
  "pandas_version": "1.5.3",
  "joblib_version": "1.1.1",
  "seed": 20,
- "data_path": "stage7_28/exp13jul/step1_hpa_130k_jul13_t4h_20261120T215831Z/dataset_step1_hpa_130k_jul13_t4h_20261120T215831Z/train_data.csv",
- "data_sha256": "abd5364fb115c48711765825396d2ea5a774e2ec74bcf976faf43785098e11a8",
+ "data_path": "stage7_28/exp13jul/step1_hpa_30k_jul13_1h_20261121T193652Z/dataset_step1_hpa_30k_jul13_1h_20261121T193652Z/train_data.csv",
+ "data_sha256": "97817e80ac8ece85defcec42d0b2677148c1c1e906bc5ea6f2627becd01ffb4f",
  "svcs": [
-  "train-ticket-gateway-istio",
   "ts-admin-basic-info-service",
   "ts-admin-order-service",
   "ts-admin-route-service",
@@ -53,58 +52,62 @@
   "ts-verification-code-service",
   "ts-voucher-service"
  ],
- "n_features": 129,
- "model_n_features_in": 129,
+ "n_features": 126,
+ "model_n_features_in": 126,
  "split": {
-  "last_train_ts_epoch_s": 1795222188.0,
-  "embargo_end_epoch_s": 1795222248.0,
-  "test_rows_dropped_by_embargo": 11,
+  "last_train_ts_epoch_s": 1795292159.0,
+  "embargo_end_epoch_s": 1795292219.0,
+  "test_rows_dropped_by_embargo": 0,
+  "requested_split_index": 517,
+  "used_split_index": 457,
+  "test_violations": 34,
+  "min_test_violations": 30,
   "ts_train_utc": [
-   "2026-11-20T21:59:03+00:00",
-   "2026-11-21T00:49:48+00:00"
+   "2026-11-21T19:37:24+00:00",
+   "2026-11-21T20:15:59+00:00"
   ],
   "ts_test_utc": [
-   "2026-11-21T00:50:48+00:00",
-   "2026-11-21T01:58:58+00:00"
+   "2026-11-21T20:18:19+00:00",
+   "2026-11-21T20:37:19+00:00"
   ],
   "test_frac": 0.2,
   "embargo_seconds": 60,
-  "n_train": 1844,
-  "n_test": 451
+  "n_train": 457,
+  "n_test": 190
  },
  "rejects": {
-  "invalid_label": 574,
+  "invalid_label": 73,
   "nonfinite_feature": 0
  },
- "n_rows_total": 2880,
- "n_rejected": 574,
+ "n_rows_total": 720,
+ "n_rejected": 73,
  "class_balance": {
   "train": {
-   "0": 358,
-   "1": 1486
+   "0": 369,
+   "1": 88
   },
   "test": {
-   "0": 2,
-   "1": 449
+   "0": 34,
+   "1": 156
   }
  },
  "metrics": {
-  "accuracy": 0.9955654101995566,
-  "recall_violation_pos_label_0": 0.0,
+  "accuracy": 0.17894736842105263,
+  "recall_violation_pos_label_0": 1.0,
   "roc_auc": 0.5,
   "confusion_matrix": [
    [
-    0,
-    2
+    34,
+    0
    ],
    [
-    0,
-    449
+    156,
+    0
    ]
   ],
-  "classification_report": "              precision    recall  f1-score   support\n\n           0      0.000     0.000     0.000         2\n           1      0.996     1.000     0.998       449\n\n    accuracy                          0.996       451\n   macro avg      0.498     0.500     0.499       451\nweighted avg      0.991     0.996     0.993       451\n"
+  "classification_report": "              precision    recall  f1-score   support\n\n           0      0.179     1.000     0.304        34\n           1      0.000     0.000     0.000       156\n\n    accuracy                          0.179       190\n   macro avg      0.089     0.500     0.152       190\nweighted avg      0.032     0.179     0.054       190\n"
  },
- "test_ood_fraction": 0.6075388026607539,
+ "test_ood_fraction": 0.9631578947368421,
  "ood_definition": "fraction of test rows with any [i, qps, count] feature outside the per-feature [min, max] of the training rows",
  "notes": [
   "paper feature semantics: per-service [i, qps, count], default class weight",

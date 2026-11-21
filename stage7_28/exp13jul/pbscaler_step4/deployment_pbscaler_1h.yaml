@@ -1,0 +1,85 @@
+# PBScaler controller Deployment - 1 h protocol (2026-11-21).
+#
+# 60 min k6 + 5 min buffer, so HPAs are restored only after k6 ends.
+#
+# (registry image; do NOT apply until the
+# paper-mode RF is retrained — see pbscaler/README.md). Apply order:
+#
+#   kubectl apply -f pbscaler/deploy/rbac.yaml
+#   kubectl apply -f pbscaler/deploy/deployment.yaml
+#
+# The image is pulled from docker.io (pushed by pbscaler/deploy/build_and_push.sh
+# with the runner's docker credentials); the old side-loaded ctr copies on
+# worker1 are no longer needed.
+#
+# Run-time behavior (paper modes: PBScaler IS the autoscaler while it runs):
+#   * starts -> suspends the namespace HPAs itself (PBS_SUSPEND_HPAS=true)
+#   * loop: 15 s anomaly (TopoRank + GA scale-out), 120 s waste (scale-in)
+#   * on clean exit (duration end, SIGINT, SIGTERM) -> restores HPAs
+#     (PBS_RESTORE_HPAS=true; also restorable by scripts/hpa_control.py).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pbscaler
+  namespace: train-ticket
+  labels:
+    app: pbscaler
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pbscaler
+  template:
+    metadata:
+      labels:
+        app: pbscaler
+    spec:
+      serviceAccountName: pbscaler
+      containers:
+        - name: pbscaler
+          image: docker.io/younesnb/pbscaler:v2.4.0-step1-1h-20261121T205521Z   # RF trained on the 1 h 13-Jul HPA dataset (v2.4.0-step1-1h)
+          # fullrun13_trace573_compress8 (TRACE_COMPRESS=8 + 44-core quota, 15.7%
+          # viol regime; paper-comparable). Fixes v1.2.1 runaway (spec-based svc
+          # counts, aligned GA bounds, write-path clamp).
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: PYTHONUNBUFFERED
+              value: "1"                    # live prints for kubectl logs (block-buffered otherwise)
+            - name: PBS_DURATION
+              value: "3900"                # 65 min = 60 min k6 + 5 min buffer
+            - name: PBS_SLO
+              value: "200"                  # ms (paper Sec. IV-A4)
+            - name: PBS_SLO_PREDICTOR
+              value: "/app/simulation/train_ticket/RandomForestClassify.model"
+            - name: PBS_SLO_PREDICTOR_SVCS
+              value: "/app/simulation/train_ticket/RandomForestClassify.svcs"
+            - name: PBS_MAX_POD
+              value: "10"                   # parity with the namespace HPAs (min1/max10)
+            - name: PBS_MIN_POD
+              value: "1"
+            - name: PBS_NAMESPACE
+              value: "train-ticket"
+            - name: PBS_FRONT_SVC
+              value: "ts-ui-dashboard"
+            - name: PBS_GATEWAY_NAME
+              value: "istio-ingressgateway"
+            - name: PBS_SUSPEND_HPAS
+              value: "true"                 # paper: PBScaler is the autoscaler during its run
+            - name: PBS_RESTORE_HPAS
+              value: "true"                 # restore native HPAs on clean exit
+            - name: PBS_DRY_RUN
+              value: "false"
+            # in-cluster Mimir, no port-forward needed (monitoring ns)
+            - name: PBS_MIMIR_URL
+              # Mimir runs OUTSIDE the cluster on the monitoring host (mon1), published on
+              # 18080. The in-cluster Service went away with in-cluster monitoring, which
+              # left PBScaler unable to resolve DNS and therefore unable to make any
+              # scaling decision (2026-11-21).
+              value: "http://10.10.1.2:18080"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"

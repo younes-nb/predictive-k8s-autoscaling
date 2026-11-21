@@ -12,8 +12,8 @@ export KUBECONFIG=/proj/k8sautoscaledl-PG0/src/cluster-access/admin.conf
 echo "applying pbscaler rbac"
 kubectl apply -f pbscaler/deploy/rbac.yaml
 
-echo "applying pbscaler deployment (4h manifest)"
-kubectl apply -f stage7_28/exp13jul/pbscaler_step4/deployment_pbscaler_4h.yaml
+echo "applying pbscaler deployment (1h manifest)"
+kubectl apply -f stage7_28/exp13jul/pbscaler_step4/deployment_pbscaler_1h.yaml
 
 echo "waiting for pbscaler pod"
 for i in $(seq 1 36); do
