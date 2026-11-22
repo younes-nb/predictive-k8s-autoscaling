@@ -26,6 +26,12 @@ stage7_28/exp13jul/dryruns/
 # Every run directory is <name>_<UTC timestamp> (e.g. step1_hpa_30k_jul13_20261117T221258Z).
 stage7_28/exp13jul/step*/
 stage7_28/exp13jul/*_20[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z/
+# Same rule for the prefixes that are not step*: cal_*, probe_*, gwsmoke_*,
+# dryrun_* all produce <prefix>_<UTCstamp> run dirs with the same layout.
+stage7_28/exp13jul/cal_*/
+stage7_28/exp13jul/probe_*/
+stage7_28/exp13jul/gwsmoke_*/
+stage7_28/exp13jul/gwverify_*/
 # k6 outputs must never land in the repo. launch_k6.sh defaults OUT_DIR to
 # $PWD/k6; run_experiment.sh now passes K6_OUT_DIR explicitly, but keep this as
 # a guard so a stray run cannot dirty the tree.

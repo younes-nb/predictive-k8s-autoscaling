@@ -102,8 +102,14 @@ case "$SHAPE" in hpa|pbscaler) ;; *) fail "--shape must be hpa or pbscaler" ;; e
 case "$TRACE_SOURCE" in jul|aug) ;; *) fail "--source must be jul or aug" ;; esac
 
 # ---- parameters derived from the CLI --------------------------------------
-TEST_MIN=$DURATION          # measured window = slice length
-START_MIN=0                 # the slice starts at the selected window
+# TRACE_MIN is the length of the trace slice selected from the archive; TEST_MIN
+# is how many of its rows k6 actually replays. They differ when you want the
+# shape/scale of a long window but only its head, e.g. the first 15 min of the
+# 60 min 13-Jul window: TRACE_MIN=60 (so the slice keeps its own 1.0 peak and
+# MAX_REQUESTS means the same thing as in the 60 min run) + TEST_MIN=15.
+TRACE_MIN=${TRACE_MIN:-$DURATION}
+TEST_MIN=${TEST_MIN:-$DURATION}   # measured window = replayed rows
+START_MIN=${START_MIN:-0}         # the slice starts at the selected window
 WARMUP_S=${WARMUP_S:-0}
 USER_POOL=${USER_POOL:-$SEED_POOL}
 PRE_ALLOC=${PRE_ALLOCATED_VUS:-$SEED_POOL}
@@ -177,9 +183,9 @@ fi
 # The slice is derived from the real NASA-HTTP archive, not from a checked-in
 # CSV, so the day/duration you ask for is exactly what runs. The selector is
 # deterministic and its output hash is recorded in params.json.
-echo "selecting trace: day=$TRACE_DAY duration=${DURATION}m source=$TRACE_SOURCE"
+echo "selecting trace: day=$TRACE_DAY duration=${TRACE_MIN}m source=$TRACE_SOURCE"
 TRACE_JSON=$(python3 "$TOOLS/nasa_trace_slice.py" \
-  --day "$TRACE_DAY" --duration "$DURATION" --source "$TRACE_SOURCE" \
+  --day "$TRACE_DAY" --duration "$TRACE_MIN" --source "$TRACE_SOURCE" \
   --select "$TRACE_SELECT" \
   --cache "$TRACE_CACHE" --out "$MCR_SLICE_LOCAL") || {
   echo "FATAL: trace selection failed" >&2; exit 2; }
@@ -436,10 +442,11 @@ cat > "$RUN_DIR/params.json" <<EOF
  "max_requests": $MAX_REQUESTS, "user_pool": $USER_POOL, "pre_allocated_vus": $PRE_ALLOC, "max_vus": $MAX_VUS,
  "start_min": $START_MIN, "test_min": $TEST_MIN, "warmup_s": $WARMUP_S, "k6_run_s": $K6_RUN_S,
  "target_url": "${TARGET_URL:-<launch_k6.sh default>}", "transport": "$MODE",
- "trace_day": "$TRACE_DAY", "trace_source": "$TRACE_SOURCE", "trace_select": "$TRACE_SELECT", "trace_duration_min": $DURATION,
+ "trace_day": "$TRACE_DAY", "trace_source": "$TRACE_SOURCE", "trace_select": "$TRACE_SELECT", "trace_duration_min": $TRACE_MIN,
+ "replay_min": $TEST_MIN, "replay_start_min": $START_MIN, "measured_min": $DURATION,
  "trace_window_start_utc": "$TRACE_START", "trace_window_end_utc": "$TRACE_END", "trace_window_std": ${TRACE_STD:-0},
  "trace_window_peak_per_min": ${TRACE_PEAK:-0}, "trace_slice_sha256": "$TRACE_SHA",
- "trace_slice_rows": $DURATION, "shape": "$SHAPE", "seed_pool": $SEED_POOL,
+ "trace_slice_rows": $TRACE_MIN, "shape": "$SHAPE", "seed_pool": $SEED_POOL,
  "collect_dur": $COLLECT_DUR, "tools_end_offset": $TOOLS_END_OFFSET, "exec_mode": "open",
  "time_unit": "1m", "preflight": false, "seed_count": $SEED_N,
  "mcr_csv": "$MCR_SLICE_LOADGEN", "mcr_sha256": "$TRACE_SHA",
