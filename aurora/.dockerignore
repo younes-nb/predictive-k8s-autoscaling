@@ -1,0 +1,7 @@
+.venv/
+data/
+tests/
+__pycache__/
+*.pyc
+*.parquet
+*.pt

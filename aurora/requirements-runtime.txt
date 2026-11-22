@@ -1,0 +1,7 @@
+# Runtime-only dependencies for the AURORA-HPA controller.
+#
+# torch (CPU build) is installed separately from the PyTorch CPU index in the
+# Dockerfile; listing it here would pull the CUDA wheels.
+numpy
+kubernetes
+requests

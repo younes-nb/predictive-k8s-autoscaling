@@ -98,7 +98,7 @@ esac
 case "$SEED_POOL" in
   ''|*[!0-9]*) fail "--seed-pool must be a positive integer" ;;
 esac
-case "$SHAPE" in hpa|pbscaler) ;; *) fail "--shape must be hpa or pbscaler" ;; esac
+case "$SHAPE" in hpa|pbscaler|aurora) ;; *) fail "--shape must be hpa, pbscaler or aurora" ;; esac
 case "$TRACE_SOURCE" in jul|aug) ;; *) fail "--source must be jul or aug" ;; esac
 
 # ---- parameters derived from the CLI --------------------------------------

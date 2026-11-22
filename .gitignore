@@ -36,3 +36,9 @@ stage7_28/exp13jul/gwverify_*/
 # $PWD/k6; run_experiment.sh now passes K6_OUT_DIR explicitly, but keep this as
 # a guard so a stray run cannot dirty the tree.
 k6/
+
+# AURORA-HPA: training corpora, model artifacts and the staged build context are
+# large binaries, not source. Regenerate with aurora/train/*.py and
+# aurora/deploy/build_and_push.sh.
+aurora/data/
+aurora/build_model/

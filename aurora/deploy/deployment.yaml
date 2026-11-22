@@ -1,0 +1,87 @@
+# AURORA-HPA controller - 1 h protocol.
+#
+# Rendered by up.sh (which substitutes __AURORA_IMAGE__). Apply order:
+#
+#   kubectl apply -f deploy/rbac.yaml
+#   kubectl apply -f deploy/pvc.yaml
+#   kubectl apply -f <rendered deployment>
+#
+# Resources are deliberately IDENTICAL to PBScaler's controller
+# (requests 100m/256Mi, limits 500m/512Mi) so the comparison is not confounded
+# by the autoscaler's own footprint. The controller was measured at ~310 MiB
+# RSS with torch + 42-service batch inference, so 512 Mi is tight but workable.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: aurora-state
+  namespace: train-ticket
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aurora
+  namespace: train-ticket
+  labels:
+    app: aurora
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: aurora
+  template:
+    metadata:
+      labels:
+        app: aurora
+    spec:
+      serviceAccountName: aurora
+      containers:
+        - name: aurora
+          image: __AURORA_IMAGE__
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            - name: AURORA_DURATION_S
+              value: "3900"          # 65 min = 60 min k6 + 5 min buffer
+            - name: AURORA_DECISION_INTERVAL_S
+              value: "15"
+            - name: AURORA_TELEMETRY_STEP_S
+              value: "5"
+            - name: AURORA_HISTORY_LEN
+              value: "24"            # 2 min at 5 s
+            - name: AURORA_SLO_MS
+              value: "200"
+            - name: AURORA_MIN_POD
+              value: "1"
+            - name: AURORA_MAX_POD
+              value: "10"            # parity with the namespace HPAs
+            - name: AURORA_NAMESPACE
+              value: "train-ticket"
+            - name: AURORA_SUSPEND_HPAS
+              value: "true"
+            - name: AURORA_RESTORE_HPAS
+              value: "true"
+            - name: AURORA_MIMIR_URL
+              value: "http://10.10.1.2:18080"
+          resources:
+            requests: {cpu: "100m", memory: "256Mi"}
+            limits: {cpu: "500m", memory: "512Mi"}
+          volumeMounts:
+            - {name: state, mountPath: /var/lib/aurora}
+          readinessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "test -f /opt/aurora/model/registry/index.json"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: state
+          persistentVolumeClaim:
+            claimName: aurora-state
