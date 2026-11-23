@@ -1,8 +1,7 @@
-"""Contract tests: AURORA-HPA must not forecast.
+"""No-forecasting contract for the AURORA v2 architecture.
 
-These lock the architectural rule from the design document -- CPU, memory and
-future resource requirements are never predicted -- by asserting it at the
-interfaces rather than by grepping prose.
+CPU, memory and future demand are never predicted. The replica model emits an
+action and a target count; nothing else.
 
     cd aurora && .venv/bin/python -m unittest discover -s tests -v
 """
@@ -15,83 +14,68 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import Config                                      # noqa: E402
-from decision.engine import DecisionEngine                     # noqa: E402
-from features.groups import FEATURE_ORDER                      # noqa: E402
-from models.encoder import TS2VecEncoder                       # noqa: E402
-from models.proto import (AddressabilityHead, AuroraModel,     # noqa: E402
-                          PrototypicalHead)
+from features.groups import FEATURE_ORDER                 # noqa: E402
+from models.graph import GraphDiagnosisModel              # noqa: E402
+from models.replica import ACTIONS, ReplicaChangeModel    # noqa: E402
 
-FORECAST_KEYS = ("forecast", "future", "horizon", "predicted_cpu",
-                 "predicted_mem", "pred_cpu", "pred_mem")
+FORECAST_KEYS = ("forecast", "future", "horizon", "pred_cpu", "pred_mem",
+                 "pred_latency", "predicted_cpu", "predicted_mem")
 
 
 class TestNoForecastOutputs(unittest.TestCase):
-    def test_decide_emits_no_future_values(self):
-        m = AuroraModel(TS2VecEncoder(len(FEATURE_ORDER), d_model=8),
-                        PrototypicalHead(8), AddressabilityHead(8))
-        out = m.decide(torch.randn(2, 10, len(FEATURE_ORDER)),
-                       torch.ones(2, 10, len(FEATURE_ORDER)))
-        for o in out:
-            for k in o:
-                for bad in FORECAST_KEYS:
-                    self.assertNotIn(bad, k.lower(),
-                                     f"model output {k!r} looks like a forecast")
-
-    def test_representations_are_not_named_as_predictions(self):
-        m = AuroraModel(TS2VecEncoder(len(FEATURE_ORDER), d_model=8),
-                        PrototypicalHead(8), AddressabilityHead(8))
-        o = m.decide(torch.randn(1, 10, len(FEATURE_ORDER)))[0]
-        self.assertIn("representation", o)
-        self.assertIn("bottleneck", o)
-        self.assertIn("addressable_prob", o)
-
-
-class TestNoForecastInputs(unittest.TestCase):
-    def test_decision_engine_takes_current_load_only(self):
-        import inspect
-        sig = inspect.signature(DecisionEngine.decide)
-        params = set(sig.parameters)
-        for banned in ("future_offered", "forecast_offered", "horizon",
-                       "predicted_load"):
-            self.assertNotIn(banned, params)
-        # the offered workload must be a required, current value
-        self.assertIn("offered", params)
-        d = DecisionEngine(Config()).decide(
-            "s", offered=10.0,
-            binding={"capacity": 10.0, "sigma": 0.1, "signal": "cpu",
-                     "spread": 1.0, "signals": {}},
-            n_committed=1, addressable_prob=1.0,
-            bottleneck="cpu", confidence=0.9, ood=False)
-        self.assertNotIn("forecast", d.basis)
-        self.assertIn("p_serves_current", d.basis)
-
-    def test_basis_has_no_future_field(self):
-        d = DecisionEngine(Config()).decide(
-            "s", offered=10.0,
-            binding={"capacity": 10.0, "sigma": 0.1, "signal": "cpu",
-                     "spread": 1.0, "signals": {}},
-            n_committed=1, addressable_prob=1.0,
-            bottleneck="cpu", confidence=0.9, ood=False)
-        for k in d.basis:
+    def test_graph_model_output_keys(self):
+        m = GraphDiagnosisModel(len(FEATURE_ORDER), n_edge_features=1, d_model=8)
+        n, t = 3, 24
+        out = m(torch.randn(n, t, len(FEATURE_ORDER)),
+                torch.ones(n, t, len(FEATURE_ORDER)), torch.zeros(n, n),
+                torch.zeros(n, n, 8), torch.ones(n))
+        for k in out:
             for bad in FORECAST_KEYS:
-                self.assertNotIn(bad, k.lower(), f"basis key {k!r}")
+                self.assertNotIn(bad, k.lower(), k)
+        for required in ("root_pb", "affected", "degradation", "provisioning"):
+            self.assertIn(required, out, required)
+
+    def test_replica_model_output_keys(self):
+        m = ReplicaChangeModel(8, n_degradation=9)
+        out = m(torch.zeros(1, 8 + 2 + 9 + 4 + 9), 1, 10)
+        for k in out:
+            for bad in FORECAST_KEYS:
+                self.assertNotIn(bad, k.lower(), k)
+        self.assertIn("action_logits", out)
+        self.assertIn("target_logits", out)
+
+    def test_action_vocabulary_is_action_only(self):
+        self.assertEqual(list(ACTIONS), ["hold", "out", "in"])
 
 
-class TestNoForecastInModules(unittest.TestCase):
-    """A coarse structural guard: no module may define a forecasting head."""
+class TestCPUFeatureContract(unittest.TestCase):
+    """CPU request utilisation is the only CPU utilisation ratio."""
 
-    def test_no_forecast_module(self):
-        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        banned_files = {"forecast.py", "forecaster.py", "predictor.py"}
-        found = []
-        for dirpath, _, names in os.walk(root):
-            if ".venv" in dirpath or "__pycache__" in dirpath:
-                continue
-            for n in names:
-                if n in banned_files:
-                    found.append(os.path.join(dirpath, n))
-        self.assertEqual(found, [], f"forecasting module(s) present: {found}")
+    def test_no_cpu_limit_features_remain(self):
+        for f in FEATURE_ORDER:
+            self.assertNotIn("cpu_limit", f, f)
+            self.assertNotIn("cpu_headroom", f, f)
+            self.assertNotIn("cpu_req_pct", f, f)
+
+    def test_request_utilisation_present_and_uncapped(self):
+        from features.transform import transform
+        v, m = transform({"req_rate": 10.0, "cpu_cores": 3.0,
+                          "cpu_request": 1.0, "cpu_throttled": 50.0,
+                          "cpu_periods": 100.0})
+        d = dict(zip(FEATURE_ORDER, zip(v, m)))
+        self.assertIn("cpu_request_utilization", d)
+        self.assertAlmostEqual(d["cpu_request_utilization"][0], 3.0, places=6)
+        self.assertGreater(d["cpu_request_utilization"][0], 1.0,
+                           "values above 100% must not be capped")
+
+    def test_throttling_is_a_separate_feature(self):
+        from features.transform import transform
+        v, _ = transform({"req_rate": 10.0, "cpu_cores": 0.1, "cpu_request": 1.0,
+                          "cpu_throttled": 78.0, "cpu_periods": 100.0})
+        d = dict(zip(FEATURE_ORDER, v))
+        self.assertAlmostEqual(d["cpu_throttled_frac"], 0.78, places=6)
+        self.assertNotAlmostEqual(d["cpu_throttled_frac"],
+                                  d["cpu_request_utilization"], places=6)
 
 
 if __name__ == "__main__":

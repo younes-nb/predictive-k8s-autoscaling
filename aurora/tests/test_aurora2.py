@@ -51,37 +51,37 @@ class TestSafetyScaleOut(unittest.TestCase):
 
     def test_under_provisioned_and_deadline_missed_scales_out(self):
         a, t, why = self.s.validate("out", 8, diag(prov=UNDER, conf=0.9),
-                                    3, False, True, 1, 10)
+                                    3, False, "violated", 1, 10)
         self.assertEqual((a, t), ("out", 8), why)
 
     def test_root_bottleneck_scales_even_without_deadline_miss(self):
         # A confident root PB is "sufficiently strong evidence" on its own.
         a, _, why = self.s.validate("out", 8, diag(prov=UNDER, conf=0.9, root=0.9),
-                                    3, False, False, 1, 10)
+                                    3, False, "met", 1, 10)
         self.assertEqual(a, "out", why)
 
     def test_under_provisioned_without_root_and_without_deadline_holds(self):
         a, _, why = self.s.validate("out", 8, diag(prov=UNDER, conf=0.9, root=0.0),
-                                    3, False, False, 1, 10)
+                                    3, False, "met", 1, 10)
         self.assertEqual(a, "hold", why)
 
     def test_low_confidence_holds(self):
         a, _, why = self.s.validate("out", 8, diag(prov=UNDER, conf=0.2),
-                                    3, False, True, 1, 10)
+                                    3, False, "violated", 1, 10)
         self.assertEqual(a, "hold", why)
 
     def test_ood_holds(self):
         a, _, why = self.s.validate("out", 8, diag(prov=UNDER, conf=0.9, ood=True),
-                                    3, False, True, 1, 10)
+                                    3, False, "violated", 1, 10)
         self.assertEqual(a, "hold", why)
 
     def test_scale_out_blocked_while_in_flight(self):
         a, _, why = self.s.validate("out", 8, diag(prov=UNDER), 
-                                    3, True, True, 1, 10)
+                                    3, True, "violated", 1, 10)
         self.assertEqual(a, "hold", why)
 
     def test_target_clamped_to_max(self):
-        a, t, _ = self.s.validate("out", 99, diag(prov=UNDER), 3, False, True, 1, 10)
+        a, t, _ = self.s.validate("out", 99, diag(prov=UNDER), 3, False, "violated", 1, 10)
         self.assertLessEqual(t, 10)
 
 
@@ -92,28 +92,28 @@ class TestSafetyScaleIn(unittest.TestCase):
 
     def test_over_provisioned_and_healthy_scales_in_incrementally(self):
         a, t, why = self.s.validate("in", 2, diag(prov=OVER, conf=0.9, root=0.0),
-                                    8, False, False, 1, 10)
+                                    8, False, "met", 1, 10)
         self.assertEqual(a, "in", why)
         self.assertEqual(t, 5, why)          # 8 - 3
 
     def test_deadline_miss_blocks_scale_in(self):
         a, _, why = self.s.validate("in", 2, diag(prov=OVER, conf=0.9, root=0.0),
-                                    8, False, True, 1, 10)
+                                    8, False, "violated", 1, 10)
         self.assertEqual(a, "hold", why)
 
     def test_scale_in_blocked_during_scale_out(self):
         a, _, why = self.s.validate("in", 2, diag(prov=OVER, conf=0.9),
-                                    8, True, False, 1, 10)
+                                    8, True, "met", 1, 10)
         self.assertEqual(a, "hold", why)
 
     def test_not_over_provisioned_holds(self):
         a, _, why = self.s.validate("in", 2, diag(prov=ADEQUATE, conf=0.9),
-                                    8, False, False, 1, 10)
+                                    8, False, "met", 1, 10)
         self.assertEqual(a, "hold", why)
 
     def test_low_confidence_holds(self):
         a, _, _ = self.s.validate("in", 2, diag(prov=OVER, conf=0.1),
-                                  8, False, False, 1, 10)
+                                  8, False, "met", 1, 10)
         self.assertEqual(a, "hold")
 
 

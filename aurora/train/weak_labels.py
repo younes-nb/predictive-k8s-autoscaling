@@ -104,7 +104,7 @@ def label_row(r, p_hi=0.90, p_vhi=0.97):
         return "memory"
     if lat_hot and not cpu_hot and hi("lat_p90"):
         # own latency high but not CPU-bound
-        if hi("cpu_limit_pct"):
+        if hi("cpu_request_utilization"):
             return "queue"
         return "shared_dependency"
     if net_hot:

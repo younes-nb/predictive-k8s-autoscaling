@@ -56,10 +56,6 @@ def queries(ns):
         MetricQuery("cpu_cores", "cpu",
                     f'sum by (container) (rate(container_cpu_usage_seconds_total'
                     f'{{{sel}}}[1m]))', "rate"),
-        MetricQuery("cpu_limit", "cpu",
-                    f'sum by (container) (kube_pod_container_resource_limits'
-                    f'{{namespace="{ns}",resource="cpu",container!="",container!="istio-proxy"}})',
-                    "gauge"),
         MetricQuery("cpu_throttled", "cpu",
                     f'sum by (container) (rate(container_cpu_cfs_throttled_periods_total'
                     f'{{{sel}}}[1m]))', "rate"),
@@ -126,7 +122,7 @@ def queries(ns):
 # --------------------------------------------------------------------------
 RAW_FEATURES = [
     "req_rate", "err_rate", "conn_fail", "lat_p50", "lat_p90", "lat_p99",
-    "cpu_cores", "cpu_limit", "cpu_throttled", "cpu_periods",
+    "cpu_cores", "cpu_throttled", "cpu_periods",
     "mem_working_set", "mem_limit", "mem_page_faults", "oom_events",
     "net_rx", "net_tx",
     "fs_read", "fs_write", "io_time",
@@ -135,7 +131,6 @@ RAW_FEATURES = [
 
 DERIVED_FEATURES = [
     "success_rate",          # 1 - err/req
-    "cpu_limit_pct",         # cpu_cores / cpu_limit
     "cpu_throttled_frac",     # throttled / periods
     "mem_limit_pct",         # working_set / mem_limit
     "cpu_per_request",       # cpu_cores / req_rate  (efficiency, scale-free)
@@ -145,9 +140,8 @@ DERIVED_FEATURES = [
     "cpu_per_replica",       # cpu_cores / replicas
     "req_per_replica",       # req_rate / replicas
     "completion_ratio",      # 1 - (err + conn_fail)/req  -> outage, not slowness
-    "cpu_req_pct",           # cpu_cores / cpu_request  (HPA convention)
+    "cpu_request_utilization",  # cpu_cores / cpu_request (HPA convention, may exceed 1.0)
     "mem_req_pct",           # working_set / mem_request
-    "cpu_headroom",          # 1 - cpu_limit_pct
     "mem_headroom",          # 1 - mem_limit_pct
     "inflight_per_replica",  # Little's law per replica -> concurrency proxy
 ]
@@ -192,7 +186,6 @@ def derive(f):
         bad = (err or 0.0) + (cf or 0.0)
         out["completion_ratio"] = max(0.0, min(1.0, 1.0 - bad / req))
 
-    out["cpu_limit_pct"] = div(g("cpu_cores"), g("cpu_limit"))
     out["mem_limit_pct"] = div(g("mem_working_set"), g("mem_limit"))
     # FRACTION in [0,1], not a percentage. The capacity estimator
     # consumes it directly; dividing by 100 here would understate
@@ -208,9 +201,8 @@ def derive(f):
     out["req_per_replica"] = div(req, rep)
     out["inflight_per_replica"] = div(out.get("inflight"), rep)
 
-    clp, mlp = out.get("cpu_limit_pct"), out.get("mem_limit_pct")
-    out["cpu_req_pct"] = div(g("cpu_cores"), g("cpu_request"))
+    mlp = out.get("mem_limit_pct")
+    out["cpu_request_utilization"] = div(g("cpu_cores"), g("cpu_request"))
     out["mem_req_pct"] = div(g("mem_working_set"), g("mem_request"))
-    out["cpu_headroom"] = None if clp is None else max(0.0, 1.0 - clp)
     out["mem_headroom"] = None if mlp is None else max(0.0, 1.0 - mlp)
     return out

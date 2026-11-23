@@ -18,11 +18,10 @@ from .groups import FEATURE_ORDER, derive
 
 # Names that are computed from other features rather than fetched.
 DERIVED_NAMES = {
-    "success_rate", "completion_ratio", "cpu_limit_pct", "mem_limit_pct",
-    "pod_age_s",
+    "success_rate", "completion_ratio", "mem_limit_pct", "pod_age_s",
     "cpu_throttled_frac", "cpu_per_request", "lat_ratio_p90_p50",
     "inflight", "inflight_per_replica", "pending", "cpu_per_replica",
-    "req_per_replica", "cpu_headroom", "mem_headroom",
+    "req_per_replica", "mem_headroom", "cpu_request_utilization",
 }
 
 RAW_NAMES = [f for f in FEATURE_ORDER if f not in DERIVED_NAMES]

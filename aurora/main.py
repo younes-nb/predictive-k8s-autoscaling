@@ -94,7 +94,7 @@ def main(argv=None):
     election = LeaderElection(cfg)
     suspended = 0
     if cfg.suspend_hpas and not cfg.dry_run and election.try_acquire():
-        suspended = len(scale.suspend_hpas())
+        suspended = len(scale.suspend_hpas(services))
         print(f"[aurora] suspended {suspended} HPAs")
 
     loop = AuroraLoop(cfg, bundle, scale, mimir,

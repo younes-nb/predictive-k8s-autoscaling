@@ -34,21 +34,26 @@ class SafetyLayer:
 
     # ------------------------------------------------------------------
     def validate(self, action, target, diag, committed, in_flight,
-                 deadline_missed, min_pods, max_pods):
+                 slo_state, min_pods, max_pods):
         """Return (action, target, reason)."""
         conf = diag.get("confidence", 0.0)
         ood = diag.get("ood", False)
         prov = diag.get("provisioning_idx", 3)
         signal = diag.get("binding_signal")
         root = diag.get("root_pb", 0.0)
-        addressable = diag.get("addressable_prob", 0.0)
 
         target = max(min_pods, min(max_pods, int(target)))
         confident = conf >= self.min_confidence and not ood
+        # Tri-state: "unknown" is NOT "met". Missing latency must never
+        # authorize a scale-in.
+        deadline_missed = (slo_state == "violated")
+        slo_unknown = (slo_state == "unknown")
 
         if action == "out":
             under = prov == UNDER
-            root_addr = root > 0.5 and addressable > 0.5
+            # No fabricated addressability: a confident root PB on a signal
+            # that replicas can relieve is the evidence.
+            root_addr = root > 0.5 and signal in ADDRESSABLE_SIGNALS
             if in_flight:
                 return "hold", committed, "scale-out in flight"
             if not confident:
@@ -66,6 +71,8 @@ class SafetyLayer:
                 return "hold", committed, f"low confidence ({conf:.2f}) or OOD"
             if prov != OVER:
                 return "hold", committed, f"not over-provisioned (prov={PROVISIONING_CLASSES[prov]})"
+            if slo_unknown:
+                return "hold", committed, "frontend SLO unknown"
             if deadline_missed:
                 return "hold", committed, "deadline currently missed"
             cur = committed
@@ -74,3 +81,20 @@ class SafetyLayer:
             return "in", target, f"incremental scale-in {cur}->{target}"
 
         return "hold", committed, "model chose hold"
+
+    # ------------------------------------------------------------------
+    @staticmethod
+    def enforce_direction(action, target, committed):
+        """The action label and the target count must agree.
+
+        A model that says "out" but returns a lower count is a contradiction;
+        the target is what the reconciler applies, so the label cannot be
+        trusted and the action degrades to hold.
+        """
+        if action == "out" and target <= committed:
+            return "hold", committed, f"direction mismatch (out, {committed}->{target})"
+        if action == "in" and target >= committed:
+            return "hold", committed, f"direction mismatch (in, {committed}->{target})"
+        if action == "hold" and target != committed:
+            return "hold", committed, "hold with a different target"
+        return action, target, "ok"

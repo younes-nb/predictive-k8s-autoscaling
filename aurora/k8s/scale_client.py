@@ -154,8 +154,12 @@ class ScaleClient:
             if exc.status == 409:
                 self.core.replace_namespaced_config_map(cm_name, self.cfg.namespace, body)
 
-    def suspend_hpas(self):
-        """Delete the namespace HPAs, preserving each complete object."""
+    def suspend_hpas(self, managed_targets=None):
+        """Suspend only the HPAs whose scaleTargetRef is a managed Deployment.
+
+        HPAs for StatefulSets, other applications or unmanaged workloads are
+        left untouched -- deleting them would break workloads AURORA does not
+        own."""
         if not self.cfg.suspend_hpas:
             return []
         items = []
@@ -166,8 +170,14 @@ class ScaleClient:
         except ApiException as exc:
             raise RuntimeError(
                 f"cannot list HPAs in {self.cfg.namespace!r}: {exc}") from exc
+        managed = set(managed_targets or [])
         for h in raw.get("items", []):
             meta = h.get("metadata", {})
+            ref = ((h.get("spec", {}).get("scaleTargetRef") or {}))
+            if ref.get("kind") not in (None, "Deployment"):
+                continue
+            if managed and ref.get("name") not in managed:
+                continue
             items.append({
                 "name": meta.get("name"),
                 "namespace": meta.get("namespace") or self.cfg.namespace,
@@ -224,10 +234,23 @@ class ScaleClient:
         if not self.cfg.restore_hpas:
             return 0
         items = self.load_saved_state()
+        n = 0
         for it in items:
             body = it.get("manifest")
             if not body:
                 continue
+            # idempotent: an HPA that already exists was restored by a
+            # previous call (or by the controller's own SIGTERM path)
+            try:
+                self.custom.get_namespaced_custom_object(
+                    group="autoscaling", version="v2",
+                    namespace=it["namespace"], plural="horizontalpodautoscalers",
+                    name=it["name"])
+                n += 1
+                continue
+            except ApiException as exc:
+                if getattr(exc, "status", None) != 404:
+                    raise
             body = json.loads(json.dumps(body))
             meta = body.setdefault("metadata", {})
             for k in ("resourceVersion", "uid", "creationTimestamp",

@@ -98,6 +98,30 @@ class AuroraLoop:
         return raws, span
 
     # ------------------------------------------------------------------
+    def _frontend_slo(self):
+        """User-facing deadline state: met / violated / unknown.
+
+        Measured at the frontend workload over a 1 min rate, at the configured
+        percentile. Missing data is "unknown", never "met" -- an unmeasured
+        SLO must not authorise a scale-in.
+        """
+        pct = self.cfg.slo_percentile / 100.0
+        expr = ('histogram_quantile(%s, sum(rate(istio_request_duration_milliseconds_bucket'
+                '{reporter="destination",destination_workload="%s"}[1m])) by (le))'
+                % (pct, self.cfg.front_svc))
+        try:
+            res = self.mimir.instant(expr)
+        except Exception:
+            return "unknown", None
+        if not res:
+            return "unknown", None
+        try:
+            val = float(res[0]["value"][1])
+        except (TypeError, ValueError, KeyError):
+            return "unknown", None
+        return ("violated" if val > self.cfg.slo_budget_ms else "met"), val
+
+    # ------------------------------------------------------------------
     def _diagnose(self, raws, now):
         import torch
         span = Span("diagnose")
@@ -145,13 +169,11 @@ class AuroraLoop:
         acc = self.lifecycle.accounting(svc, spec, ready, pending, now)
         self.lifecycle.settle(svc, now, ready)
 
-        lat = raw.get("lat_p90")
-        deadline_missed = lat is not None and lat > self.cfg.slo_budget_ms
+        slo_state, slo_value = self._frontend_slo()
 
         d = {
             "service": svc, "confidence": diag["confidence"], "ood": diag["ood"],
-            "root_pb": diag["root_pb"],
-            "addressable_prob": 0.5 if diag["root_pb"] > 0.5 else diag["affected"],
+            "root_pb": diag["root_pb"], "affected": diag["affected"],
             "provisioning_idx": diag["provisioning_idx"],
             "binding_signal": "latency" if diag["affected"] > 0.5 else "cpu",
         }
@@ -167,11 +189,16 @@ class AuroraLoop:
             x_in, self.cfg.min_pod, self.cfg.max_pod)
         action, target, reason = self.safety.validate(
             action, target, d, acc["committed"],
-            self.lifecycle.pending_scale_out(svc), deadline_missed,
+            self.lifecycle.pending_scale_out(svc), slo_state,
             self.cfg.min_pod, self.cfg.max_pod)
+        action, target, reason2 = self.safety.enforce_direction(
+            action, target, acc["committed"])
+        if reason2 != "ok":
+            reason = f"{reason}; {reason2}"
         d["reason"] = reason
         d["target"] = target
-        d["deadline_missed"] = deadline_missed
+        d["slo_state"] = slo_state
+        d["slo_value_ms"] = slo_value
         d["committed"] = acc["committed"]
         return d, acc
 
@@ -192,7 +219,8 @@ class AuroraLoop:
                         continue
                     s3 = Span("decide"); s3.stop(); spans.append(s3)
                     if d["target"] != d["committed"] and not self.cfg.dry_run:
-                        if self.election is None or self.election.renew():
+                        if self.election is not None and self.election.is_leader \
+                                and self.election.renew():
                             self.scale.set_scale(svc, d["target"])
                             self.lifecycle.record(svc, now, d["committed"],
                                                   d["target"], d["reason"])
