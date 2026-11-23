@@ -42,7 +42,7 @@ class Span:
 
 class AuroraLoop:
     def __init__(self, cfg, bundle, scale, mimir, model_version=None,
-                 services=None):
+                 services=None, bounds=None, norm=None):
         self.cfg = cfg
         self.bundle = bundle
         self.diag = bundle["diagnosis"]
@@ -55,17 +55,26 @@ class AuroraLoop:
         self.edges = EdgeClient(cfg)
 
         self.norm = RunningNorm()
+        if norm and norm.get("mean"):
+            self.norm.set_prior(dict(zip(FEATURE_ORDER, norm["mean"])),
+                                dict(zip(FEATURE_ORDER, norm["var"])))
+            self.norm.freeze()
         self.windows = WindowManager(cfg, self.norm)
         self.lifecycle = LifecycleReconciler(cfg)
         self.ledger = Ledger(cfg.ledger_path)
         self.safety = SafetyLayer(cfg)
         self.services = list(services or [])
+        self.bounds = dict(bounds or {})
         self.timings = []
         self.cycles = 0
         self.errors = 0
         self.actions = 0
         self.election = None
         self.edge_hist = {}
+        self.pending_actions = []
+        self.ood_centroid = bundle.get("ood_centroid")
+        self.ood_threshold = bundle.get("ood_threshold")
+        self.last_scale_in = {}
 
     # ------------------------------------------------------------------
     def _collect(self, now):
@@ -126,7 +135,9 @@ class AuroraLoop:
         import torch
         span = Span("diagnose")
         svcs = self.services
-        idx = {s: i for i, s in enumerate(self.services_list)}
+        # Indices are into the *runtime* node list (only managed services), not
+        # the bundle's full service vocabulary.
+        idx = {s: i for i, s in enumerate(svcs)}
         n = len(svcs)
         x = torch.zeros(n, self.cfg.history_len, len(FEATURE_ORDER))
         m = torch.zeros(n, self.cfg.history_len, len(FEATURE_ORDER))
@@ -135,26 +146,56 @@ class AuroraLoop:
             t = min(b.n_steps, self.cfg.history_len)
             x[i, :t] = torch.tensor(b.matrix, dtype=torch.float32)
             m[i, :t] = torch.tensor(b.mask, dtype=torch.float32)
-        adj = torch.zeros(n, n)
-        for i, si in enumerate(svcs):
-            for j, sj in enumerate(svcs):
-                a, b = idx.get(si), idx.get(sj)
-                if a is not None and b is not None and self.adj[a][b] > 0:
-                    adj[i, j] = 1.0
+        # Sparse edge list: only observed caller->callee pairs, with their
+        # latest 5-feature vector [rate, err, p50, p90, p99].
+        import math
+        src, dst, feats = [], [], []
+        for si, sj in self.edge_hist:
+            a, b = idx.get(si), idx.get(sj)
+            if a is None or b is None:
+                continue
+            e = self.edge_hist[(si, sj)]
+            latest = {k: e[k][-1][1] for k in ("rate", "err", "p50", "p90", "p99")
+                      if e.get(k)}
+            if not latest:
+                continue
+            src.append(a); dst.append(b)
+            feats.append([math.log1p(max(latest.get(k, 0.0), 0.0))
+                          for k in ("rate", "err", "p50", "p90", "p99")])
+        edge_index = torch.tensor([src, dst], dtype=torch.long) if src else None
+        edge_feat = torch.tensor(feats, dtype=torch.float32) if feats else None
         with torch.no_grad():
-            out = self.diag(x, m, adj, torch.zeros(n, n, self.diag.d_model),
+            out = self.diag(x, m, edge_index, edge_feat,
                             m.any(-1).any(-1).float())
         span.stop()
-        return {s: {
-            "root_pb": float(out["root_pb"][i]),
-            "affected": float(out["affected"][i]),
-            "degradation": out["degradation"][i].tolist(),
-            "provisioning": out["provisioning"][i].tolist(),
-            "provisioning_idx": int(out["provisioning"][i].argmax()),
-            "confidence": float(out["provisioning"][i].max()),
-            "ood": False,
-            "embedding": out["node_embedding"][i].tolist(),
-        } for i, s in enumerate(svcs)}, span
+        import math
+        res = {}
+        for i, s in enumerate(svcs):
+            # .tolist() rather than .numpy(): the container's torch is built
+            # against NumPy 1.x and the image ships 2.x, so .numpy() raises.
+            emb = out["node_embedding"][i].tolist()
+            ood = False
+            if self.ood_centroid is not None and self.ood_threshold:
+                d = math.sqrt(sum((x - c) ** 2 for x, c in
+                                  zip(emb, self.ood_centroid)))
+                ood = d > self.ood_threshold
+            rp = float(out["root_pb"][i]); af = float(out["affected"][i])
+            deg = out["degradation"][i].tolist()
+            prov = out["provisioning"][i].tolist()
+            # C17: per-output confidence, combined conservatively
+            conf = min(max(rp, 1.0 - rp), max(af, 1.0 - af),
+                       max(prov) if prov else 0.0, max(deg) if deg else 0.0)
+            res[s] = {
+                "root_pb": rp,
+                "affected": af,
+                "degradation": deg,
+                "provisioning": prov,
+                "provisioning_idx": max(range(len(prov)), key=lambda j: prov[j]),
+                "confidence": conf,
+                "ood": ood,
+                "embedding": emb,
+            }
+        return res, span
 
     # ------------------------------------------------------------------
     def _decide_one(self, svc, diag, raw, now):
@@ -187,10 +228,25 @@ class AuroraLoop:
                                 1.0, 1.0]], dtype=torch.float32)
         action, target, _ = self.replica.decide(
             x_in, self.cfg.min_pod, self.cfg.max_pod)
+        min_pods, max_pods = self.bounds.get(
+            svc, (self.cfg.min_pod, self.cfg.max_pod))
         action, target, reason = self.safety.validate(
             action, target, d, acc["committed"],
             self.lifecycle.pending_scale_out(svc), slo_state,
-            self.cfg.min_pod, self.cfg.max_pod)
+            min_pods, max_pods)
+        # L05: lifecycle reconcile before anything is applied
+        target, why = self.lifecycle.reconcile(svc, target, acc,
+                                               min_pods, max_pods)
+        if why.startswith("hold"):
+            action, reason = "hold", f"{reason}; {why}"
+        # C18: adaptive scale-in stabilization. A removal is only allowed after
+        # the service has been stable for the configured window; otherwise hold.
+        if action == "in":
+            since = now - self.last_scale_in.get(svc, 0.0)
+            if 0 < since < self.cfg.scale_in_stabilization_s:
+                action, target, reason = "hold", acc["committed"], (
+                    f"scale-in stabilization ({since:.0f}s < "
+                    f"{self.cfg.scale_in_stabilization_s}s)")
         action, target, reason2 = self.safety.enforce_direction(
             action, target, acc["committed"])
         if reason2 != "ok":
@@ -228,6 +284,9 @@ class AuroraLoop:
                                                       {"replicas": d["committed"]},
                                                       type("D", (), d)(), {})
                             self.actions += 1
+                            if d["target"] < d["committed"]:
+                                self.last_scale_in[svc] = now
+                            self.pending_actions.append((svc, now, d["target"]))
                         print(f"[aurora] {svc}: {d['target']} ({d['reason']})",
                               flush=True)
                     elif self.cycles < 2:
@@ -239,6 +298,19 @@ class AuroraLoop:
         except Exception as exc:                            # noqa: BLE001
             self.errors += 1
             print(f"[aurora] cycle error: {type(exc).__name__}: {exc}", flush=True)
+        # F02: settle outcomes for actions whose pods are ready and enough
+        # post-action time has passed. Unsettled actions are never training data.
+        for pend in list(self.pending_actions):
+            psvc, pts, ptgt = pend
+            try:
+                ready = self.scale.pod_counts(psvc)[0]
+            except Exception:
+                continue
+            if now - pts >= 60 and ready >= ptgt:
+                self.ledger.settle(psvc, pts, {"ready": ready,
+                                               "target": ptgt})
+                self.pending_actions.remove(pend)
+
         total = (time.perf_counter() - cstart) * 1000.0
         self.timings.append({"cycle": self.cycles, "total_ms": total,
                              "stages": {s.name: s.ms for s in spans}})

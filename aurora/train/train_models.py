@@ -90,7 +90,22 @@ def main():
             targets.append(labs[i + a.t_len - 1] if labs else "unknown")
     print(f"[train] sequences={len(seqs)}")
 
-    enc = GraphDiagnosisModel(len(FEATURE_ORDER), n_edge_features=1,
+    # Frozen normalisation: computed on the training corpus and shipped in the
+    # bundle, so inference uses exactly the representation the encoder saw.
+    allx = np.stack([s[1] for s in seqs])
+    allm = np.stack([s[2] for s in seqs])
+    nfeat = allx.shape[-1]
+    nmean = np.zeros(nfeat, dtype=np.float64)
+    nvar = np.ones(nfeat, dtype=np.float64)
+    for f in range(nfeat):
+        vals = allx[..., f][allm[..., f] > 0]
+        if vals.size:
+            nmean[f] = float(vals.mean())
+            nvar[f] = max(float(vals.var()), 1e-6)
+    nstd = np.sqrt(nvar)
+    print(f"[train] frozen norm computed over {allx.shape[0]} windows")
+
+    enc = GraphDiagnosisModel(len(FEATURE_ORDER), n_edge_features=5,
                               d_model=a.d_model)
     opt = torch.optim.AdamW(enc.parameters(), lr=1e-3, weight_decay=1e-4)
 
@@ -104,8 +119,8 @@ def main():
             m = torch.tensor(np.stack([b[2] for b in batch]), dtype=torch.float32)
             adj_b = batch_graph(adj, idx, svcs)
             valid = m.any(-1).any(-1).float()
-            out = enc(x[:, -1:, :], m[:, -1:, :], adj_b,
-                      torch.zeros(len(svcs), len(svcs), a.d_model), valid)
+            xn = (x - torch.tensor(nmean, dtype=torch.float32)) / torch.tensor(nstd, dtype=torch.float32)
+            out = enc(xn, m, None, None, valid)
 
             y_root = torch.tensor([1.0 if l in RESOURCE_CLASSES else 0.0 for l in lab])
             y_aff = torch.tensor([1.0 if l == "shared_dependency" else 0.0 for l in lab])
@@ -126,6 +141,7 @@ def main():
 
     # ---- replica-change model -------------------------------------------
     rep = ReplicaChangeModel(a.d_model, n_degradation=len(DEGRADATION_CLASSES))
+    emb_all = []
     ropt = torch.optim.AdamW(rep.parameters(), lr=1e-3, weight_decay=1e-4)
     for epoch in range(a.epochs):
         perm = np.random.permutation(len(seqs)); tot = nb = 0
@@ -137,13 +153,13 @@ def main():
             m = torch.tensor(np.stack([b[2] for b in batch]), dtype=torch.float32)
             adj_b = batch_graph(adj, idx, svcs)
             with torch.no_grad():
-                out = enc(x[:, -1:, :], m[:, -1:, :], adj_b,
-                          torch.zeros(len(svcs), len(svcs), a.d_model),
-                          m.any(-1).any(-1).float())
+                xn = (x - torch.tensor(nmean, dtype=torch.float32)) / torch.tensor(nstd, dtype=torch.float32)
+                out = enc(xn, m, None, None, m.any(-1).any(-1).float())
             y_act = torch.tensor([
                 ACTION_INDEX["out"] if l in RESOURCE_CLASSES
                 else ACTION_INDEX["in"] if l == "over_provisioned"
                 else ACTION_INDEX["hold"] for l in lab])
+            emb_all.append(out["node_embedding"].numpy())
             x_in = torch.cat([out["node_embedding"],
                               out["root_pb"].unsqueeze(-1),
                               out["affected"].unsqueeze(-1),
@@ -158,11 +174,24 @@ def main():
             ropt.step(); tot += float(loss); nb += 1
         print(f"[train] replica epoch {epoch+1}/{a.epochs} loss={tot/max(nb,1):.4f}")
 
+    # ---- OOD calibration: distance of training embeddings from their centroid
+    E = np.concatenate(emb_all, axis=0)
+    centroid = E.mean(axis=0)
+    dist = np.sqrt(((E - centroid) ** 2).sum(axis=1))
+    ood_threshold = float(dist.mean() + 3.0 * dist.std())
+    print(f"[train] ood threshold={ood_threshold:.3f} (mean={dist.mean():.3f} "
+          f"std={dist.std():.3f}, n={len(E)})")
+
     os.makedirs(a.out, exist_ok=True)
     torch.save({"diagnosis": enc.state_dict(), "replica": rep.state_dict(),
                 "d_model": a.d_model, "n_node_features": len(FEATURE_ORDER),
                 "n_degradation": len(DEGRADATION_CLASSES),
-                "edges": adj.tolist(), "services": services},
+                "edges": adj.tolist(), "services": services,
+                "norm": {"mean": nmean.tolist(), "var": nvar.tolist()},
+                "ood_centroid": centroid.tolist(),
+                "ood_threshold": ood_threshold,
+                "ood_centroid": centroid.tolist(),
+                "ood_threshold": ood_threshold},
                os.path.join(a.out, "bundle.pt"))
     print(f"[train] bundle -> {a.out}/bundle.pt")
 

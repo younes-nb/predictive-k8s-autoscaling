@@ -45,7 +45,7 @@ def load_bundle(cfg):
     if "diagnosis" not in b or "replica" not in b:
         raise SystemExit("bundle is missing model weights")
 
-    diag = GraphDiagnosisModel(b["n_node_features"], n_edge_features=1,
+    diag = GraphDiagnosisModel(b["n_node_features"], n_edge_features=5,
                                d_model=b["d_model"],
                                n_degradation=b["n_degradation"])
     rep = ReplicaChangeModel(b["d_model"],
@@ -58,7 +58,7 @@ def load_bundle(cfg):
     print(f"[aurora] bundle loaded: services={len(b['services'])} "
           f"edges={int((adj > 0).sum())} features={b['n_node_features']}")
     return {"diagnosis": diag, "replica": rep, "services": b["services"],
-            "adj": adj}
+            "adj": adj, "norm": b.get("norm")}
 
 
 def main(argv=None):
@@ -91,6 +91,20 @@ def main(argv=None):
     services = [s for s in scale.scalable_services() if s != "aurora"]
     print(f"[aurora] managed services: {len(services)}")
 
+    # Per-service operational bounds, read from the live HPAs before they are
+    # suspended. AURORA must never exceed a deployment's own ceiling.
+    bounds = {}
+    try:
+        for h in scale.autoscaling.list_namespaced_horizontal_pod_autoscaler(
+                cfg.namespace).items:
+            ref = h.spec.scale_target_ref
+            if ref.kind == "Deployment" and ref.name in services:
+                bounds[ref.name] = (int(h.spec.min_replicas or 1),
+                                    int(h.spec.max_replicas or 1))
+    except Exception:
+        pass
+    print(f"[aurora] per-service bounds captured: {len(bounds)}")
+
     election = LeaderElection(cfg)
     suspended = 0
     if cfg.suspend_hpas and not cfg.dry_run and election.try_acquire():
@@ -98,7 +112,9 @@ def main(argv=None):
         print(f"[aurora] suspended {suspended} HPAs")
 
     loop = AuroraLoop(cfg, bundle, scale, mimir,
-                      model_version="bundle", services=services)
+                      model_version="bundle", services=services, bounds=bounds,
+                      norm=bundle.get("norm"))
+    print(f"[aurora] per-service bounds captured: {len(bounds)}")
     loop.election = election if election.is_leader else None
 
     def _shutdown(signum, frame):

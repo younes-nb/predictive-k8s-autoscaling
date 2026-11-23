@@ -24,11 +24,11 @@ FORECAST_KEYS = ("forecast", "future", "horizon", "pred_cpu", "pred_mem",
 
 class TestNoForecastOutputs(unittest.TestCase):
     def test_graph_model_output_keys(self):
-        m = GraphDiagnosisModel(len(FEATURE_ORDER), n_edge_features=1, d_model=8)
+        m = GraphDiagnosisModel(len(FEATURE_ORDER), n_edge_features=5, d_model=8)
         n, t = 3, 24
         out = m(torch.randn(n, t, len(FEATURE_ORDER)),
-                torch.ones(n, t, len(FEATURE_ORDER)), torch.zeros(n, n),
-                torch.zeros(n, n, 8), torch.ones(n))
+                torch.ones(n, t, len(FEATURE_ORDER)), None, None,
+                torch.ones(n))
         for k in out:
             for bad in FORECAST_KEYS:
                 self.assertNotIn(bad, k.lower(), k)

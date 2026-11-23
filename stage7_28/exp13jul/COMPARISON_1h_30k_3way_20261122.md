@@ -36,7 +36,7 @@ Generated 2026-11-22. Window = final 30 min of each 60-min run (t+30 → t+60 of
 | HTTP requests / s | **857.3** | 247.0 | 173.8 |
 | Outage — unlabelled ticks (%) | 23.1 % | 3.6 % | **0.0 %** |
 | Outage-aware violation rate (%) | **26.7 %** | 35.3 % | 100.0 % |
-| CPU — mean / peak (cores) | 55.8 / 64.0 | 40.5 / 45.2 | **29.6** / 47.1 |
+| CPU, train-ticket — mean / peak (cores) | **42.96** / 49.89 | 31.04 / 34.67 | 21.08 / 37.55 |
 | CPU throttled (% CFS) | 22.3 % | 17.1 % | **10.4 %** |
 | Container restarts (delta) | 34 | **0** | **0** |
 
@@ -57,6 +57,20 @@ Its one genuine win is **0.0% outage** — it answered every request (96.8% isti
 success, 8.2% k6 client failure) rather than shedding. That is the same
 trade-off PBScaler made, taken further: it protected availability and paid for it
 in latency.
+
+## 2b. Metric verification (2026-11-22)
+
+Re-derived before the root-cause analysis; two errors in the first pass:
+
+- **CPU was cluster-wide, not train-ticket.** The query omitted
+  `namespace="train-ticket"`. Corrected values are in the table above
+  (42.96 / 31.04 / 21.08). The ranking is unchanged.
+- **KSM is duplicated in the 21-Nov data** (128 series for 64 deployments), so a
+  naive `sum()` doubles HPA and PBScaler replica counts. The table uses
+  `max by (deployment)` and is unaffected; any future query on that window must
+  dedupe.
+
+AURORA's 100% is real: 720/720 ticks above 200 ms (min 560 ms).
 
 ## 3. Caveats
 

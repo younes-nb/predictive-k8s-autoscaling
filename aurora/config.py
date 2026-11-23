@@ -99,6 +99,7 @@ class Config:
         # ---- behaviour ----------------------------------------------------
         self.dry_run = _bool("AURORA_DRY_RUN", False)
         self.seed = _int("AURORA_SEED", 20)
+        self.scale_in_stabilization_s = _int("AURORA_SCALE_IN_STABILIZATION_S", 300)
 
     def __repr__(self):
         return (f"Config(ns={self.namespace} "

@@ -119,17 +119,17 @@ class TestSafetyScaleIn(unittest.TestCase):
 
 class TestGraphDiagnosisModel(unittest.TestCase):
     def setUp(self):
-        self.m = GraphDiagnosisModel(len(FEATURE_ORDER), n_edge_features=1,
+        self.m = GraphDiagnosisModel(len(FEATURE_ORDER), n_edge_features=5,
                                      d_model=16)
         self.m.eval()
 
     def test_output_shapes(self):
         n, t = 5, 24
-        adj = torch.zeros(n, n)
-        adj[1, 0] = 1.0; adj[2, 1] = 1.0          # 2 -> 1 -> 0
+        edges = torch.tensor([[1, 2], [0, 1]])      # 2 -> 0, 1 -> ... (sparse)
         out = self.m(torch.randn(n, t, len(FEATURE_ORDER)),
-                     torch.ones(n, t, len(FEATURE_ORDER)), adj,
-                     torch.zeros(n, n, 16), torch.ones(n))
+                     torch.ones(n, t, len(FEATURE_ORDER)),
+                     torch.tensor([[0, 1], [1, 2]]), torch.zeros(2, 5),
+                     torch.ones(n))
         self.assertEqual(tuple(out["root_pb"].shape), (n,))
         self.assertEqual(tuple(out["affected"].shape), (n,))
         self.assertEqual(tuple(out["degradation"].shape), (n, len(DEGRADATION_CLASSES)))
@@ -139,10 +139,12 @@ class TestGraphDiagnosisModel(unittest.TestCase):
         n, t = 3, 24
         x = torch.randn(n, t, len(FEATURE_ORDER))
         m = torch.ones(n, t, len(FEATURE_ORDER))
-        a1 = torch.zeros(n, n); a1[1, 0] = 1.0     # 1 -> 0
-        a2 = torch.zeros(n, n); a2[0, 1] = 1.0     # 0 -> 1
-        o1 = self.m(x, m, a1, torch.zeros(n, n, 16), torch.ones(n))
-        o2 = self.m(x, m, a2, torch.zeros(n, n, 16), torch.ones(n))
+        # directed edges only: 1 -> 0 versus 0 -> 1
+        e1 = torch.tensor([[1], [0]])
+        e2 = torch.tensor([[0], [1]])
+        f = torch.ones(1, 5)
+        o1 = self.m(x, m, e1, f, torch.ones(n))
+        o2 = self.m(x, m, e2, f, torch.ones(n))
         self.assertFalse(torch.allclose(o1["node_embedding"], o2["node_embedding"]),
                          "direction must matter")
 
@@ -150,7 +152,7 @@ class TestGraphDiagnosisModel(unittest.TestCase):
         n, t = 2, 24
         x = torch.randn(n, t, len(FEATURE_ORDER))
         m = torch.zeros(n, t, len(FEATURE_ORDER))
-        out = self.m(x, m, torch.zeros(n, n), torch.zeros(n, n, 16), torch.zeros(n))
+        out = self.m(x, m, None, None, torch.zeros(n))
         self.assertTrue(torch.isfinite(out["node_embedding"]).all())
 
 

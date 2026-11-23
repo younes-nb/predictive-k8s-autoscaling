@@ -60,14 +60,35 @@ class ScaleClient:
                     names.add(ref.name)
         except ApiException:
             pass
-        if not names:
-            # Do NOT silently fall back to every Deployment: an RBAC or API
-            # error would silently expand the managed set. Fail closed and let
-            # the caller decide.
-            raise RuntimeError(
-                "could not list HPAs in namespace "
-                f"{self.cfg.namespace!r}; refusing to guess the managed set")
-        return sorted(names)
+        if names:
+            return sorted(names)
+        # The HPAs are normally absent while AURORA is running (it suspends
+        # them), so a restart must recover the managed set from the same
+        # ConfigMap it uses for HPA state -- not guess it.
+        try:
+            if os.path.exists(self.cfg.hpa_state_file):
+                disk = json.load(open(self.cfg.hpa_state_file))
+                rec = {i.get("target") for i in disk if i.get("target")}
+                if rec:
+                    print(f"[aurora] managed set recovered from disk: {len(rec)}")
+                    return sorted(rec)
+        except Exception:
+            pass
+        try:
+            cm = self.core.read_namespaced_config_map(
+                "aurora-hpa-state", self.cfg.namespace)
+            saved = json.loads((cm.data or {}).get("hpa_state.json", "null"))
+            if saved:
+                recovered = {i.get("target") for i in saved if i.get("target")}
+                if recovered:
+                    print(f"[aurora] managed set recovered from ConfigMap: "
+                          f"{len(recovered)}")
+                    return sorted(recovered)
+        except Exception:
+            pass
+        raise RuntimeError(
+            "no HPAs and no saved state in namespace "
+            f"{self.cfg.namespace!r}; refusing to guess the managed set")
 
     def get_scale(self, service):
         r = self.apps.read_namespaced_deployment_scale(service, self.cfg.namespace)
@@ -136,6 +157,12 @@ class ScaleClient:
     # HPA suspend / restore
     # ------------------------------------------------------------------
     def _save_hpa_state(self, items):
+        # Never overwrite a good saved state with an empty one: a restart that
+        # finds no HPAs (because a previous run suspended them) must not erase
+    # the record of what to restore.
+        if not items:
+            print("[aurora] no HPAs to save; keeping the existing state")
+            return
         os.makedirs(os.path.dirname(self.cfg.hpa_state_file) or ".", exist_ok=True)
         tmp = self.cfg.hpa_state_file + ".tmp"
         with open(tmp, "w") as fh:
@@ -178,11 +205,14 @@ class ScaleClient:
                 continue
             if managed and ref.get("name") not in managed:
                 continue
+            spec = h.get("spec", {}) or {}
             items.append({
                 "name": meta.get("name"),
                 "namespace": meta.get("namespace") or self.cfg.namespace,
-                "target": ((h.get("spec", {}).get("scaleTargetRef") or {})
-                           .get("name")),
+                "target": ((spec.get("scaleTargetRef") or {}).get("name")),
+                # original operational bounds -- AURORA must not exceed these
+                "min": spec.get("minReplicas"),
+                "max": spec.get("maxReplicas"),
                 # the COMPLETE object: apiVersion, spec (metrics, targets,
                 # behavior), labels and annotations
                 "manifest": h,

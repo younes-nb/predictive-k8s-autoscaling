@@ -13,6 +13,35 @@ import os
 import time
 
 
+def _get(d, key, default=None):
+    """Read a field from either a dict or an object."""
+    if isinstance(d, dict):
+        return d.get(key, default)
+    return getattr(d, key, default)
+
+
+def _decision_record(decision):
+    """Normalise whatever the caller passes (dict or object) into a record."""
+    basis = _get(decision, "basis", {}) or {}
+    return {
+        "from_replicas": _get(decision, "from_replicas",
+                              _get(decision, "committed")),
+        "to_replicas": _get(decision, "replicas", _get(decision, "target")),
+        "action": _get(decision, "action"),
+        "reason": _get(decision, "reason"),
+        "utility": _get(decision, "utility"),
+        "bottleneck": _get(decision, "bottleneck"),
+        "root_pb": _get(decision, "root_pb"),
+        "slo_state": _get(decision, "slo_state"),
+        "slo_value_ms": _get(decision, "slo_value_ms"),
+        "confidence": _get(decision, "confidence"),
+        "ood": _get(decision, "ood"),
+        "capacity": basis.get("capacity") if isinstance(basis, dict) else None,
+        "sigma": basis.get("sigma") if isinstance(basis, dict) else None,
+        "signal": basis.get("signal") if isinstance(basis, dict) else None,
+    }
+
+
 class Ledger:
     def __init__(self, path):
         self.path = path
@@ -50,20 +79,7 @@ class Ledger:
             "service": service,
             "model_version": model_version,
             "before": before,
-            "decision": {
-                "from_replicas": state.get("replicas"),
-                "to_replicas": decision.replicas,
-                "action": decision.action,
-                "reason": decision.reason,
-                "utility": decision.utility,
-                "bottleneck": decision.bottleneck,
-                "addressable_prob": decision.addressable_prob,
-                "confidence": decision.confidence,
-                "ood": decision.ood,
-                "capacity": decision.basis.get("capacity"),
-                "capacity_sigma": decision.basis.get("sigma"),
-                "p_serves_current": decision.basis.get("p_serves_current"),
-            },
+            "decision": _decision_record(decision),
             "outcome": None,
         }
         self._append(rec)

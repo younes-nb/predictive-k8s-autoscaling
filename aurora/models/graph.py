@@ -64,24 +64,56 @@ class GraphDiagnosisModel(nn.Module):
         return self.norm(s)
 
     def encode_edges(self, x, mask=None):
-        h, _ = self.edge_rnn(self.edge_proj(x))
-        h = h.mean(dim=1)
+        """(N, N, T, FE) -> (N, N, D).
+
+        The GRU needs a 3-D (batch, time, feature) input, so the two graph
+        axes are folded into the batch dimension and restored afterwards.
+        """
+        n, m_, t, f = x.shape
+        h = self.edge_proj(x.reshape(n * m_, t, f))
+        h, _ = self.edge_rnn(h)
+        h = h.mean(dim=1)                       # (N*N, D)
         if mask is not None:
-            m = mask.any(dim=-1).to(h.dtype).unsqueeze(-1)
-            h = (h * m).sum(1) / m.sum(1).clamp_min(1.0)
-        return h
+            mk = mask.any(dim=-1).to(h.dtype).reshape(n * m_, t, 1)
+            w = mk.sum(1)
+            h = (h * mk).sum(1) / w.clamp_min(1.0)
+        return h.reshape(n, m_, -1)
 
     # ------------------------------------------------------------------
-    def forward(self, node_x, node_mask, adj, edge_h, node_valid):
-        """node_x (N,T,F); adj (N,N) dense directed; edge_h (N,N,D)."""
+    def encode_edges_sparse(self, feat):
+        """(E, FE) -> (E, D): one embedding per observed invocation edge."""
+        return self.edge_proj(feat)
+
+    def forward(self, node_x, node_mask, edge_index=None, edge_attr=None,
+                node_valid=None):
+        """node_x (N,T,F); adj (N,N) dense directed.
+
+        ``edge_x`` is (N,N,T,FE) observed edge telemetry; when present it is
+        encoded and folded into message passing, so a *slow* edge contributes
+        evidence rather than a bare dependency edge.
+        """
         h = self.encode_nodes(node_x, node_mask)
+        n = h.shape[0]
+        if node_valid is None:
+            node_valid = node_mask.any(dim=-1).any(dim=-1).float()
+        if edge_index is not None and edge_attr is not None and edge_attr.numel():
+            e = self.encode_edges_sparse(edge_attr.to(h.dtype))   # (E, D)
+            src, dst = edge_index[0], edge_index[1]
+        else:
+            e = None
         # Two directed message-passing layers. ``adj[j, i] = 1`` means j -> i.
+        # The edge embedding modulates each message, so edge latency/errors
+        # propagate toward the caller.
         for _ in range(2):
-            # incoming: aggregate over predecessors j -> i
-            agg_in = torch.einsum("ji,jd->id", adj, h)
+            # sparse aggregation over observed edges only: a dense N*N tensor
+            # would be 1764x larger and was enough to OOM the 512 MiB limit
+            agg_in = torch.zeros_like(h)
+            agg_out = torch.zeros_like(h)
+            if e is not None:
+                msg = h[src] + e
+                agg_in = agg_in.index_add(0, dst, msg)
+                agg_out = agg_out.index_add(0, src, h[dst] + e)
             m_in = self.msg_in(torch.cat([h, self.norm(agg_in)], dim=-1))
-            # outgoing: aggregate over successors i -> j
-            agg_out = torch.einsum("ij,jd->id", adj, h)
             m_out = self.msg_out(torch.cat([h, self.norm(agg_out)], dim=-1))
             h = self.norm(h + F.gelu(m_in) + F.gelu(m_out)) * node_valid.unsqueeze(-1)
 
