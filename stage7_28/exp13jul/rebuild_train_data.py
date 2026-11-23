@@ -139,6 +139,9 @@ def stateless_svcs_from_cluster(namespace=NS):
 def collect_window(args, svcs, t0, duration, interval, slo, front, gateway):
     ticks = [t0 + k * interval for k in range(duration // interval)]
     start, end = t0, t0 + duration - 1
+    if not svcs:
+        raise SystemExit("no services discovered -- refusing to write an "
+                         "unlabelled dataset (check kubectl/PATH/KUBECONFIG)")
     print(f"window {datetime.fromtimestamp(t0, tz=timezone.utc).isoformat()} "
           f".. +{duration}s ({len(ticks)} ticks @ {interval}s)")
 

@@ -793,14 +793,36 @@ else
   log "phase 5b: post-hoc dataset collection (waiting 180 s for Alloy flush)"
   sleep 180
   CSTART=$((t_traffic + WARMUP_S))
-  if "$PY" "$TOOLS/rebuild_train_data.py" \
-       --start "$CSTART" --duration "$COLLECT_DUR" --interval 5 \
-       --out "$DS" --workload "$MCR_SLICE_LOCAL" \
-       > "$RUN_DIR/rebuild_collection.log" 2>&1; then
-    log "post-hoc collection OK -> $DS"
-  else
-    log "FATAL: post-hoc collection failed (see rebuild_collection.log)"
-    status_reason "post-hoc dataset collection failed"
+  # The collection runs minutes after k6 ends, while Alloy is still flushing
+  # and Mimir is compacting. A single attempt can come back with the tail of the
+  # window missing (measured 2026-11-22: 64% coverage, last 21 min NaN, while
+  # Mimir had the data and an immediate re-run gave 100%). Retry on low coverage
+# instead of accepting a partial dataset as if it were complete.
+  COVER_MIN=${AURORA_COVER_MIN:-95}
+  COVER_TRIES=${COLLECT_RETRIES:-3}
+  attempt=1
+  while [ "$attempt" -le "$COVER_TRIES" ]; do
+    if "$PY" "$TOOLS/rebuild_train_data.py" \
+         --start "$CSTART" --duration "$COLLECT_DUR" --interval 5 \
+         --out "$DS" --workload "$MCR_SLICE_LOCAL" \
+         > "$RUN_DIR/rebuild_collection.log" 2>&1; then
+      COV=$("$PY" -c "import json;print(json.load(open('$DS/meta.json')).get('coverage_pct') or 0)" 2>/dev/null || echo 0)
+      log "post-hoc collection attempt $attempt: coverage=${COV}%"
+      if awk "BEGIN{exit !($COV >= $COVER_MIN)}"; then
+        log "post-hoc collection OK -> $DS"
+        break
+      fi
+      log "coverage ${COV}% < ${COVER_MIN}% -- retrying in 300 s (Mimir may still be ingesting)"
+    else
+      log "post-hoc collection attempt $attempt failed (see rebuild_collection.log)"
+    fi
+    attempt=$((attempt + 1))
+    [ "$attempt" -le "$COVER_TRIES" ] && sleep 300
+  done
+  if [ "$attempt" -gt "$COVER_TRIES" ]; then
+    COV=$("$PY" -c "import json;print(json.load(open('$DS/meta.json')).get('coverage_pct') or 0)" 2>/dev/null || echo 0)
+    log "WARNING: coverage ${COV}% after ${COVER_TRIES} attempts"
+    [ "$COV" -lt 50 ] 2>/dev/null && { log "FATAL: post-hoc collection failed"; status_reason "post-hoc dataset collection failed"; }
   fi
   tail -14 "$RUN_DIR/rebuild_collection.log" >> "$LOG" 2>/dev/null
 fi
