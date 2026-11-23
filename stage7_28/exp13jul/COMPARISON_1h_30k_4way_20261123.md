@@ -82,14 +82,17 @@ violated on 56 % of ticks.
 **Root cause: the Replica-Change Model has no useful supervision.**
 `train/train_models.py` builds its labels from telemetry:
 
-- `y_act = out` only when the weak label is a *resource* class
-  (`cpu`, `memory`, …); `in` only for `over_provisioned`, a class that
-  `weak_labels.py` never emits; `hold` otherwise.
+- `y_act = out` only when the weak label is in
+  `RESOURCE_CLASSES = {cpu, memory, network, storage, queue}`; `in` only for
+  `over_provisioned`, a class that `weak_labels.py` never emits; `hold`
+  otherwise — i.e. `shared_dependency`, `application`, `infrastructure`,
+  `outage`, `blind`, `healthy`, `unknown`, `transition`.
 - `y_tgt = zeros` for **every** sample.
 
 The target head therefore learns "pick the lowest legal count", and the action
-head learns "hold" for exactly the latency-bound labels that dominate this
-workload (`queue`, `shared_dependency`, `app_problem`). `SafetyLayer.validate`
+head learns `hold` for every non-resource label — including
+`shared_dependency` and `application`, which is what the JVM-heap exhaustion in
+`ts-user-service` / `ts-auth-service` is labelled as. `SafetyLayer.validate`
 only *validates* an `out` proposal — it never creates one — so when the model
 says `hold`, no amount of SLO pressure produces a scale-out.
 
