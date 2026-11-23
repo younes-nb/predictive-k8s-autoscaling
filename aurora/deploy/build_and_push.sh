@@ -18,12 +18,12 @@ FULL_IMAGE="$REGISTRY/$IMAGE_NAME:$TAG"
 GREEN='\033[0;32m'; RED='\033[0;31m'; NC='\033[0m'
 
 MODEL_DIR="${AURORA_REGISTRY_DIR:-${AURORA_DIR}/data/registry}"
-if [ ! -f "$MODEL_DIR/index.json" ]; then
-  echo -e "${RED}Error: no published model at $MODEL_DIR/index.json${NC}" >&2
-  echo "Run: .venv/bin/python train/selfsup.py && .venv/bin/python train/calibrate.py" >&2
+if [ ! -f "$MODEL_DIR/bundle.pt" ]; then
+  echo -e "${RED}Error: no model bundle at $MODEL_DIR/bundle.pt${NC}" >&2
+  echo "Run: .venv/bin/python train/train_models.py" >&2
   exit 1
 fi
-echo -e "${GREEN}model: $(python3 -c "import json;print(json.load(open('$MODEL_DIR/index.json'))['current'])")${NC}"
+echo -e "${GREEN}bundle: $(ls -la $MODEL_DIR/bundle.pt | awk '{print $5" bytes"}')${NC}"
 
 # stage the model into the build context so the Dockerfile can COPY it
 rm -rf "${AURORA_DIR}/build_model"

@@ -19,59 +19,104 @@ EPS = 1e-9
 
 
 class RunningNorm:
-    """Per-service running mean/std with a global prior.
+    """Per-feature running mean/std with a global prior.
 
-    ``update`` is Welford; ``prior_strength`` pseudo-counts pull a service with
-    few observations toward the global statistics, which is what lets a brand
-    new deployment use the pretrained model sensibly before it has its own
-    baseline.
+    Three defects in the previous version are fixed here:
+
+    1. ``global_m2`` was loaded from a stored *variance* but treated as Welford's
+       M2 (a sum of squared deviations), which divided the standard deviation by
+       ~sqrt(n). The prior is now stored as a proper pseudo-count: ``mean`` and
+       ``var`` with ``prior_n`` pseudo-observations, i.e. ``M2 = var * prior_n``.
+    2. Counts are per feature, not one shared counter incremented per ingest
+       call. Previously the effective sample count depended on how many metric
+       series happened to be ingested.
+    3. Duplicate timestamps are not counted twice (see WindowManager.ingest,
+       which only calls ``update`` for genuinely new samples).
     """
 
-    def __init__(self, prior_strength=20.0):
+    def __init__(self, prior_strength=20.0, prior_n=1000.0):
         self.prior_strength = prior_strength
+        self.prior_n = prior_n
+        # When frozen, ``stats`` returns only the training prior. The encoder
+        # then receives exactly the representation it was trained on, while the
+        # local statistics keep accumulating for baselines, drift and capacity.
+        self.frozen = False
         self.global_mean = {}
-        self.global_m2 = {}
-        self.global_n = 0
-        self.local = defaultdict(lambda: {"mean": {}, "m2": {}, "n": 0})
+        self.global_var = {}
+        self.global_n = {}
+        self.local = {}
 
+    # ------------------------------------------------------------------
+    def set_prior(self, feature_mean, feature_var, n=None):
+        """Seed the global prior from a frozen training transform."""
+        n = self.prior_n if n is None else float(n)
+        for key, mean in feature_mean.items():
+            self.global_mean[key] = float(mean)
+            self.global_var[key] = max(float(feature_var.get(key, 1.0)), 1e-6)
+            self.global_n[key] = n
+
+    # ------------------------------------------------------------------
     def update(self, service, values):
-        g = self.global_mean
-        gm2 = self.global_m2
-        self.global_n += 1
-        n = self.global_n
-        for k, v in values.items():
-            if v is None:
-                continue
-            d = v - g.get(k, 0.0)
-            g[k] = g.get(k, 0.0) + d / n
-            gm2[k] = gm2.get(k, 0.0) + d * (v - g[k])
+        """Fold one observation. ``values`` maps feature -> float.
 
-        loc = self.local[service]
-        loc["n"] += 1
-        ln = loc["n"]
-        for k, v in values.items():
+        Callers must only pass genuinely new samples; this method does not
+        attempt to detect duplicates.
+        """
+        for key, v in values.items():
             if v is None:
                 continue
-            d = v - loc["mean"].get(k, 0.0)
-            loc["mean"][k] = loc["mean"].get(k, 0.0) + d / ln
-            loc["m2"][k] = loc["m2"].get(k, 0.0) + d * (v - loc["mean"][k])
+            try:
+                v = float(v)
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(v):
+                continue
+
+            n = self.global_n.get(key, 0.0) + 1.0
+            mean = self.global_mean.get(key, 0.0)
+            delta = v - mean
+            self.global_mean[key] = mean + delta / n
+            self.global_var[key] = (
+                (self.global_var.get(key, 1.0) * max(self.global_n.get(key, 0.0), 1.0)
+                 + delta * (v - self.global_mean[key]))
+                / max(n, 1.0)
+            )
+            self.global_n[key] = n
+
+            loc = self.local.setdefault(service, {"mean": {}, "var": {}, "n": {}})
+            ln = loc["n"].get(key, 0.0) + 1.0
+            lm = loc["mean"].get(key, 0.0)
+            ld = v - lm
+            loc["mean"][key] = lm + ld / ln
+            loc["var"][key] = (
+                (loc["var"].get(key, 1.0) * max(loc["n"].get(key, 0.0), 1.0)
+                 + ld * (v - loc["mean"][key]))
+                / max(ln, 1.0)
+            )
+            loc["n"][key] = ln
+
+    # ------------------------------------------------------------------
+    def freeze(self):
+        """Use the frozen training statistics for the encoder input."""
+        self.frozen = True
 
     def stats(self, service, key):
-        loc = self.local[service]
-        n = loc["n"]
-        w = self.prior_strength
-        if n <= 0:
-            gk = self.global_n or 1
-            return self.global_mean.get(key, 0.0), max(
-                (self.global_m2.get(key, 0.0) / gk) ** 0.5, EPS)
-        lm = loc["mean"].get(key, 0.0)
-        lv = loc["m2"].get(key, 0.0) / max(n - 1, 1)
+        if self.frozen:
+            return (self.global_mean.get(key, 0.0),
+                    max(math.sqrt(self.global_var.get(key, 1.0)), 1e-6))
+        loc = self.local.get(service)
+        n = loc["n"].get(key, 0.0) if loc else 0.0
+        g_n = self.global_n.get(key, 0.0)
         gm = self.global_mean.get(key, 0.0)
-        gv = (self.global_m2.get(key, 0.0) / max(self.global_n - 1, 1)
-              if self.global_n > 1 else lv)
+        gv = self.global_var.get(key, 1.0)
+        if n <= 0:
+            return gm, max(math.sqrt(gv), 1e-6)
+        lm = loc["mean"].get(key, 0.0)
+        lv = loc["var"].get(key, 1.0)
+        w = self.prior_strength
         mean = (n * lm + w * gm) / (n + w)
         var = (n * (lv + (lm - mean) ** 2) + w * (gv + (gm - mean) ** 2)) / (n + w)
-        return mean, max(var ** 0.5, EPS)
+        return mean, max(math.sqrt(max(var, 1e-12)), 1e-6)
 
     def normalise(self, service, key, value):
         mean, std = self.stats(service, key)
@@ -87,31 +132,81 @@ class WindowManager:
         # keep a couple of spare samples: the grid is snapped to the
         # telemetry boundary, so the oldest grid point can sit one step inside
         # the fetched range and would otherwise be trimmed away
-        self.length = cfg.history_len + 3
+        self.length = cfg.history_len
+        self.keep = cfg.history_len + 3
         self.history = defaultdict(lambda: defaultdict(deque))
         self.norm = norm or RunningNorm()
         self.last_ingest = {}
+        # (timestamp, arrivals, latency_present) per service, for the
+        # blindness estimate: a tick with arrivals but no latency sample is
+        # "blind", not "fast".
+        self.availability = defaultdict(deque)
 
     # ------------------------------------------------------------------
     def ingest(self, service, timestamp, features):
-        """Append one observation. ``features`` maps name -> float or None."""
+        """Append one observation. ``features`` maps name -> float or None.
+
+        Returns the subset of features that were genuinely new. The normaliser
+        is updated with exactly that subset: the controller re-reads overlapping
+        history every 15 s, and counting those repeats would make the statistics
+        depend on how many times a window was fetched rather than on how many
+        observations exist.
+        """
         h = self.history[service]
+        fresh = {}
         for key, value in features.items():
             if value is None:
                 continue
             dq = h[key]
-            if dq and timestamp <= dq[-1][0]:
-                # out-of-order sample: replace if newer value at same ts
-                if timestamp == dq[-1][0]:
-                    dq[-1] = (timestamp, value)
+            if dq and timestamp < dq[-1][0]:
+                continue                      # older than what we have
+            if dq and timestamp == dq[-1][0]:
+                if dq[-1][1] == value:
+                    continue                  # exact duplicate
+                dq[-1] = (timestamp, value)   # corrected value
+                fresh[key] = value
                 continue
             dq.append((timestamp, value))
-            while len(dq) > self.length:
+            while len(dq) > self.keep:
                 dq.popleft()
-        self.norm.update(service, features)
+            fresh[key] = value
+        if fresh:
+            self.norm.update(service, fresh)
         self.last_ingest[service] = timestamp
+        return fresh
 
     # ------------------------------------------------------------------
+    def note_availability(self, service, timestamp, arrivals, latency_present):
+        dq = self.availability[service]
+        if dq and timestamp <= dq[-1][0]:
+            return
+        dq.append((timestamp, float(arrivals or 0.0), bool(latency_present)))
+        while len(dq) > self.keep:
+            dq.popleft()
+
+    def blindness_ratio(self, service, min_arrivals=1.0):
+        """Fraction of recent ticks that had arrivals but no latency sample.
+
+        High values mean the latency signal is untrustworthy: requests are
+        arriving and (we hope) completing, but nothing is measuring them. That
+        is exactly the SLO's blind spot, so the estimator must treat latency as
+        missing rather than as fast.
+        """
+        dq = self.availability.get(service)
+        if not dq:
+            return 0.0
+        considered = [a for _, a, _ in dq if a >= min_arrivals]
+        if not considered:
+            return 0.0
+        blind = sum(1 for _, a, p in dq if a >= min_arrivals and not p)
+        return blind / len(considered)
+
+    def latency_available(self, service):
+        dq = self.availability.get(service)
+        if not dq:
+            return False
+        return bool(dq[-1][2])
+
     def is_stale(self, service, now):
         last = self.last_ingest.get(service)
         if last is None:

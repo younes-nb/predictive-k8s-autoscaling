@@ -58,15 +58,21 @@ class TestNoForecastInputs(unittest.TestCase):
         # the offered workload must be a required, current value
         self.assertIn("offered", params)
         d = DecisionEngine(Config()).decide(
-            "s", offered=10.0, capacity=10.0, sigma=0.1, n_committed=1,
-            addressable_prob=1.0, bottleneck="cpu", confidence=0.9, ood=False)
+            "s", offered=10.0,
+            binding={"capacity": 10.0, "sigma": 0.1, "signal": "cpu",
+                     "spread": 1.0, "signals": {}},
+            n_committed=1, addressable_prob=1.0,
+            bottleneck="cpu", confidence=0.9, ood=False)
         self.assertNotIn("forecast", d.basis)
         self.assertIn("p_serves_current", d.basis)
 
     def test_basis_has_no_future_field(self):
         d = DecisionEngine(Config()).decide(
-            "s", offered=10.0, capacity=10.0, sigma=0.1, n_committed=1,
-            addressable_prob=1.0, bottleneck="cpu", confidence=0.9, ood=False)
+            "s", offered=10.0,
+            binding={"capacity": 10.0, "sigma": 0.1, "signal": "cpu",
+                     "spread": 1.0, "signals": {}},
+            n_committed=1, addressable_prob=1.0,
+            bottleneck="cpu", confidence=0.9, ood=False)
         for k in d.basis:
             for bad in FORECAST_KEYS:
                 self.assertNotIn(bad, k.lower(), f"basis key {k!r}")

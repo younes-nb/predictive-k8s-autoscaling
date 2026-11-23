@@ -33,7 +33,7 @@ from features.groups import derive, RAW_FEATURES          # noqa: E402
 
 CLASSES = ["cpu", "memory", "network", "storage", "queue",
            "shared_dependency", "app_problem", "infra_problem",
-           "transition", "healthy", "unknown"]
+           "transition", "outage", "blind", "healthy", "unknown"]
 
 
 def _pct_rank(s):
@@ -45,7 +45,7 @@ def add_percentiles(df):
     df = df.copy()
     # derived features first
     derived_cols = {}
-    for col in ("success_rate", "cpu_limit_pct", "cpu_throttled_pct",
+    for col in ("success_rate", "cpu_limit_pct", "cpu_throttled_frac",
                 "mem_limit_pct", "cpu_per_request", "lat_ratio_p90_p50",
                 "inflight", "pending"):
         derived_cols[col] = np.nan
@@ -78,7 +78,21 @@ def label_row(r, p_hi=0.90, p_vhi=0.97):
     if age is not None and age == age and age < 60:
         return "transition"
 
-    cpu_hot = hi("cpu_limit_pct") and hi("cpu_throttled_pct")
+    # outage: requests are arriving but not completing. Distinct from "slow":
+    # a slow service still completes.
+    comp = r.get("completion_ratio")
+    req_rate = r.get("req_rate")
+    if (comp is not None and comp == comp and req_rate is not None
+            and req_rate > 0 and comp < 0.5):
+        return "outage"
+
+    # blind: arrivals with no latency sample. Not a fast service -- an
+    # unmeasured one.
+    lat = r.get("lat_p90")
+    if req_rate is not None and req_rate > 0 and (lat is None or lat != lat):
+        return "blind"
+
+    cpu_hot = hi("cpu_limit_pct") and hi("cpu_throttled_frac")
     mem_hot = vhi("mem_limit_pct") and (hi("mem_page_faults") or hi("oom_events"))
     net_hot = hi("net_rx") or hi("net_tx")
     io_hot = hi("fs_write") or hi("fs_read") or hi("io_time")

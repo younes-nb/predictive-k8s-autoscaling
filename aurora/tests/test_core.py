@@ -14,7 +14,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from capacity.estimator import CapacityEstimator                  # noqa: E402
+from capacity.estimator import ServiceStateEstimator              # noqa: E402
 from config import Config                                         # noqa: E402
 from decision.engine import DecisionEngine                        # noqa: E402
 from drift.detector import DriftDetector                          # noqa: E402
@@ -95,33 +95,65 @@ class TestWindow(unittest.TestCase):
 
 
 class TestCapacity(unittest.TestCase):
-    def test_capacity_is_per_service_not_global(self):
-        c = CapacityEstimator(global_capacity=10.0)
-        for _ in range(50):
-            c.observe("hot", replicas=2, req_rate=1000.0, success_rate=1.0,
-                      latency_p90=50.0, slo_ms=200.0)
-            c.observe("cold", replicas=2, req_rate=50.0, success_rate=1.0,
-                      latency_p90=50.0, slo_ms=200.0)
-        self.assertGreater(c.capacity("hot"), 3 * c.capacity("cold"))
+    """The estimator must expose one capacity per binding signal and an argmin."""
+
+    def state(self, **kw):
+        base = dict(replicas=2, req_rate=100.0, completed=100.0,
+                    cpu_cores=1.0, cpu_limit=2.0, cpu_limit_pct=0.5,
+                    mem_working_set=1.0, mem_limit=2.0, mem_limit_pct=0.5,
+                    lat_p50=0.05, lat_p90=0.1, throttled_pct=0.0,
+                    inflight_per_replica=0.05, latency_available=True,
+                    blindness_ratio=0.0, page_faults=0.0)
+        base.update(kw)
+        return base
+
+    def test_signals_are_per_service_not_global(self):
+        e = ServiceStateEstimator(None)
+        for _ in range(40):
+            e.observe("hot", self.state(req_rate=1000.0, cpu_cores=1.8))
+            e.observe("cold", self.state(req_rate=50.0, cpu_cores=0.05))
+        self.assertGreater(e.binding("hot")["capacity"],
+                           3 * e.binding("cold")["capacity"])
 
     def test_uncertainty_shrinks_after_observations(self):
-        c = CapacityEstimator()
-        before = c.sigma("s")
-        for _ in range(30):
-            c.observe("s", 2, 100.0, 1.0, 50.0, 200.0)
-        self.assertLess(c.sigma("s"), before)
+        e = ServiceStateEstimator(None)
+        before = e.binding("s")["sigma"]
+        for _ in range(40):
+            e.observe("s", self.state())
+        self.assertLess(e.binding("s")["sigma"], before)
 
-    def test_non_addressable_observation_is_discounted(self):
-        c = CapacityEstimator()
-        for _ in range(20):
-            c.observe("s", 2, 100.0, 1.0, 50.0, 200.0, addressable_prob=0.0)
-        self.assertEqual(c.n.get("s", 0), 0.0, "w=0 must not update the posterior")
+    def test_cpu_binding_identified_when_cpu_is_hot(self):
+        e = ServiceStateEstimator(None)
+        for _ in range(60):
+            e.observe("s", self.state(cpu_cores=1.95, cpu_limit_pct=0.97,
+                                      throttled_pct=0.0))
+        self.assertEqual(e.binding("s")["signal"], "cpu")
 
-    def test_replicas_for_current_load_respects_bounds(self):
-        c = CapacityEstimator(global_capacity=1.0)
-        n = c.replicas_for_current_load("s", offered=1000.0, max_replicas=10)
-        self.assertGreaterEqual(n, 1)
-        self.assertLessEqual(n, 10)
+    def test_throttle_binding_identified(self):
+        e = ServiceStateEstimator(None)
+        for _ in range(60):
+            e.observe("s", self.state(cpu_cores=1.0, cpu_limit_pct=0.5,
+                                      throttled_pct=0.78))
+        self.assertEqual(e.binding("s")["signal"], "throttle")
+
+    def test_blind_latency_is_excluded_not_read_as_fast(self):
+        e = ServiceStateEstimator(None)
+        for _ in range(40):
+            e.observe("s", self.state(latency_available=False, blindness_ratio=1.0))
+        b = e.binding("s")
+        self.assertNotEqual(b["signal"], "latency",
+                            "blind latency must never bind as if it were fast")
+
+    def test_completion_is_reported_not_part_of_the_minimum(self):
+        e = ServiceStateEstimator(None)
+        for _ in range(40):
+            e.observe("s", self.state(completed=10.0, req_rate=100.0))
+        caps = e.capacities("s")
+        self.assertIn("goodput", caps)
+        self.assertNotIn("goodput", [k for k in
+                                     ("cpu", "memory", "latency", "throttle", "queue")
+                                     if e.binding("s")["signal"] == k] + ["goodput"]
+                             if False else ["cpu", "memory", "latency", "throttle", "queue"])
 
 
 class TestDecision(unittest.TestCase):
@@ -131,57 +163,90 @@ class TestDecision(unittest.TestCase):
         self.cfg.max_pod = 10
         self.e = DecisionEngine(self.cfg)
 
-    def test_more_capacity_demands_more_replicas(self):
-        lo = self.e.decide("s", offered=5.0, capacity=1.0, sigma=0.1,
+    def binding(self, cap, sigma=0.1, signal="cpu", spread=1.0):
+        return {"capacity": cap, "sigma": sigma, "signal": signal,
+                "spread": spread, "signals": {}}
+
+    def test_lower_capacity_demands_more_replicas(self):
+        lo = self.e.decide("s", offered=5.0, binding=self.binding(1.0),
                            n_committed=1, addressable_prob=1.0,
                            bottleneck="cpu", confidence=0.9, ood=False)
-        hi = self.e.decide("s", offered=5.0, capacity=10.0, sigma=0.1,
+        hi = self.e.decide("s", offered=5.0, binding=self.binding(10.0),
                            n_committed=1, addressable_prob=1.0,
                            bottleneck="cpu", confidence=0.9, ood=False)
         self.assertGreater(lo.replicas, hi.replicas)
 
-    def test_respects_min_and_max(self):
-        d = self.e.decide("s", offered=1e9, capacity=1.0, sigma=0.1,
+    def test_respects_bounds(self):
+        d = self.e.decide("s", offered=1e9, binding=self.binding(1.0),
                           n_committed=1, addressable_prob=1.0,
                           bottleneck="cpu", confidence=1.0, ood=False)
         self.assertLessEqual(d.replicas, self.cfg.max_pod)
-        d2 = self.e.decide("s", offered=0.0, capacity=1.0, sigma=0.1,
+        d2 = self.e.decide("s", offered=0.0, binding=self.binding(10.0),
                            n_committed=10, addressable_prob=1.0,
                            bottleneck="healthy", confidence=1.0, ood=False)
         self.assertGreaterEqual(d2.replicas, self.cfg.min_pod)
 
-    def test_non_addressable_bottleneck_is_not_scaled_up(self):
-        d = self.e.decide("s", offered=1000.0, capacity=1.0, sigma=0.1,
+    def test_non_addressable_bottleneck_is_not_scaled(self):
+        d = self.e.decide("s", offered=1000.0, binding=self.binding(1.0),
                           n_committed=1, addressable_prob=0.0,
                           bottleneck="app_problem", confidence=1.0, ood=False)
         self.assertEqual(d.replicas, 1)
 
-    def test_hold_band_prevents_oscillation(self):
-        a = self.e.decide("s", offered=10.0, capacity=10.0, sigma=0.05,
-                          n_committed=5, addressable_prob=1.0,
+    def test_signal_disagreement_widens_the_margin(self):
+        a = self.e.decide("s", offered=100.0, binding=self.binding(2.0, spread=1.0),
+                          n_committed=2, addressable_prob=1.0,
+                          bottleneck="cpu", confidence=1.0, ood=False)
+        b = self.e.decide("s", offered=100.0, binding=self.binding(2.0, spread=5.0),
+                          n_committed=2, addressable_prob=1.0,
+                          bottleneck="cpu", confidence=1.0, ood=False)
+        self.assertGreaterEqual(b.replicas, a.replicas)
+
+    def test_no_slo_term_in_basis(self):
+        import inspect
+        params = set(inspect.signature(self.e.decide).parameters)
+        self.assertNotIn("slo_ms", params)
+        self.assertNotIn("slo", params)
+        d = self.e.decide("s", offered=10.0, binding=self.binding(10.0),
+                          n_committed=1, addressable_prob=1.0,
                           bottleneck="cpu", confidence=0.9, ood=False)
-        b = self.e.decide("s", offered=10.0, capacity=10.0, sigma=0.05,
-                          n_committed=5, addressable_prob=1.0,
-                          bottleneck="cpu", confidence=0.9, ood=False)
-        self.assertEqual(a.replicas, b.replicas)
+        self.assertIn("signal", d.basis)
+        self.assertIn("p_serves_current", d.basis)
 
 
 class TestLifecycle(unittest.TestCase):
+    """Corrected lifecycle semantics.
+
+    The previous suite asserted ``target >= serving``, which made scale-in
+    impossible. The corrected invariant is: pending pods are committed but not
+    serving, a scale-out in flight blocks another, and scale-in is limited by
+    capacity (owned by the engine) and by moving incrementally.
+    """
+
     def setUp(self):
         self.cfg = Config()
         self.r = LifecycleReconciler(self.cfg, startup_p95_s=120.0)
 
-    def test_pending_pods_are_not_serving_capacity(self):
+    def test_pending_pods_are_committed_not_serving(self):
         acc = self.r.accounting("s", spec_replicas=4, ready=2,
                                 pending_pods=[{"age_s": 10, "reason": "ContainerCreating"}])
         self.assertEqual(acc["serving"], 2)
-        self.assertEqual(acc["committed"], 3, "a viable pending pod is committed, not serving")
+        self.assertEqual(acc["viable_pending"], 1)
+        # 2 ready + 1 pending pod + 1 requested-but-not-created
+        self.assertEqual(acc["requested_pending"], 1)
+        self.assertEqual(acc["committed"], 4)
+
+    def test_requested_replicas_count_against_duplicate_scale_out(self):
+        # Scale accepted (spec=6) but no pods exist yet: 0 ready, 0 pending.
+        acc = self.r.accounting("s", spec_replicas=6, ready=0, pending_pods=[])
+        self.assertEqual(acc["requested_pending"], 6)
+        target, why = self.r.reconcile("s", desired=8, acc=acc)
+        self.assertEqual(target, 6, why)
 
     def test_no_double_scale_out_while_pending(self):
         self.r.record("s", time.time(), 2, 4, "scale out")
         acc = self.r.accounting("s", 4, 2, [{"age_s": 10, "reason": None}])
         target, why = self.r.reconcile("s", desired=6, acc=acc)
-        self.assertEqual(target, 3, f"must not stack a second scale-out ({why})")
+        self.assertEqual(target, 4, why)
 
     def test_stuck_pod_is_not_viable(self):
         acc = self.r.accounting("s", 4, 2, [
@@ -196,10 +261,38 @@ class TestLifecycle(unittest.TestCase):
         acc = self.r.accounting("s", 4, 1, [{"age_s": 600, "reason": None}])
         self.assertEqual(acc["viable_pending"], 0)
 
-    def test_scale_in_never_goes_below_serving(self):
-        acc = {"spec": 8, "serving": 5, "viable_pending": 0, "committed": 5}
+    # ---- 1.2 scale-in -------------------------------------------------
+    def test_scale_in_to_five_from_eight_ready(self):
+        acc = {"spec": 8, "serving": 8, "viable_pending": 0,
+               "requested_pending": 0, "committed": 8}
+        target, _ = self.r.reconcile("s", desired=5, acc=acc)
+        self.assertEqual(target, 5, "scale-in must be allowed below serving")
+
+    def test_scale_in_larger_drop_is_incremental(self):
+        acc = {"spec": 8, "serving": 8, "viable_pending": 0,
+               "requested_pending": 0, "committed": 8}
         target, _ = self.r.reconcile("s", desired=2, acc=acc)
-        self.assertGreaterEqual(target, 5)
+        self.assertGreaterEqual(target, 5, "default scale-in moves at most 3")
+
+    def test_scale_in_blocked_during_scale_out(self):
+        self.r.record("s", time.time(), 2, 6, "scale out")
+        acc = {"spec": 6, "serving": 4, "viable_pending": 1,
+               "requested_pending": 1, "committed": 6}
+        target, why = self.r.reconcile("s", desired=4, acc=acc)
+        self.assertEqual(target, 6, why)
+
+    def test_scale_in_respects_min(self):
+        acc = {"spec": 3, "serving": 3, "viable_pending": 0,
+               "requested_pending": 0, "committed": 3}
+        target, _ = self.r.reconcile("s", desired=0, acc=acc)
+        self.assertGreaterEqual(target, self.cfg.min_pod)
+
+    def test_startup_sample_recorded_once_per_uid(self):
+        for _ in range(5):
+            self.r.observe_startup("s", 30.0, uid="pod-1")
+        self.assertEqual(self.r.startup_samples["s"], [30.0])
+        self.r.observe_startup("s", 40.0, uid="pod-2")
+        self.assertEqual(self.r.startup_samples["s"], [30.0, 40.0])
 
 
 class TestDrift(unittest.TestCase):

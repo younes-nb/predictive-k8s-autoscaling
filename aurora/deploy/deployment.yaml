@@ -57,8 +57,6 @@ spec:
               value: "5"
             - name: AURORA_HISTORY_LEN
               value: "24"            # 2 min at 5 s
-            - name: AURORA_SLO_MS
-              value: "200"
             - name: AURORA_MIN_POD
               value: "1"
             - name: AURORA_MAX_POD
@@ -78,7 +76,7 @@ spec:
             - {name: state, mountPath: /var/lib/aurora}
           readinessProbe:
             exec:
-              command: ["/bin/sh", "-c", "test -f /opt/aurora/model/registry/index.json"]
+              command: ["/bin/sh", "-c", "test -f /opt/aurora/model/registry/bundle.pt"]
             initialDelaySeconds: 5
             periodSeconds: 10
       volumes:

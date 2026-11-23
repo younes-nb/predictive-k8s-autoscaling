@@ -68,25 +68,16 @@ def main():
     mean = np.asarray(norm["mean"], dtype=np.float32)
     std = np.sqrt(np.asarray(norm["var"], dtype=np.float32))
 
-    # window-level inputs and labels (label = final tick of each window).
-    # Built once: an earlier revision built every window twice and discarded
-    # the first copy, which dominated the runtime.
-    from features.build import row_vector
+    # Window construction is shared with training (features.build), so the
+    # temporal boundaries are identical. The previous manual groupby("service")
+    # loop could join the end of one experiment to the start of another.
+    from features.build import group_windows
     xs, ms, ys, ss = [], [], [], []
-    stride = max(1, a.t_len // 2)
-    for svc, g in df.groupby("service"):
-        g = g.sort_values("ts")
-        labels = list(g["bottleneck"]) if "bottleneck" in g.columns else []
-        rows = [row_vector(r) for r in g.to_dict("records")]
-        if len(rows) < a.t_len:
-            continue
-        x = np.stack([r[0] for r in rows])
-        m = np.stack([r[1] for r in rows])
-        for i in range(0, len(rows) - a.t_len + 1, stride):
-            xs.append((x[i:i + a.t_len] - mean) / std)
-            ms.append(m[i:i + a.t_len])
-            ys.append(labels[i + a.t_len - 1] if labels else "unknown")
-            ss.append(svc)
+    for svc, x, m, label in group_windows(df, a.t_len, label_col="bottleneck"):
+        xs.append((x - mean) / std)
+        ms.append(m)
+        ys.append(label if label else "unknown")
+        ss.append(svc)
 
     x = np.stack(xs)
     m = np.stack(ms)

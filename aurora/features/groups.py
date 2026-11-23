@@ -36,6 +36,10 @@ def queries(ns):
         # ---- workload / performance (Istio, destination reporter) --------
         MetricQuery("req_rate", "workload",
                     f'sum by (destination_workload) (rate({ist}[1m]))', "rate"),
+        MetricQuery("conn_fail", "workload",
+                    f'sum by (destination_workload) (rate(istio_requests_total{{reporter="destination",'
+                    f'destination_workload_namespace="{ns}",response_code="0"}}[1m]))', "rate",
+                    required=False),
         MetricQuery("err_rate", "workload",
                     f'sum by (destination_workload) (rate(istio_requests_total{{reporter="destination",'
                     f'destination_workload_namespace="{ns}",response_code=~"5.."}}[1m]))', "rate"),
@@ -54,7 +58,8 @@ def queries(ns):
                     f'{{{sel}}}[1m]))', "rate"),
         MetricQuery("cpu_limit", "cpu",
                     f'sum by (container) (kube_pod_container_resource_limits'
-                    f'{{namespace="{ns}",resource="cpu",container!=""}})', "gauge"),
+                    f'{{namespace="{ns}",resource="cpu",container!="",container!="istio-proxy"}})',
+                    "gauge"),
         MetricQuery("cpu_throttled", "cpu",
                     f'sum by (container) (rate(container_cpu_cfs_throttled_periods_total'
                     f'{{{sel}}}[1m]))', "rate"),
@@ -65,9 +70,18 @@ def queries(ns):
         MetricQuery("mem_working_set", "memory",
                     f'sum by (container) (container_memory_working_set_bytes{{{sel}}})',
                     "gauge"),
+        MetricQuery("cpu_request", "cpu",
+                    f'sum by (container) (kube_pod_container_resource_requests'
+                    f'{{namespace="{ns}",resource="cpu",container!="",container!="istio-proxy"}})',
+                    "gauge"),
+        MetricQuery("mem_request", "memory",
+                    f'sum by (container) (kube_pod_container_resource_requests'
+                    f'{{namespace="{ns}",resource="memory",container!="",container!="istio-proxy"}})',
+                    "gauge"),
         MetricQuery("mem_limit", "memory",
                     f'sum by (container) (kube_pod_container_resource_limits'
-                    f'{{namespace="{ns}",resource="memory",container!=""}})', "gauge"),
+                    f'{{namespace="{ns}",resource="memory",container!="",container!="istio-proxy"}})',
+                    "gauge"),
         MetricQuery("mem_page_faults", "memory",
                     f'sum by (container) (rate(container_memory_failures_total{{{sel}}}[1m]))',
                     "rate", required=False),
@@ -111,18 +125,18 @@ def queries(ns):
 # Model input order. Derived features (ratios) are appended after the raw ones.
 # --------------------------------------------------------------------------
 RAW_FEATURES = [
-    "req_rate", "err_rate", "lat_p50", "lat_p90", "lat_p99",
+    "req_rate", "err_rate", "conn_fail", "lat_p50", "lat_p90", "lat_p99",
     "cpu_cores", "cpu_limit", "cpu_throttled", "cpu_periods",
     "mem_working_set", "mem_limit", "mem_page_faults", "oom_events",
     "net_rx", "net_tx",
     "fs_read", "fs_write", "io_time",
-    "replicas", "ready", "available", "pod_start_time",
+    "cpu_request", "mem_request", "replicas", "ready", "available", "pod_age_s",
 ]
 
 DERIVED_FEATURES = [
     "success_rate",          # 1 - err/req
     "cpu_limit_pct",         # cpu_cores / cpu_limit
-    "cpu_throttled_pct",     # throttled / periods
+    "cpu_throttled_frac",     # throttled / periods
     "mem_limit_pct",         # working_set / mem_limit
     "cpu_per_request",       # cpu_cores / req_rate  (efficiency, scale-free)
     "lat_ratio_p90_p50",     # queueing indicator
@@ -130,6 +144,12 @@ DERIVED_FEATURES = [
     "pending",               # replicas - ready
     "cpu_per_replica",       # cpu_cores / replicas
     "req_per_replica",       # req_rate / replicas
+    "completion_ratio",      # 1 - (err + conn_fail)/req  -> outage, not slowness
+    "cpu_req_pct",           # cpu_cores / cpu_request  (HPA convention)
+    "mem_req_pct",           # working_set / mem_request
+    "cpu_headroom",          # 1 - cpu_limit_pct
+    "mem_headroom",          # 1 - mem_limit_pct
+    "inflight_per_replica",  # Little's law per replica -> concurrency proxy
 ]
 
 FEATURE_ORDER = RAW_FEATURES + DERIVED_FEATURES
@@ -144,26 +164,40 @@ OPTIONAL_FEATURES = {"mem_page_faults", "oom_events", "net_rx", "net_tx",
 def derive(f):
     """Compute derived features from a raw feature dict.
 
-    Returns a new dict. A ratio is unavailable (None) unless both inputs are,
-    so a missing denominator never becomes a fake zero.
+    Derived values are computed in dependency order and reused, so
+    ``cpu_headroom`` sees the *derived* ``cpu_limit_pct`` rather than a raw key
+    that does not exist. Any ratio whose inputs are missing returns None, so a
+    missing denominator can never masquerade as a healthy zero.
     """
     def g(k):
         return f.get(k)
 
     def div(a, b):
-        if a is None or b is None:
-            return None
-        if b == 0:
+        if a is None or b is None or b == 0:
             return None
         return a / b
 
     out = {}
-    req, err = g("req_rate"), g("err_rate")
+
+    req, err, cf = g("req_rate"), g("err_rate"), g("conn_fail")
     out["success_rate"] = None if (req is None or err is None) else (
         1.0 - (err / req) if req else 1.0)
+
+    # completion ratio: requests that produced a real response. Connection
+    # failures (response_code="0") count as non-completions, because a timeout
+    # is an outage, not a slow success.
+    if req is None or req <= 0:
+        out["completion_ratio"] = None
+    else:
+        bad = (err or 0.0) + (cf or 0.0)
+        out["completion_ratio"] = max(0.0, min(1.0, 1.0 - bad / req))
+
     out["cpu_limit_pct"] = div(g("cpu_cores"), g("cpu_limit"))
-    out["cpu_throttled_pct"] = div(g("cpu_throttled"), g("cpu_periods"))
     out["mem_limit_pct"] = div(g("mem_working_set"), g("mem_limit"))
+    # FRACTION in [0,1], not a percentage. The capacity estimator
+    # consumes it directly; dividing by 100 here would understate
+    # throttling 100-fold (78% read as 0.78%).
+    out["cpu_throttled_frac"] = div(g("cpu_throttled"), g("cpu_periods"))
     out["cpu_per_request"] = div(g("cpu_cores"), req)
     out["lat_ratio_p90_p50"] = div(g("lat_p90"), g("lat_p50"))
     lat = g("lat_p50")
@@ -172,4 +206,11 @@ def derive(f):
     out["pending"] = None if (rep is None or rdy is None) else max(0.0, rep - rdy)
     out["cpu_per_replica"] = div(g("cpu_cores"), rep)
     out["req_per_replica"] = div(req, rep)
+    out["inflight_per_replica"] = div(out.get("inflight"), rep)
+
+    clp, mlp = out.get("cpu_limit_pct"), out.get("mem_limit_pct")
+    out["cpu_req_pct"] = div(g("cpu_cores"), g("cpu_request"))
+    out["mem_req_pct"] = div(g("mem_working_set"), g("mem_request"))
+    out["cpu_headroom"] = None if clp is None else max(0.0, 1.0 - clp)
+    out["mem_headroom"] = None if mlp is None else max(0.0, 1.0 - mlp)
     return out

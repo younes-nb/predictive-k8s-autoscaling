@@ -1,54 +1,64 @@
-"""AURORA-HPA entry point.
+"""AURORA-HPA entry point (two-model bundle).
 
     cd aurora
-    python main.py                      # run for AURORA_DURATION_S
-    python main.py --dry-run            # full loop, prints actions, no patches
-    python main.py --duration 900
+    python main.py                     # run for AURORA_DURATION_S
+    python main.py --dry-run           # decide, print, never patch
 
-The controller owns replicas only for the workloads it manages, and only while
-it runs: HPAs are suspended at start and restored on any clean exit.
+Loads and validates the bundle BEFORE touching Kubernetes: if the model is
+missing, or its node/edge schema does not match the running transform, the
+controller aborts and leaves the native HPAs in place.
 """
 
 import argparse
+import json
 import os
-import signal
 import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from config import Config                                   # noqa: E402
-from control.loop import AuroraLoop                          # noqa: E402
-from k8s.scale_client import ScaleClient                     # noqa: E402
-from telemetry.mimir import MimirClient, MimirError          # noqa: E402
+from config import Config                                        # noqa: E402
+from control.loop import AuroraLoop                              # noqa: E402
+from features.groups import FEATURE_ORDER                        # noqa: E402
+from k8s.leader import LeaderElection                            # noqa: E402
+from k8s.scale_client import ScaleClient                         # noqa: E402
+from telemetry.mimir import MimirClient                           # noqa: E402
 
 
-def build_model(cfg):
-    """Load the published model from the registry, or return None if absent."""
+def load_bundle(cfg):
+    """Load and validate the diagnosis + replica bundle."""
+    import numpy as np
     import torch
-    from models.encoder import TS2VecEncoder
-    from models.proto import AddressabilityHead, AuroraModel, PrototypicalHead
-    from models.registry import ModelRegistry
+    from models.graph import GraphDiagnosisModel
+    from models.replica import ReplicaChangeModel
 
-    reg = ModelRegistry(cfg.registry_dir)
-    try:
-        payload, meta = reg.load()
-    except FileNotFoundError:
-        print("[aurora] no published model found; running in hold-only mode")
-        return None, None
+    path = os.path.join(cfg.registry_dir, "bundle.pt")
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f"no model bundle at {path}; run aurora/train/train_models.py")
+    b = torch.load(path, map_location="cpu", weights_only=False)
 
-    enc = TS2VecEncoder(meta["n_features"], d_model=meta["d_model"])
-    bn = PrototypicalHead(meta["d_model"], classes=meta["classes"],
-                          temperature=meta.get("temperature") or 0.1)
-    ad = AddressabilityHead(meta["d_model"])
-    model = AuroraModel(enc, bn, ad)
-    model.load_state_dict(payload["state_dict"])
-    model.eval()
-    if meta.get("dist_threshold") is not None:
-        model.bottleneck._dist_threshold = meta["dist_threshold"]
-    print(f"[aurora] model {meta['version']} loaded "
-          f"(classes={len(meta['classes'])}, threshold={meta.get('dist_threshold')})")
-    return model, meta
+    if b.get("n_node_features") != len(FEATURE_ORDER):
+        raise SystemExit(
+            f"bundle expects {b.get('n_node_features')} node features but the "
+            f"running transform has {len(FEATURE_ORDER)}; refusing to load")
+    if "diagnosis" not in b or "replica" not in b:
+        raise SystemExit("bundle is missing model weights")
+
+    diag = GraphDiagnosisModel(b["n_node_features"], n_edge_features=1,
+                               d_model=b["d_model"],
+                               n_degradation=b["n_degradation"])
+    rep = ReplicaChangeModel(b["d_model"],
+                             n_degradation=b["n_degradation"])
+    diag.load_state_dict(b["diagnosis"]); diag.eval()
+    rep.load_state_dict(b["replica"]); rep.eval()
+
+    import numpy as np
+    adj = np.asarray(b["edges"], dtype=np.float32)
+    print(f"[aurora] bundle loaded: services={len(b['services'])} "
+          f"edges={int((adj > 0).sum())} features={b['n_node_features']}")
+    return {"diagnosis": diag, "replica": rep, "services": b["services"],
+            "adj": adj}
 
 
 def main(argv=None):
@@ -67,34 +77,38 @@ def main(argv=None):
     if args.no_hpa_suspend:
         cfg.suspend_hpas = False
 
-    model, meta = build_model(cfg)
+    # Validate the model BEFORE any Kubernetes change.
+    try:
+        bundle = load_bundle(cfg)
+    except (FileNotFoundError, SystemExit) as exc:
+        print(f"[aurora] FATAL: {exc}", file=sys.stderr)
+        print("[aurora] refusing to suspend native HPAs", file=sys.stderr)
+        return 2
+
     scale = ScaleClient(cfg)
     mimir = MimirClient(cfg)
 
-    # Capture the managed set BEFORE suspending the HPAs. Afterwards
-    # scalable_services() finds no HPAs and falls back to every deployment,
-    # which would include AURORA itself and all 22 mongos (measured: 65
-    # services instead of 42).
     services = [s for s in scale.scalable_services() if s != "aurora"]
     print(f"[aurora] managed services: {len(services)}")
 
+    election = LeaderElection(cfg)
     suspended = 0
-    if cfg.suspend_hpas and not cfg.dry_run:
+    if cfg.suspend_hpas and not cfg.dry_run and election.try_acquire():
         suspended = len(scale.suspend_hpas())
         print(f"[aurora] suspended {suspended} HPAs")
 
-    loop = AuroraLoop(cfg, model, scale, mimir, norm=(meta or {}).get("norm"),
-                      services=services)
+    loop = AuroraLoop(cfg, bundle, scale, mimir,
+                      model_version="bundle", services=services)
+    loop.election = election if election.is_leader else None
 
     def _shutdown(signum, frame):
-        print(f"[aurora] signal {signum}: restoring HPAs and exiting", flush=True)
+        print(f"[aurora] signal {signum}: restoring HPAs", flush=True)
         if cfg.restore_hpas and suspended:
-            n = scale.restore_hpas()
-            print(f"[aurora] restored {n} HPAs")
-        loop._persist_state()
-        loop._report()
+            print(f"[aurora] restored {scale.restore_hpas()} HPAs")
+        election.release()
         sys.exit(0)
 
+    import signal
     signal.signal(signal.SIGTERM, _shutdown)
     signal.signal(signal.SIGINT, _shutdown)
 
@@ -102,8 +116,9 @@ def main(argv=None):
         loop.run()
     finally:
         if cfg.restore_hpas and suspended:
-            n = scale.restore_hpas()
-            print(f"[aurora] restored {n} HPAs", flush=True)
+            print(f"[aurora] restored {scale.restore_hpas()} HPAs", flush=True)
+        if election.is_leader:
+            election.release()
 
 
 if __name__ == "__main__":

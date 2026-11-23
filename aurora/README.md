@@ -145,9 +145,19 @@ are resolved back to a service by longest-prefix match
 | storage | `fs_read`, `fs_write`, `io_time` |
 | lifecycle | `replicas`, `ready`, `available`, `pod_start_time` |
 
-Derived (computed, never fetched): `success_rate`, `cpu_limit_pct`,
-`cpu_throttled_pct`, `mem_limit_pct`, `cpu_per_request`, `lat_ratio_p90_p50`,
-`inflight` (Little's law), `pending`, `cpu_per_replica`, `req_per_replica`.
+Derived (computed, never fetched): `success_rate`, `completion_ratio`,
+`cpu_limit_pct`, `mem_limit_pct`, `cpu_throttled_pct`, `cpu_per_request`,
+`lat_ratio_p90_p50`, `inflight` (Little's law), `inflight_per_replica`,
+`pending`, `cpu_per_replica`, `req_per_replica`, `cpu_headroom`, `mem_headroom`.
+
+Two of these exist specifically because the SLO is blind to outage:
+
+- `completion_ratio = 1 − (5xx + conn_fail) / req_rate` — requests that
+  actually **finished**. A timeout (`response_code="0"`) counts as a
+  non-completion, because it is an outage, not a slow success.
+- `latency_available` / `blindness_ratio` — a tick with arrivals but no latency
+  sample is **blind**, not fast. The estimator excludes the latency signal when
+  the blindness ratio is high instead of reading missing data as a good result.
 
 Every derived ratio returns `None` unless **both** inputs are present, so a
 missing denominator can never masquerade as a healthy zero.
@@ -276,52 +286,81 @@ storage 21,831 · cpu 4,265 · shared_dependency 4,004 · memory 986 · queue 22
 
 ---
 
-## 7. Capacity estimator
+## 7. Service state and capacity estimator
 
-`capacity/estimator.py` maintains, per service, a conjugate-normal posterior over
-`log(capacity)` where capacity is **sustainable goodput per replica**.
+`capacity/estimator.py`. The previous design reduced a service to one scalar,
+`capacity = goodput / replicas`, and the decision ignored CPU, memory and
+latency entirely. Goodput is now **one input among six**, and capacity is
+estimated per binding signal.
+
+Per service, per tick, normalised per replica:
 
 ```
-goodput      = req_rate * success_rate
-per_replica  = goodput / replicas
-observation  = log(per_replica)
+arr_per_rep   = req_rate / replicas
+cpu_lim_rep   = cpu_limit / replicas
+cpu_use_rep   = cpu_cores / replicas
+mem_lim_rep   = mem_limit / replicas
+mem_use_rep   = mem_working_set / replicas
 ```
 
-The update is weighted by `addressable_prob`: a service that is slow because a
-dependency is slow must not teach the estimator that its own per-replica
-capacity is low. Observations are also down-weighted when latency exceeds the
-SLO, because a slow sample is an uncertain one, not simply a low-capacity one.
+| signal | capacity (arrivals·s⁻¹·replica⁻¹) | meaning |
+|---|---|
+| `cap_cpu` | `cpu_lim_rep · u_cpu / (cpu_use_rep / arr_per_rep)` | arrivals before CPU binds |
+| `cap_memory` | `mem_lim_rep · u_mem / (mem_use_rep / arr_per_rep)` | …before memory binds |
+| `cap_latency` | `arr_per_rep · (lat_baseline / p90)` | …before latency degrades vs **its own** baseline |
+| `cap_throttle` | `arr_per_rep · (0.20 / throttled_fraction)` | …before CFS throttling dominates |
+| `cap_queue` | `arr_per_rep · (inflight_baseline / inflight_per_rep)` | …before in-flight exceeds its own baseline |
+| `cap_goodput` | `completed / replicas` | observed completion — **reported, never part of the minimum** |
 
-Partial pooling shrinks each service toward a global prior with a configurable
-pseudo-count, which is what lets a brand-new deployment behave sensibly before
-it has its own history.
+**The binding capacity is `min(cap_cpu, cap_memory, cap_latency, cap_throttle,
+cap_queue)` and the argmin *is* the bottleneck.** No separate guess.
 
-The posterior variance is used directly by the decision engine as `sigma`, so
-uncertainty automatically makes the engine prefer headroom and become
-conservative about scaling in. **There is no fixed 85 %/90 % headroom constant.**
+Three properties make this different from a fixed threshold:
 
----
+- **`u_cpu` and `u_mem` are measured, not assumed.** They are the highest
+  utilisation the service has sustained while *not* throttling / without page
+  faults. A constant (0.85 / 0.90) is used only until enough evidence exists.
+- **`lat_baseline` is the service's own running minimum**, never the 200 ms SLO.
+  "10× its own normal" is the degradation signal.
+- **Blindness excludes latency.** If `blindness_ratio ≥ 0.5`, `cap_latency` is
+  dropped from the minimum and the uncertainty is inflated — missing
+  measurements are never read as a fast service.
+
+Each signal's log-capacity is partial-pooled toward a per-signal global mean, so
+a service with few observations still gets a usable estimate. `spread` (largest
+signal ÷ smallest) is reported so the decision engine knows when the signals
+disagree.
+
+**Goodput is a gate, not the objective.** If `completion_ratio` is low the
+decision engine discounts scaling for non-addressable bottlenecks; it never
+enters the capacity minimum.
 
 ## 8. Decision engine
 
 `decision/engine.py`. For every candidate `N` in `[min_pod, max_pod]`:
 
 ```
-p_serves_current(N) = P(N * capacity >= offered_now)     # lognormal capacity
-U(N) = w_perf * p - w_cost * N/max - w_risk * sigma - w_change * |N - N_committed|/max
-       - (1 - p_addressable) * 0.3 * N/max
+p_serves_current(N) = P(binding·N ≥ offered_now)      # lognormal capacity
+U(N) =  w_perf    * p_serves_current
+      − w_cost    * N / max
+      − w_risk    * sigma_binding          (log-space, dimensionless)
+      − w_spread  * (spread − 1)           (signals disagree)
+      − w_change  * |N − N_committed| / max
+      + w_complete* completion_ratio
 ```
 
-- `offered_now` is the current request rate — never a forecast.
-- The addressability term means a non-addressable bottleneck is not chased with
-  replicas.
-- A **hold band** keeps the current count when it is within 2 % of the best
-  utility, which prevents oscillation.
-- The result is clamped by the lifecycle reconciler and by min/max.
+**No SLO term exists.** The SLO is an evaluation metric only. A controller that
+optimises it directly can shed load to protect a percentile, and the front-p90
+SLO is blind to outages; the completion ratio and blindness ratio are here so the
+engine can see what the SLO cannot.
 
-Output actions: `hold`, `out`, `in`.
-
----
+- `offered_now` is the arrival rate observed in the current cycle.
+- `sigma_binding` is the log-space uncertainty of the binding signal, inflated by
+  the blindness ratio.
+- The bottleneck identity (argmin signal) and the learned addressability decide
+  whether scaling is indicated at all.
+- A hold band keeps the current count when it is within 2 % of the best utility,
+  which prevents oscillation.
 
 ## 9. Lifecycle-aware reconciler
 

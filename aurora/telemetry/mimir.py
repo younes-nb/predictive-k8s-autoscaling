@@ -23,6 +23,20 @@ class MimirError(RuntimeError):
     pass
 
 
+def _merge_sum(dst, key, pts):
+    cur = dict(dst.get(key, []))
+    for ts, v in pts:
+        cur[ts] = cur.get(ts, 0.0) + v
+    dst[key] = sorted(cur.items())
+
+
+def _merge_max(dst, key, pts):
+    cur = dict(dst.get(key, []))
+    for ts, v in pts:
+        cur[ts] = max(cur.get(ts, float("-inf")), v)
+    dst[key] = sorted(cur.items())
+
+
 def _resolve_pod(pod, services):
     """Map a pod name to its service by longest matching prefix.
 
@@ -106,7 +120,18 @@ class MimirClient:
                     if v != v or v in (float("inf"), float("-inf")):
                         continue
                     pts.append((int(ts), v))
-                if pts:
+                if not pts:
+                    continue
+                # A pod-grouped query returns one series per pod. Several pods
+                # belong to one service, so collapse them per timestamp instead
+                # of letting the last series overwrite the others (which
+                # under-counted network throughput and made pod_start_time
+                # arbitrary).
+                if key in ("net_rx", "net_tx", "fs_read", "fs_write", "io_time"):
+                    _merge_sum(out[svc], key, pts)
+                elif key == "pod_start_time":
+                    _merge_max(out[svc], key, pts)
+                else:
                     out[svc][key] = pts
             self._cache[key] = len(series)
         return out
@@ -120,3 +145,66 @@ class MimirClient:
         res = self.instant(
             f'kube_deployment_spec_replicas{{namespace="{self.cfg.namespace}"}}')
         return sorted({r["metric"].get("deployment", "") for r in res} - {""})
+
+# ---------------------------------------------------------------------------
+# Directed invocation edges
+# ---------------------------------------------------------------------------
+EDGE_RATE = ('sum by (source_workload, destination_workload) '
+             '(rate(istio_requests_total{{reporter="destination",'
+             'destination_workload_namespace="{ns}"}}[1m]))')
+EDGE_ERR = ('sum by (source_workload, destination_workload) '
+            '(rate(istio_requests_total{{reporter="destination",'
+            'destination_workload_namespace="{ns}",response_code=~"5.."}}[1m]))')
+
+
+def edge_query(expr, ns, quantile=None):
+    if quantile is None:
+        return expr.format(ns=ns)
+    return ('histogram_quantile({q}, sum by (source_workload, destination_workload, le) '
+            '(rate(istio_request_duration_milliseconds_bucket{{reporter="destination",'
+            'destination_workload_namespace="{ns}"}}[1m])))').format(q=quantile, ns=ns)
+
+
+class EdgeClient:
+    """Directed source -> destination edge observations."""
+
+    def __init__(self, config):
+        self.cfg = config
+        self.mimir = MimirClient(config)
+
+    def fetch(self, start, end, step=None):
+        """Return {edge_key: {feature: [(ts, value)]}}."""
+        step = step or self.cfg.telemetry_step_s
+        out = {}
+        specs = [
+            ("rate", edge_query(EDGE_RATE, self.cfg.namespace)),
+            ("err", edge_query(EDGE_ERR, self.cfg.namespace)),
+            ("p50", edge_query(None, self.cfg.namespace, 0.50)),
+            ("p90", edge_query(None, self.cfg.namespace, 0.90)),
+            ("p99", edge_query(None, self.cfg.namespace, 0.99)),
+        ]
+        for name, expr in specs:
+            try:
+                series = self.mimir.range(expr, start, end, step)
+            except MimirError:
+                continue
+            for s in series:
+                m = s.get("metric", {})
+                src = m.get("source_workload") or "external"
+                dst = m.get("destination_workload")
+                if not dst:
+                    continue
+                key = (src, dst)
+                d = out.setdefault(key, {})
+                pts = []
+                for ts, val in s.get("values", []):
+                    try:
+                        v = float(val)
+                    except (TypeError, ValueError):
+                        continue
+                    if v != v:
+                        continue
+                    pts.append((int(ts), v))
+                if pts:
+                    d[name] = pts
+        return out

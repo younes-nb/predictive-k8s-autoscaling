@@ -41,7 +41,17 @@ class Config:
         # ---- target -------------------------------------------------------
         self.namespace = _env("AURORA_NAMESPACE", "train-ticket")
         self.front_svc = _env("AURORA_FRONT_SVC", "ts-ui-dashboard")
-        self.slo_ms = _float("AURORA_SLO_MS", 200.0)
+
+        # ---- user-facing latency objective ---------------------------------
+        # Measured at the frontend/ingress boundary over VALID user requests.
+        # P99 deadline: 99% of valid requests must complete within the budget.
+        self.slo_percentile = _float("AURORA_SLO_PERCENTILE", 99.0)
+        self.slo_budget_ms = _float("AURORA_SLO_P99_MS", 200.0)
+
+        # ---- graph ---------------------------------------------------------
+        self.graph_hops = _int("AURORA_GRAPH_HOPS", 2)
+        self.max_services = _int("AURORA_MAX_SERVICES", 128)
+        self.max_edges = _int("AURORA_MAX_EDGES", 512)
 
         # ---- replica bounds (operational, not bottleneck thresholds) -------
         self.min_pod = _int("AURORA_MIN_POD", 1)
@@ -91,6 +101,6 @@ class Config:
         self.seed = _int("AURORA_SEED", 20)
 
     def __repr__(self):
-        return (f"Config(ns={self.namespace} slo={self.slo_ms} "
+        return (f"Config(ns={self.namespace} "
                 f"interval={self.decision_interval_s}s step={self.telemetry_step_s}s "
                 f"dry_run={self.dry_run})")

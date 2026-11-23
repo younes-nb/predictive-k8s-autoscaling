@@ -15,6 +15,7 @@ never become ``current``. ``rollback`` just repoints ``current`` at the previous
 version; nothing is deleted.
 """
 
+import hashlib
 import json
 import os
 import shutil
@@ -45,8 +46,8 @@ class ModelRegistry:
         os.replace(tmp, self.index_path)
 
     # ------------------------------------------------------------------
-    def publish(self, model, version, feature_schema, validation, notes="",
-                norm=None):
+    def publish_candidate(self, model, version, feature_schema, validation,
+                          notes="", norm=None):
         idx = self._read_index()
         if version in idx["versions"]:
             raise ValueError(f"version {version} already published")
@@ -82,6 +83,23 @@ class ModelRegistry:
             raise
 
         idx["versions"].append(version)
+        # Publication does NOT promote. Promotion is a separate, explicit step
+        # (promote) so a candidate can be validated or shadowed first.
+        self._write_index(idx)
+        return version
+
+    def publish(self, model, version, feature_schema, validation, notes="",
+                norm=None):
+        """Publish and promote in one step (kept for the training CLI)."""
+        self.publish_candidate(model, version, feature_schema, validation,
+                               notes=notes, norm=norm)
+        return self.promote(version)
+
+    def promote(self, version):
+        """Atomically point ``current`` at an already-published version."""
+        idx = self._read_index()
+        if version not in idx["versions"]:
+            raise KeyError(f"version {version} is not published")
         idx["current"] = version
         self._write_index(idx)
         return version
@@ -94,7 +112,15 @@ class ModelRegistry:
             raise FileNotFoundError("no published model")
         path = os.path.join(self.root, version, "model.pt")
         payload = torch.load(path, map_location="cpu", weights_only=False)
+        # A reordered feature vector with the same dimensionality would
+        # silently produce invalid inference, so verify the schema hash too.
+        schema_path = os.path.join(os.path.dirname(path), "feature_schema.json")
+        schema_hash = None
+        if os.path.exists(schema_path):
+            with open(schema_path, "rb") as fh:
+                schema_hash = hashlib.sha256(fh.read()).hexdigest()[:16]
         meta = {"version": version,
+                "feature_schema_hash": schema_hash,
                 "classes": payload.get("classes"),
                 "temperature": payload.get("temperature"),
                 "dist_threshold": payload.get("dist_threshold"),
