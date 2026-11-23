@@ -37,12 +37,20 @@ log "aurora is running and Ready (replicas stay with it)"
 # ---- 2. record the workload restart baseline ------------------------------
 # AURORA's own restarts are excluded: it is not part of the workload, and a
 # controller restart would restore the HPAs and hand the replicas back.
+# Only ``ts-*`` pods are workload pods. The namespace also holds
+# infrastructure (the ACME cert-manager solver, istio, monitoring sidecars)
+# whose readiness has nothing to do with the workload and which never reaches
+# the workload's container count -- including them made the reset wait for a
+# pod that would never satisfy the predicate.
+# Only ``ts-*`` pods are workload pods. The namespace also holds
+# infrastructure (the ACME cert-manager solver, istio) whose restarts are
+# unrelated to the workload and must not be counted.
 workload_restarts() {
   kubectl -n "$NS" get pods --no-headers 2>/dev/null \
-    | awk -v skip="$(kubectl -n "$NS" get pods -l app=aurora \
+    | awk -F'|' -v skip="$(kubectl -n "$NS" get pods -l app=aurora \
         --no-headers -o custom-columns=N:.metadata.name 2>/dev/null)" \
       'BEGIN{n=split(skip,a,"\n"); for(i=1;i<=n;i++) s[a[i]]=1}
-       !($1 in s){t+=$4} END{print t+0}'
+       ($1 ~ /^ts-/) && !($1 in s){t+=$4} END{print t+0}'
 }
 before_restarts=$(workload_restarts)
 log "workload container restarts before: $before_restarts"
@@ -52,39 +60,50 @@ log "workload container restarts before: $before_restarts"
 # selected by the app=aurora label and must never appear here.
 log "deleting workload pods (aurora excluded)"
 kubectl -n "$NS" get pods --no-headers -o custom-columns=N:.metadata.name,O:.metadata.ownerReferences[0].kind,L:.metadata.labels.app \
-  2>/dev/null | awk '$2=="ReplicaSet" && $3!="aurora"{print $1}' \
+  2>/dev/null | awk '$1 ~ /^ts-/ && $2=="ReplicaSet"{print $1}' \
   | xargs -r -n 20 kubectl -n "$NS" delete pod --wait=false --timeout=60s >/dev/null 2>&1 || true
 
 # ---- 4. wait for every workload deployment to be Ready -------------------
-# The readiness predicate is the *container* status, not the pod's "READY"
-# column. The column counts the Istio sidecar too ("2/2"), and a sidecar can
-# legitimately sit at 1/2 while the application container is Ready -- waiting
-# for 2/2 would block the whole reset on a proxy that is not part of the
-# workload's readiness. AURORA's own pod is excluded by name.
+# Readiness is evaluated on ``status.containerStatuses`` -- the *application*
+# containers. The pod's READY column also counts Istio's sidecar, and Istio
+# 1.30 runs ``istio-proxy`` as a native sidecar (an init container with
+# ``restartPolicy: Always``), so a perfectly healthy pod reads "1/2" forever.
+# Using the column would block the reset until the 900 s timeout.
+#
+# A pod is ready when it is Running and every application container reports
+# ready=true. AURORA's own pod is excluded by name, and only ``ts-*`` pods are
+# considered: the namespace also holds infrastructure (the ACME cert-manager
+# solver) whose readiness is unrelated to the workload.
+workload_not_ready() {
+  # Pods are reported as name|phase|ready|deletionTimestamp. A pod that is
+  # terminating is NOT ready: it is on its way out and its replacement has not
+  # necessarily started, so counting it as ready would let the reset finish
+  # while the namespace is still churning.
+  kubectl -n "$NS" get pods -o jsonpath='{range .items[*]}{.metadata.name}{"|"}{.status.phase}{|"}{.status.containerStatuses[*].ready}{"|"}{.metadata.deletionTimestamp}{"\n"}{end}' 2>/dev/null \
+    | awk -F'|' -v skip="$(kubectl -n "$NS" get pods -l app=aurora \
+        --no-headers -o custom-columns=N:.metadata.name 2>/dev/null)" \
+      'BEGIN{n=split(skip,a,"\n"); for(i=1;i<=n;i++) s[a[i]]=1}
+       {
+         name=$1; phase=$2; ready=$3; del=$4
+         if (name !~ /^ts-/ || (name in s)) next
+         bad = (phase != "Running") || (del != "")
+         if (ready == "" || ready ~ /false/) bad = 1
+         if (bad) { print name, phase, ready, (del != "" ? "Terminating" : "") }
+       }'
+}
+
 log "waiting for workload containers (timeout ${TIMEOUT}s)"
 deadline=$(( $(date +%s) + TIMEOUT ))
 while [ "$(date +%s)" -lt "$deadline" ]; do
-  not_ready=$(kubectl -n "$NS" get pods --no-headers 2>/dev/null \
-    | awk -v skip="$(kubectl -n "$NS" get pods -l app=aurora \
-        --no-headers -o custom-columns=N:.metadata.name 2>/dev/null)" \
-      'BEGIN{n=split(skip,a,"\n"); for(i=1;i<=n;i++) s[a[i]]=1}
-       !($1 in s) && $2 ~ /^([0-9]+)\// {
-         split($2, c, "/"); if (c[1] + 0 < c[2] + 0) n++
-       } END{print n+0}')
-  if [ "${not_ready:-0}" = "0" ]; then
+  still=$(workload_not_ready)
+  if [ -z "${still:-}" ]; then
     log "all workload containers Ready"
     break
   fi
   sleep 10
 done
 
-still=$(kubectl -n "$NS" get pods --no-headers 2>/dev/null \
-  | awk -v skip="$(kubectl -n "$NS" get pods -l app=aurora \
-      --no-headers -o custom-columns=N:.metadata.name 2>/dev/null)" \
-    'BEGIN{n=split(skip,a,"\n"); for(i=1;i<=n;i++) s[a[i]]=1}
-     !($1 in s) && $2 ~ /^([0-9]+)\// {
-       split($2, c, "/"); if (c[1] + 0 < c[2] + 0) print $1, $2
-     }')
+still=$(workload_not_ready)
 if [ -n "${still:-}" ]; then
   log "FATAL: workload pod(s) still not Ready after ${TIMEOUT}s:"
   echo "$still"

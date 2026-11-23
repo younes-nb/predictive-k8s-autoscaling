@@ -3,12 +3,17 @@
 #
 # AURORA stays in the cluster across runs and owns the replica count: it
 # suspends the namespace HPAs on start and restores them on exit. So this hook
-# is idempotent -- it (re)applies the RBAC/PVC, makes sure the Deployment is
+# is idempotent -- it ensures the RBAC/PVC exist, makes sure the Deployment is
 # running the image in aurora/data/IMAGE, and waits for the pod to be Ready.
 #
 # It deliberately does NOT delete and recreate AURORA, and it does NOT bring the
 # HPAs back: AURORA already holds them suspended, which is the state a
 # development run is supposed to start from.
+#
+# IMPORTANT: never ``kubectl apply -f deployment.yaml`` here. That file carries
+# the literal ``__AURORA_IMAGE__`` placeholder, so applying it changes the
+# Deployment's image and triggers a rolling restart on every invocation. Only a
+# rendered manifest with a real image may be applied.
 set -uo pipefail
 cd /proj/k8sautoscaledl-PG0/src/predictive-k8s-autoscaling
 export PATH="$HOME/.local/bin:$PATH"
@@ -22,16 +27,20 @@ if [ -z "${IMAGE:-}" ]; then
 fi
 echo "using image: $IMAGE"
 
-echo "applying aurora rbac + state pvc"
+# RBAC and the state PVC are safe to apply unconditionally: they are not
+# pod-template-bearing, so they cannot restart the controller.
+echo "applying aurora rbac"
 kubectl apply -f aurora/deploy/rbac.yaml
-kubectl apply -f aurora/deploy/deployment.yaml >/dev/null
 
-# Only re-render when the image actually changed: an unnecessary apply would
-# restart the controller and suspend/restore the HPAs again mid-development.
+# Only re-render when the image actually changed. An unnecessary apply would
+# roll the controller, which restores and re-suspends the HPAs.
 CURRENT=$(kubectl -n train-ticket get deploy aurora \
             -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)
 if [ "$CURRENT" != "$IMAGE" ]; then
   echo "image changed ($CURRENT -> $IMAGE); rendering deployment"
+  sed "s|__AURORA_IMAGE__|$IMAGE|" aurora/deploy/deployment.yaml | kubectl apply -f -
+elif [ -z "$CURRENT" ]; then
+  echo "aurora deployment missing; creating it"
   sed "s|__AURORA_IMAGE__|$IMAGE|" aurora/deploy/deployment.yaml | kubectl apply -f -
 else
   echo "aurora already running $IMAGE"

@@ -499,8 +499,11 @@ if [ "$AURORA_DEV" = "1" ]; then
   # up and every pod is Ready.
   AURORA_READY=$(kubectl -n train-ticket get pods -l app=aurora \
       -o jsonpath='{.items[0].status.containerStatuses[0].ready}' 2>/dev/null || true)
-  NOT_READY=$(kubectl -n train-ticket get pods --no-headers 2>/dev/null \
-      | awk '$2!="2/2" && $2!="1/1" {n++} END{print n+0}')
+  # Readiness is read from ``containerStatuses``, not the READY column: Istio
+  # 1.30 runs istio-proxy as a native sidecar, so a healthy pod reads "1/2".
+  NOT_READY=$(kubectl -n train-ticket get pods \
+      -o jsonpath='{range .items[*]}{.metadata.name}{"|"}{.status.phase}{"|"}{.status.containerStatuses[*].ready}{"|"}{.metadata.deletionTimestamp}{"\\n"}{end}' 2>/dev/null \
+      | awk -F'|' '$1 !~ /^ts-/ {next} {bad=($2!="Running") || ($4!=""); if($3=="" || $3 ~ /false/) bad=1; if(bad) n++} END{print n+0}')
   if [ "$AURORA_READY" != "true" ] || [ "${NOT_READY:-0}" != "0" ]; then
     echo "ASSERT cold_ok=False AURORA_DEV aurora_ready=$AURORA_READY not_ready=$NOT_READY" \
         > "$RUN_DIR/cold_gate.log"

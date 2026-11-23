@@ -38,6 +38,34 @@ if [ "$RESET" = "1" ]; then
   fi
 fi
 
+# 2b. wait for a STABLE namespace before launching.
+# A reset that deletes pods with --wait=false can return while the ReplicaSets
+# are still recreating them. Launching immediately then makes the orchestrator's
+# cold gate see pods in Init/Terminating and abort. Require the same readiness
+# predicate to hold for three consecutive checks, 10 s apart.
+ts_not_ready() {
+  kubectl -n "$NS" get pods \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"|"}{.status.phase}{"|"}{.status.containerStatuses[*].ready}{"|"}{.metadata.deletionTimestamp}{"\\n"}{end}' 2>/dev/null \
+    | awk -F'|' '$1 !~ /^ts-/ {next} {bad=($2!="Running") || ($4!=""); if($3=="" || $3 ~ /false/) bad=1; if(bad) n++} END{print n+0}'
+}
+NS=train-ticket
+stable=0
+for _ in $(seq 1 60); do
+  n=$(ts_not_ready)
+  if [ "${n:-0}" = "0" ]; then
+    stable=$((stable + 1))
+    [ "$stable" -ge 3 ] && break
+  else
+    stable=0
+  fi
+  sleep 10
+done
+if [ "${stable:-0}" -lt 3 ]; then
+  echo "FATAL: namespace did not stabilise (ts_not_ready=${n:-?})" >&2
+  exit 1
+fi
+echo "namespace stable (3 consecutive clean checks)"
+
 # 3. run the load test. AURORA_DEV=1 makes the orchestrator skip the HPA
 #    assertions and skip the final reset, so AURORA keeps ownership.
 LOG=/tmp/opencode/${NAME}.log
