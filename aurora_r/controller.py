@@ -21,8 +21,16 @@ class AuroraController:
         self.run_id=str(int(time.time()))
         self.stopped=False
         self.timings=[]
-        if cfg.mode=='live' and not self.policy.eligible_for_live():
+        if cfg.mode=='live' and cfg.policy_source=='model' and not self.policy.eligible_for_live():
             raise RuntimeError('model not intervention-validated/heldout/calibrated; live scaling refused')
+        if cfg.mode=='live' and cfg.policy_source=='rule':
+            # The rule policy is deterministic and carries no learned
+            # confidence, so the model accreditation gate does not apply. It is
+            # still bound by every other guard: single writer, per-service
+            # bounds, SLO validity, lifecycle stability.
+            print('[aurora-r] live mode with the deterministic rule policy; '
+                  'the learned response model is not in the decision path',
+                  flush=True)
     @staticmethod
     def _rate(snap,svc):
         idx=snap.services.index(svc)

@@ -115,7 +115,93 @@ class DecisionPolicy:
         temperature=float(self.meta.get('head_temperatures',{}).get(key,1.))
         return torch.sigmoid(torch.logit(probs)/max(.1,temperature)).cpu().tolist()
 
+    # ------------------------------------------------------------------
+    # Deterministic rule policy (bootstrap for the response model).
+    #
+    # The learned response model predicts the *effect* of a replica change from
+    # settled interventions. Until those exist, the controller still has to be
+    # able to act, and the actions it takes are what produce the interventions.
+    # This policy is deliberately narrow and uses measured pressure only:
+    #   scale out  when the SLO is violated AND the service is at/over its
+        #              CPU request (or throttling), i.e. replicas can plausibly
+        #              relieve the observed pressure
+        #   scale in   when the SLO has been continuously healthy for the
+        #              stabilization window AND CPU request utilisation is low
+    # The SLO is permission, never the bottleneck signal.
+    # ------------------------------------------------------------------
+    def _rule_pressure(self,snap,index):
+        from .schema import NODE_FEATURES
+        iu=NODE_FEATURES.index('cpu_request_util')
+        it=NODE_FEATURES.index('cpu_throttle_frac')
+        il=NODE_FEATURES.index('latency_p90_ms')
+        row=snap.node_mask[index,-1]
+        util=float(snap.node_x[index,-1,iu]) if row[iu] else None
+        thr=float(snap.node_x[index,-1,it]) if row[it] else None
+        lat=float(snap.node_x[index,-1,il]) if row[il] else None
+        return util,thr,lat
+
+    def choose_rule(self,snap,now=None,blocked=False):
+        now=time.time() if now is None else now
+        self.last_action_ms=0.; self.last_diag_ms=0.; self.last_rankings=[]
+        if not snap.slo.valid(now,self.cfg.max_slo_age_s,self.cfg.min_slo_eligible):
+            self.healthy_since=None
+            return None,'rule: independent ingress SLO absent, stale, or too few requests',None
+        if blocked:
+            self.healthy_since=None
+            return None,'rule: unresolved action, waiting for Ready/serving and post-action SLO',None
+        miss=snap.slo.miss_rate; fail=snap.slo.capacity_failure_rate
+        degraded=(miss>self.cfg.max_slo_risk_scalein or
+                  fail>self.cfg.max_slo_risk_scalein)
+        healthy=(snap.slo.upper_bernoulli_bound(snap.slo.missed)<=self.cfg.max_slo_risk_scalein and
+                 snap.slo.upper_bernoulli_bound(snap.slo.capacity_fail)<=self.cfg.max_slo_risk_scalein)
+        if healthy:
+            if self.healthy_since is None:self.healthy_since=now
+        else:
+            self.healthy_since=None
+        evidence=[]
+        for i,svc in enumerate(snap.services):
+            util,thr,lat=self._rule_pressure(snap,i)
+            rep=snap.replicas[svc]
+            if util is None or not rep.stable():
+                continue
+            evidence.append({'service':svc,'p_root':min(1.,util),'p_remediable':min(1.,util),
+                             'p_scalein_safe':0.0,'model_valid':True,
+                             'cpu_util':util,'throttle':thr,'lat':lat,
+                             'current':rep.spec})
+        self.last_rankings=sorted(evidence,key=lambda d:d['cpu_util'],reverse=True)[:10]
+        direction='out' if degraded else ('in' if healthy else None)
+        if direction is None:
+            return None,'rule: SLO inconclusive (no measured breach, not enough evidence of health)',None
+        if direction=='in' and now-self.healthy_since<self.cfg.scale_in_health_s:
+            return None,'rule: scale-in: healthy window has not elapsed',None
+        best=None
+        for e in evidence:
+            svc=e['service']; rep=snap.replicas[svc]
+            bounds=self.cfg.target_map()[svc]
+            current=rep.spec
+            if direction=='out':
+                if not (e['cpu_util']>=self.cfg.rule_cpu_util_scaleout or
+                        (e['throttle'] is not None and e['throttle']>=self.cfg.rule_throttle_scaleout)):
+                    continue
+                target=min(bounds.max_replicas,current+1)
+                if target<=current:continue
+            else:
+                if e['cpu_util']>self.cfg.rule_cpu_util_scalein:continue
+                target=max(bounds.min_replicas,current-1)
+                if target>=current:continue
+            score=e['cpu_util']
+            if best is None or (direction=='out' and score>best[0]) or (direction=='in' and score<best[0]):
+                best=(score,Decision(svc,current,target,direction,score,
+                    'rule: measured CPU request utilisation %.2f (throttle %s)'%(
+                        e['cpu_util'], 'n/a' if e['throttle'] is None else '%.2f'%e['throttle']),
+                    e['p_root'],e['p_remediable'],0.,0.,0.,0.,miss))
+        if best is None:
+            return None,'rule: no service met the measured-pressure evidence for '+direction,None
+        return best[1],'rule: action selected',None
+
     def choose(self,snap,now=None,blocked=False):
+        if self.cfg.policy_source=='rule':
+            return self.choose_rule(snap,now=now,blocked=blocked)
         now=time.time() if now is None else now
         self.last_action_ms=0.
         self.last_diag_ms=0.

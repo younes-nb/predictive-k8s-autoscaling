@@ -33,6 +33,10 @@ def read_jsonl(paths,cls):
     return result
 
 def action_effect(item):
+    # Interventions are usable whatever produced the action (rule or model), as
+    # long as they carry the evidence fields: settled post-Ready SLO, a
+    # workload-matched rate, and a declared control. The treatment *label* is
+    # the observed replica change; no causal claim is made without a control.
     if not item.eligible():raise ValueError('intervention missing evidence')
     pre=item.snapshot.slo
     # Matched-control trend corrections are declared by the experiment. Under

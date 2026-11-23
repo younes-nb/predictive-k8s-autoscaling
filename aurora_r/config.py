@@ -31,6 +31,13 @@ class Config:
     # ingress it does not own; it is a completion-side approximation and cannot
     # see a request that never completes.
     slo_source: str = 'auto'
+    # Where the replica proposal comes from.
+    #   model  score candidates with the trained action-response ensemble
+    #   rule   deterministic safety policy on measured resource pressure
+    # ``rule`` exists because the response model is a bootstrap until a set of
+    # settled, workload-matched interventions exists. Running the rule policy
+    # is how that set is collected; it is not a learned scaling-benefit model.
+    policy_source: str = 'model'
     # Telemetry is at 5 s; decisions are INDEPENDENTLY configurable.
     telemetry_step_s: int = 5
     decision_interval_s: float = 15.0
@@ -71,12 +78,22 @@ class Config:
     max_slo_risk_scalein: float = 0.01
     max_workload_shift_for_learning: float = 0.20
     min_action_examples: int = 30
+    # Deterministic rule policy evidence. These are *measured pressure*
+    # thresholds, not SLO thresholds: the rule never reads the SLO as a
+    # bottleneck signal, only as permission to act.
+    rule_cpu_util_scaleout: float = 1.0
+    rule_cpu_util_scalein: float = 0.30
+    rule_throttle_scaleout: float = 0.05
 
     def __post_init__(self):
         if self.mode not in {'shadow', 'live'}:
             raise ValueError('mode must be shadow or live')
         if self.slo_source not in {'auto', 'gateway', 'istio'}:
             raise ValueError('slo_source must be auto, gateway or istio')
+        if self.policy_source not in {'model', 'rule'}:
+            raise ValueError('policy_source must be model or rule')
+        if self.rule_cpu_util_scaleout < 0 or self.rule_cpu_util_scalein < 0:
+            raise ValueError('rule CPU thresholds must be non-negative')
         if not self.namespace or not self.targets:
             raise ValueError('namespace and explicitly named targets required')
         if len({x.deployment for x in self.targets}) != len(self.targets):
