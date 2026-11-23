@@ -127,6 +127,10 @@ SKIP_DATASET=${SKIP_DATASET:-0}
 SKIP_REPORT=${SKIP_REPORT:-0}      # build the one-file REPORT_*.md after the run
 SKIP_DUMPS=${SKIP_DUMPS:-0}
 SKIP_RESET=${SKIP_RESET:-0}
+# AURORA development mode: the controller stays in the cluster and owns the
+# replicas. The cold gate must then not demand HPAs that AURORA deliberately
+# suspended, and phase 12 must not hand the replicas back mid-development.
+AURORA_DEV=${AURORA_DEV:-0}
 MAX_STREAMS=${MAX_STREAMS:-0}   # 0 = derive from the live pod count at launch
 PERIODIC_DUMP_EVERY=${PERIODIC_DUMP_EVERY:-0}
 # Rotate (gzip + truncate) $RUN_DIR/logs when it exceeds this many MB. 0 = off.
@@ -489,11 +493,29 @@ done
 curl -fsS -m 15 "http://127.0.0.1:3100/ready" > /dev/null || die "loki tunnel not reachable"
 log "tunnels verified up (kube + mimir + loki)"
 
-if ! "$PY" pbscaler/scripts/launchers/reset_cluster_cold.py --assert-only \
-     > "$RUN_DIR/cold_gate.log" 2>&1; then
-  die "cold gate failed (see cold_gate.log)"
+if [ "$AURORA_DEV" = "1" ]; then
+  # AURORA is already deployed and owns the replicas; the HPAs are supposed to
+  # be absent. The only thing worth asserting is that the controller itself is
+  # up and every pod is Ready.
+  AURORA_READY=$(kubectl -n train-ticket get pods -l app=aurora \
+      -o jsonpath='{.items[0].status.containerStatuses[0].ready}' 2>/dev/null || true)
+  NOT_READY=$(kubectl -n train-ticket get pods --no-headers 2>/dev/null \
+      | awk '$2!="2/2" && $2!="1/1" {n++} END{print n+0}')
+  if [ "$AURORA_READY" != "true" ] || [ "${NOT_READY:-0}" != "0" ]; then
+    echo "ASSERT cold_ok=False AURORA_DEV aurora_ready=$AURORA_READY not_ready=$NOT_READY" \
+        > "$RUN_DIR/cold_gate.log"
+    die "cold gate failed (see cold_gate.log)"
+  fi
+  echo "ASSERT cold_ok=True AURORA_DEV aurora_ready=true not_ready=0 (AURORA owns replicas)" \
+      > "$RUN_DIR/cold_gate.log"
+  log "cold gate passed (AURORA_DEV): aurora Ready, all pods Ready, HPAs owned by AURORA"
+else
+  if ! "$PY" pbscaler/scripts/launchers/reset_cluster_cold.py --assert-only \
+       > "$RUN_DIR/cold_gate.log" 2>&1; then
+    die "cold gate failed (see cold_gate.log)"
+  fi
+  log "cold gate passed: $(grep -m1 'ASSERT cold_ok' "$RUN_DIR/cold_gate.log")"
 fi
-log "cold gate passed: $(grep -m1 'ASSERT cold_ok' "$RUN_DIR/cold_gate.log")"
 
 # ---------- phase 0c: optional pre-k6 hook ----------
 # Used to bring up an active autoscaler (PBScaler) AFTER the cold gate has
@@ -957,6 +979,10 @@ fi
 # ---------- phase 12: final cold reset ----------
 if [ "$SKIP_RESET" = "1" ]; then
   log "phase 12: SKIPPED (SKIP_RESET=1)"
+elif [ "$AURORA_DEV" = "1" ]; then
+  # The controller is still running and still owns the replicas. Resetting
+  # would scale the workloads behind its back and restore HPAs it suspended.
+  log "phase 12: SKIPPED (AURORA_DEV=1 -- aurora owns replicas)"
 else
   log "phase 12: final cold reset"
   if "$PY" pbscaler/scripts/launchers/reset_cluster_cold.py \

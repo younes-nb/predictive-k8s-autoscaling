@@ -61,7 +61,16 @@ class RunningNorm:
 
         Callers must only pass genuinely new samples; this method does not
         attempt to detect duplicates.
+
+        When the normaliser is frozen, the *frozen* statistics are never
+        touched -- they are the training representation and the encoder must
+        see exactly what it was trained on. Only the per-service local baseline
+        keeps accumulating, which is what drift detection and any future local
+        calibration read. The previous implementation folded every new sample
+        into ``global_mean``/``global_var`` even while frozen, so the
+        normalisation used by the model drifted during a run.
         """
+        frozen = self.frozen
         for key, v in values.items():
             if v is None:
                 continue
@@ -72,16 +81,17 @@ class RunningNorm:
             if not math.isfinite(v):
                 continue
 
-            n = self.global_n.get(key, 0.0) + 1.0
-            mean = self.global_mean.get(key, 0.0)
-            delta = v - mean
-            self.global_mean[key] = mean + delta / n
-            self.global_var[key] = (
-                (self.global_var.get(key, 1.0) * max(self.global_n.get(key, 0.0), 1.0)
-                 + delta * (v - self.global_mean[key]))
-                / max(n, 1.0)
-            )
-            self.global_n[key] = n
+            if not frozen:
+                n = self.global_n.get(key, 0.0) + 1.0
+                mean = self.global_mean.get(key, 0.0)
+                delta = v - mean
+                self.global_mean[key] = mean + delta / n
+                self.global_var[key] = (
+                    (self.global_var.get(key, 1.0) * max(self.global_n.get(key, 0.0), 1.0)
+                     + delta * (v - self.global_mean[key]))
+                    / max(n, 1.0)
+                )
+                self.global_n[key] = n
 
             loc = self.local.setdefault(service, {"mean": {}, "var": {}, "n": {}})
             ln = loc["n"].get(key, 0.0) + 1.0
@@ -97,10 +107,18 @@ class RunningNorm:
 
     # ------------------------------------------------------------------
     def freeze(self):
-        """Use the frozen training statistics for the encoder input."""
+        """Freeze the encoder-input statistics at the training representation.
+
+        After this call ``global_mean``/``global_var`` are read-only: ``update``
+        keeps feeding the per-service local baseline (for drift) but never the
+        frozen pair, so the model's input distribution cannot drift at runtime.
+        """
         self.frozen = True
 
     def stats(self, service, key):
+        # The frozen pair is what the encoder was trained with. It is never
+        # written after freeze(), so inference uses the training representation
+        # verbatim.
         if self.frozen:
             return (self.global_mean.get(key, 0.0),
                     max(math.sqrt(self.global_var.get(key, 1.0)), 1e-6))

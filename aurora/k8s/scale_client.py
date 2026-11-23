@@ -4,6 +4,11 @@ AURORA-HPA is the **single replica writer** for every workload it manages. The
 native HPAs are suspended for the duration so the two cannot fight over
 ``.spec.replicas``; their manifests are saved to disk and a ConfigMap so a
 controller crash still leaves a recoverable state.
+
+Suspension is transactional: if any deletion fails part-way, the HPAs already
+deleted are restored immediately and the saved state is kept so a later process
+can finish the job. A restart that finds the HPAs absent does not clear the
+restoration obligation -- it inherits it.
 """
 
 import json
@@ -36,6 +41,9 @@ class ScaleClient:
         # behavior) is preserved verbatim, not just min/max/target.
         self.custom = client.CustomObjectsApi()
         self.saved_hpas = []
+        # Set by suspend_hpas(): the HPAs this process deleted, so a partial
+        # failure can be rolled back without touching anyone else's.
+        self._deleted_by_us = []
 
     def _load_config(self):
         try:
@@ -101,7 +109,8 @@ class ScaleClient:
 
     # ------------------------------------------------------------------
     def pod_counts(self, service):
-        """Return (ready, pending list of {age_s, reason}, spec, start_times)."""
+        """Return (ready, pending list of {age_s, reason}, spec, start_times,
+        ready_uids)."""
         # Use the Deployment's own selector: container names and the "app" label
         # convention are not generic (many charts use app.kubernetes.io/name).
         selector = None
@@ -153,13 +162,20 @@ class ScaleClient:
         d = self.apps.read_namespaced_deployment(service, self.cfg.namespace)
         return d.spec.replicas or 0
 
+    def deployment_image(self, service):
+        try:
+            d = self.apps.read_namespaced_deployment(service, self.cfg.namespace)
+            return d.spec.template.spec.containers[0].image
+        except (ApiException, IndexError):
+            return None
+
     # ------------------------------------------------------------------
     # HPA suspend / restore
     # ------------------------------------------------------------------
     def _save_hpa_state(self, items):
         # Never overwrite a good saved state with an empty one: a restart that
         # finds no HPAs (because a previous run suspended them) must not erase
-    # the record of what to restore.
+        # the record of what to restore.
         if not items:
             print("[aurora] no HPAs to save; keeping the existing state")
             return
@@ -179,14 +195,46 @@ class ScaleClient:
             self.core.create_namespaced_config_map(self.cfg.namespace, body)
         except ApiException as exc:
             if exc.status == 409:
+                # Carry the current resourceVersion: an update without it is
+                # rejected, and a blind create would orphan the old object.
+                cur = self.core.read_namespaced_config_map(cm_name, self.cfg.namespace)
+                body["metadata"]["resourceVersion"] = cur.metadata.resource_version
                 self.core.replace_namespaced_config_map(cm_name, self.cfg.namespace, body)
+
+    def _delete_hpa(self, namespace, name):
+        try:
+            self.custom.delete_namespaced_custom_object(
+                group="autoscaling", version="v2", namespace=namespace,
+                plural="horizontalpodautoscalers", name=name)
+            return True
+        except ApiException as exc:
+            if getattr(exc, "status", None) == 404:
+                return True          # already gone
+            raise
+
+    def _create_hpa(self, namespace, manifest):
+        body = json.loads(json.dumps(manifest))
+        meta = body.setdefault("metadata", {})
+        for k in ("resourceVersion", "uid", "creationTimestamp",
+                  "managedFields", "generation"):
+            meta.pop(k, None)
+        meta["namespace"] = namespace
+        self.custom.create_namespaced_custom_object(
+            group="autoscaling", version="v2", namespace=namespace,
+            plural="horizontalpodautoscalers", body=body)
 
     def suspend_hpas(self, managed_targets=None):
         """Suspend only the HPAs whose scaleTargetRef is a managed Deployment.
 
         HPAs for StatefulSets, other applications or unmanaged workloads are
         left untouched -- deleting them would break workloads AURORA does not
-        own."""
+        own.
+
+        The operation is transactional. If a deletion fails after some HPAs
+        were removed, those HPAs are recreated from their saved manifests and
+        the saved state is left in place so a later process can retry. Either
+        the namespace is fully suspended or it is back as it was.
+        """
         if not self.cfg.suspend_hpas:
             return []
         items = []
@@ -217,17 +265,28 @@ class ScaleClient:
                 # behavior), labels and annotations
                 "manifest": h,
             })
+        if not items:
+            return []
         self.saved_hpas = items
+        # Persist BEFORE the first deletion: a crash between the save and the
+        # delete must still leave a recoverable record.
         self._save_hpa_state(items)
-        for it in items:
-            try:
-                self.custom.delete_namespaced_custom_object(
-                    group="autoscaling", version="v2",
-                    namespace=it["namespace"],
-                    plural="horizontalpodautoscalers", name=it["name"])
-            except ApiException as exc:
-                if getattr(exc, "status", None) != 404:
-                    raise
+        self._deleted_by_us = []
+        try:
+            for it in items:
+                self._delete_hpa(it["namespace"], it["name"])
+                self._deleted_by_us.append(it)
+        except Exception:
+            # Roll back whatever we already removed, then re-raise. The saved
+            # state stays on disk: if the rollback itself is incomplete, a later
+            # process still knows what the original HPAs were.
+            restored, failed = self._restore_items(self._deleted_by_us)
+            print(f"[aurora] suspend aborted: rolled back {restored} HPA(s)"
+                  + (f", {len(failed)} could not be restored" if failed else ""))
+            if failed:
+                print("[aurora] recovery state preserved: "
+                      f"{[f['name'] for f in failed]}")
+            raise
         return items
 
     def load_saved_state(self):
@@ -255,47 +314,116 @@ class ScaleClient:
         self.saved_hpas = raw
         return raw
 
-    def restore_hpas(self):
-        """Recreate each HPA from its complete saved object.
+    def _restore_items(self, items):
+        """Recreate each item from its complete saved object.
 
-        Uses the same path whether called by the controller at shutdown or by
-        the external recovery tool after a crash.
+        Returns ``(restored, failed)``. Idempotent: an HPA that already exists
+        counts as restored.
+        """
+        restored, failed = 0, []
+        for it in items:
+            body = it.get("manifest")
+            if not body:
+                failed.append(it)
+                continue
+            try:
+                self.custom.get_namespaced_custom_object(
+                    group="autoscaling", version="v2",
+                    namespace=it["namespace"],
+                    plural="horizontalpodautoscalers", name=it["name"])
+                restored += 1
+                continue
+            except ApiException as exc:
+                if getattr(exc, "status", None) != 404:
+                    failed.append(it)
+                    continue
+            try:
+                self._create_hpa(it["namespace"], body)
+                restored += 1
+            except ApiException as exc:
+                if getattr(exc, "status", None) == 409:
+                    restored += 1
+                else:
+                    failed.append(it)
+        return restored, failed
+
+    def restore_hpas(self):
+        """Recreate every saved HPA from its complete manifest.
+
+        Uses the same path whether called by the controller at shutdown, by the
+        startup recovery path, or by the external recovery tool after a crash.
+        The saved state is cleared only when every HPA is confirmed present.
         """
         if not self.cfg.restore_hpas:
             return 0
         items = self.load_saved_state()
-        n = 0
+        if not items:
+            return 0
+        restored, failed = self._restore_items(items)
+        if failed:
+            names = [f["name"] for f in failed]
+            print(f"[aurora] restore incomplete ({restored}/{len(items)}); "
+                  f"state kept for: {names}")
+            self.saved_hpas = items
+            return restored
+        # Verified: clear the recovery record so a later restart does not
+        # resurrect HPAs that were deliberately removed.
+        self.saved_hpas = []
+        self._clear_saved_state()
+        return restored
+
+    def _clear_saved_state(self):
+        try:
+            os.remove(self.cfg.hpa_state_file)
+        except OSError:
+            pass
+        try:
+            self.core.delete_namespaced_config_map(
+                "aurora-hpa-state", self.cfg.namespace)
+        except ApiException:
+            pass
+
+    # ------------------------------------------------------------------
+    def pending_recovery(self):
+        """True when the saved state describes HPAs that are not present.
+
+        A restart that finds the namespace without HPAs while a saved manifest
+        exists has inherited an obligation to restore them. Acting on that is
+        what makes a crash before the first successful restore recoverable.
+        """
+        items = self.load_saved_state()
+        if not items:
+            return False
         for it in items:
-            body = it.get("manifest")
-            if not body:
-                continue
-            # idempotent: an HPA that already exists was restored by a
-            # previous call (or by the controller's own SIGTERM path)
             try:
                 self.custom.get_namespaced_custom_object(
                     group="autoscaling", version="v2",
-                    namespace=it["namespace"], plural="horizontalpodautoscalers",
-                    name=it["name"])
-                n += 1
-                continue
-            except ApiException as exc:
-                if getattr(exc, "status", None) != 404:
-                    raise
-            body = json.loads(json.dumps(body))
-            meta = body.setdefault("metadata", {})
-            for k in ("resourceVersion", "uid", "creationTimestamp",
-                      "managedFields", "generation"):
-                meta.pop(k, None)
-            meta["name"] = it["name"]
-            meta["namespace"] = it["namespace"]
-            try:
-                self.custom.create_namespaced_custom_object(
-                    group="autoscaling", version="v2",
                     namespace=it["namespace"],
-                    plural="horizontalpodautoscalers", body=body)
-                n += 1
+                    plural="horizontalpodautoscalers", name=it["name"])
             except ApiException as exc:
-                if getattr(exc, "status", None) != 409:
-                    raise
-        self.saved_hpas = []
-        return n
+                if getattr(exc, "status", None) == 404:
+                    return True
+                raise
+        return False
+
+    def bounds_from_saved_state(self):
+        """Per-service (min, max) from the saved HPA manifests.
+
+        On a restart the live HPAs are usually absent, so the bounds used to
+        size the replica model must come from the same manifests that will be
+        restored -- otherwise every service silently falls back to the global
+        configuration limits.
+        """
+        bounds = {}
+        for it in self.load_saved_state():
+            manifest = it.get("manifest") or {}
+            target = it.get("target") or (
+                (manifest.get("spec", {}).get("scaleTargetRef") or {}).get("name"))
+            if not target:
+                continue
+            spec = manifest.get("spec", {}) or {}
+            lo = spec.get("minReplicas")
+            hi = spec.get("maxReplicas")
+            bounds[target] = (int(lo) if lo is not None else 1,
+                              int(hi) if hi is not None else 1)
+        return bounds

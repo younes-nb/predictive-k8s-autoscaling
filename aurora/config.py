@@ -66,8 +66,10 @@ class Config:
         # Missing-telemetry policy: "safe" = hold replicas, "skip" = skip the cycle.
         self.stale_policy = _env("AURORA_STALE_POLICY", "safe")
 
-        # ---- duration -----------------------------------------------------
-        self.duration_s = _int("AURORA_DURATION_S", 3900)
+        # There is no run-length knob. The controller is resident: it runs until
+        # it is signalled (SIGTERM/SIGINT), suspends the native HPAs while it
+        # owns the replicas, and restores them on the way out. A timed run is
+        # the orchestrator's job (it stops the controller when k6 finishes).
 
         # ---- k8s ----------------------------------------------------------
         self.k8s_config = _env(
@@ -92,14 +94,30 @@ class Config:
         self.registry_dir = _env("AURORA_REGISTRY_DIR", "/var/lib/aurora/registry")
 
         # ---- model --------------------------------------------------------
+        # Both of these are read by the bundle loader (registry_dir) and by
+        # nothing else. model_dir/device were dead settings that implied a
+        # second loading path; they are kept only as the image-baked location
+        # the Dockerfile exports, and the loader below is the single path.
         self.model_dir = _env("AURORA_MODEL_DIR", "/opt/aurora/model")
         self.device = _env("AURORA_DEVICE", "cpu")
         self.uncertainty_scale = _float("AURORA_UNCERTAINTY_SCALE", 1.0)
+        # Minimum observations behind a quantile before it is actionable.
+        self.slo_min_samples = _int("AURORA_SLO_MIN_SAMPLES", 20)
 
         # ---- behaviour ----------------------------------------------------
         self.dry_run = _bool("AURORA_DRY_RUN", False)
         self.seed = _int("AURORA_SEED", 20)
         self.scale_in_stabilization_s = _int("AURORA_SCALE_IN_STABILIZATION_S", 300)
+        # Replica-model confidence floors. The diagnosis confidence is a
+        # separate gate; neither stands in for the other.
+        self.action_conf_min = _float("AURORA_ACTION_CONF_MIN", 0.20)
+        self.target_conf_min = _float("AURORA_TARGET_CONF_MIN", 0.15)
+        # Post-action observation window before an outcome is settled.
+        self.settle_window_s = _int("AURORA_SETTLE_WINDOW_S", 60)
+        # The decision path must never consume the whole interval.
+        self.cycle_deadline_s = _float("AURORA_CYCLE_DEADLINE_S", 12.0)
+        # Bounded parallelism for telemetry queries (default serial).
+        self.query_workers = _int("AURORA_QUERY_WORKERS", 6)
 
     def __repr__(self):
         return (f"Config(ns={self.namespace} "

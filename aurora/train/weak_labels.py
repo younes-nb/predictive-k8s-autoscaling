@@ -12,7 +12,11 @@ Rule sketch:
 
   transition        young pods / pending replicas -> starting up
   memory            working set at the service's high end AND (page faults or OOM)
-  cpu               cpu near the limit AND throttling at the service's high end
+  cpu               cpu REQUEST UTILISATION at the service's high end AND
+                    throttling at the service's high end (independent evidence).
+                    cpu_limit_pct no longer exists: the only CPU utilisation
+                    ratio is usage / request, which is uncapped and may exceed
+                    1.0.
   network           rx/tx at the service's high end
   storage           fs/io at the service's high end
   shared_dependency downstream latency high while local cpu/mem are calm
@@ -41,18 +45,33 @@ def _pct_rank(s):
     return s.rank(pct=True, method="average")
 
 
+# Derived columns the labeler depends on. Every name here must exist in
+# features.groups.derive() -- a typo silently disables a label (the bug that made
+# the CPU class unreachable when cpu_limit_pct was removed).
+LABEL_DERIVED = ("success_rate", "completion_ratio", "unresolved_ratio",
+                 "cpu_throttled_frac", "mem_limit_pct", "cpu_per_request",
+                 "lat_ratio_p90_p50", "inflight", "pending",
+                 "cpu_request_utilization")
+
+
 def add_percentiles(df):
     df = df.copy()
-    # derived features first
-    derived_cols = {}
-    for col in ("success_rate", "cpu_limit_pct", "cpu_throttled_frac",
-                "mem_limit_pct", "cpu_per_request", "lat_ratio_p90_p50",
-                "inflight", "pending"):
-        derived_cols[col] = np.nan
+    # Derived features first, materialised as columns. They are computed from
+    # the raw columns, so they must exist BEFORE percentiles are taken --
+    # otherwise a percentile on a derived feature is a percentile of NaN.
     d = df.apply(lambda r: derive({k: r.get(k) for k in RAW_FEATURES
                                    if k in df.columns}), axis=1)
-    for col in derived_cols:
+    for col in LABEL_DERIVED:
         df[col] = [x.get(col) for x in d]
+    # pod_age_s is not produced by derive(); it comes from pod_start_time. The
+    # harvest path writes it, but recompute it here so a corpus that only has
+    # pod_start_time still labels transitions correctly.
+    if "pod_age_s" not in df.columns and "pod_start_time" in df.columns:
+        df["pod_age_s"] = [
+            (r["ts"] - r["pod_start_time"])
+            if r.get("pod_start_time") is not None and r.get("pod_start_time") == r.get("pod_start_time")
+            else np.nan
+            for _, r in df.iterrows()]
 
     for col in df.columns:
         if col in ("service", "ts", "window"):
@@ -80,6 +99,9 @@ def label_row(r, p_hi=0.90, p_vhi=0.97):
 
     # outage: requests are arriving but not completing. Distinct from "slow":
     # a slow service still completes.
+    # Outage: requests are arriving but NOT COMPLETING. completion_ratio is the
+    # completed-response share, so a flood of 503s does not look like an outage
+    # (those completed, badly); a flood of timeouts does.
     comp = r.get("completion_ratio")
     req_rate = r.get("req_rate")
     if (comp is not None and comp == comp and req_rate is not None
@@ -92,7 +114,10 @@ def label_row(r, p_hi=0.90, p_vhi=0.97):
     if req_rate is not None and req_rate > 0 and (lat is None or lat != lat):
         return "blind"
 
-    cpu_hot = hi("cpu_limit_pct") and hi("cpu_throttled_frac")
+    # CPU pressure needs TWO independent pieces of evidence: the HPA-convention
+    # utilisation (usage / request) at the high end of this service's own
+    # distribution, AND throttling. Utilisation alone is not pressure.
+    cpu_hot = hi("cpu_request_utilization") and hi("cpu_throttled_frac")
     mem_hot = vhi("mem_limit_pct") and (hi("mem_page_faults") or hi("oom_events"))
     net_hot = hi("net_rx") or hi("net_tx")
     io_hot = hi("fs_write") or hi("fs_read") or hi("io_time")

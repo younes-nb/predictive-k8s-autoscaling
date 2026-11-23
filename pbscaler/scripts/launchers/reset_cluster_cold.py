@@ -166,12 +166,20 @@ def main():
             json.dump({**pre, "cold_ok": bool(clean)}, open(args.out, "w"), indent=2)
         return 0 if clean else 1
 
-    deps = stateless_deployments(apps, ns)
+    managed = aurora_manages(apps, ns)
+    if managed:
+        # AURORA is the replica writer. Scaling the workloads behind its back
+        # would make its next decision inconsistent with what it observed, and
+        # the HPAs are supposed to be absent while it runs.
+        print("AURORA is managing this namespace -- skipping replica/HPA reset")
+        deps = {}
+    else:
+        deps = stateless_deployments(apps, ns)
     stateless_names = [n for n, d in deps.items() if d["kind"] == "stateless"]
 
     # 1) HPAs: only restore when some were left deleted by a crashed run
     hpas = autos.list_namespaced_horizontal_pod_autoscaler(ns).items
-    if len(hpas) < args.hpa_expected:
+    if not managed and len(hpas) < args.hpa_expected:
         state_file = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                   "..", "..", "data", "hpa_state.json")
         print("HPAs missing (%d < %d) — restoring from %s" % (len(hpas), args.hpa_expected, state_file))

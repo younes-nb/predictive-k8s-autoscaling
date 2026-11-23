@@ -15,7 +15,6 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import Config                                         # noqa: E402
-from drift.detector import DriftDetector                          # noqa: E402
 from features.groups import FEATURE_ORDER, derive                 # noqa: E402
 from features.window import RunningNorm, WindowManager            # noqa: E402
 from lifecycle.reconciler import LifecycleReconciler              # noqa: E402
@@ -175,28 +174,71 @@ class TestLifecycle(unittest.TestCase):
         self.assertEqual(self.r.startup_samples["s"], [30.0, 40.0])
 
 
-class TestDrift(unittest.TestCase):
-    def test_injected_change_point_is_detected(self):
-        d = DriftDetector(cusum_threshold=3.0, cusum_drift=0.5)
+class TestFrozenNormalisation(unittest.TestCase):
+    """A frozen normaliser must not drift while it is running."""
+
+    def test_update_does_not_change_frozen_statistics(self):
+        n = RunningNorm(prior_strength=5.0)
+        n.set_prior({"x": 10.0}, {"x": 4.0})
+        n.update("a", {"x": 10.0})
+        n.freeze()
+        before = n.stats("a", "x")
+        for _ in range(50):
+            n.update("a", {"x": 1000.0})
+        after = n.stats("a", "x")
+        self.assertEqual(before, after,
+                         "the encoder-input statistics must stay frozen")
+
+    def test_local_baseline_still_updates_when_frozen(self):
+        n = RunningNorm(prior_strength=5.0)
+        n.set_prior({"x": 0.0}, {"x": 1.0})
+        n.freeze()
         for _ in range(5):
-            d.observe_capacity("s", expected_log=0.0, observed_log=0.0)
-        for _ in range(20):
-            d.observe_capacity("s", expected_log=0.0, observed_log=-1.0)
-        self.assertTrue(d.capacity_drift("s"))
-
-    def test_stable_stream_does_not_alarm(self):
-        d = DriftDetector(cusum_threshold=5.0)
-        for _ in range(100):
-            d.observe_capacity("s", 0.0, 0.01)
-        self.assertFalse(d.capacity_drift("s"))
-
-    def test_input_drift_on_representation_shift(self):
-        import random
-        random.seed(0)
-        d = DriftDetector(mmd_threshold=0.02)
-        d.set_reference("s", [[random.gauss(0, 1) for _ in range(4)] for _ in range(50)])
-        same = [[random.gauss(0, 1) for _ in range(4)] for _ in range(50)]
-        moved = [[random.gauss(8, 1) for _ in range(4)] for _ in range(50)]
-        self.assertLess(d.input_drift("s", same), d.input_drift("s", moved))
+            n.update("a", {"x": 10.0})
+        self.assertEqual(n.local["a"]["n"]["x"], 5.0)
 
 
+class TestWeakLabels(unittest.TestCase):
+    """CPU pressure must come from request utilisation, not a CPU-limit ratio."""
+
+    def test_cpu_label_uses_request_utilisation(self):
+        from train.weak_labels import label_row
+        # High request utilisation + high throttling at the service's own
+        # 97th percentile must produce the CPU class.
+        row = {"cpu_request_utilization__pct": 0.99,
+               "cpu_throttled_frac__pct": 0.99,
+               "req_rate": 10.0, "lat_p90": 100.0}
+        self.assertEqual(label_row(row), "cpu")
+
+    def test_cpu_label_needs_throttling_evidence(self):
+        from train.weak_labels import label_row
+        row = {"cpu_request_utilization__pct": 0.99,
+               "cpu_throttled_frac__pct": 0.10,
+               "req_rate": 10.0, "lat_p90": 100.0}
+        self.assertNotEqual(label_row(row), "cpu")
+
+    def test_no_cpu_limit_dependency(self):
+        import inspect
+        from train import weak_labels
+        src = inspect.getsource(weak_labels)
+        # Only the explanatory comments may mention the removed feature.
+        code = "\n".join(l for l in src.splitlines()
+                         if not l.lstrip().startswith("#"))
+        self.assertNotIn('hi("cpu_limit_pct")', code)
+        self.assertNotIn('"cpu_limit_pct"', code)
+
+    def test_percentiles_include_request_utilisation(self):
+        import pandas as pd
+        from train.weak_labels import add_percentiles
+        df = pd.DataFrame({
+            "service": ["a"] * 4,
+            "ts": [1, 2, 3, 4],
+            "req_rate": [1.0, 2.0, 3.0, 4.0],
+            "cpu_cores": [0.1, 0.2, 0.3, 0.4],
+            "cpu_request": [1.0, 1.0, 1.0, 1.0],
+            "cpu_throttled": [0.0, 0.0, 0.0, 0.0],
+            "cpu_periods": [100.0] * 4,
+        })
+        out = add_percentiles(df)
+        self.assertIn("cpu_request_utilization__pct", out.columns)
+        self.assertTrue(out["cpu_request_utilization__pct"].notna().all())

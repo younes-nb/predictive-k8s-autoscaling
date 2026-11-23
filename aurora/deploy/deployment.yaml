@@ -49,8 +49,9 @@ spec:
           env:
             - name: PYTHONUNBUFFERED
               value: "1"
-            - name: AURORA_DURATION_S
-              value: "3900"          # 65 min = 60 min k6 + 5 min buffer
+            # The controller is resident: it runs until SIGTERM and owns the
+            # replicas. There is deliberately no run-length knob -- a timed
+            # exit would restore the HPAs and hand the replicas back.
             - name: AURORA_DECISION_INTERVAL_S
               value: "15"
             - name: AURORA_TELEMETRY_STEP_S

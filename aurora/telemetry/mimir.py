@@ -13,6 +13,7 @@ resolution instead of a 15 s average.
 """
 
 import json
+import time
 import urllib.parse
 import urllib.request
 
@@ -86,27 +87,58 @@ class MimirClient:
         return payload.get("data", {}).get("result", [])
 
     # ------------------------------------------------------------------
-    def fetch(self, services, start, end, step=None):
+    def fetch(self, services, start, end, step=None, workers=1):
         """Return {service: {feature: [(ts, value)]}} for the requested window.
 
         ``services`` is the iterable of service names to keep. Queries that fail
         are recorded as absent rather than raising: a missing optional metric is
         normal, and the availability mask carries that through to the model.
+
+        Pod-scoped series are mapped to their owning Deployment by prefix, so a
+        query can group by ``pod`` without the caller needing container names to
+        be unique (they are not -- several Deployments use the same container
+        name).
         """
         out = {s: {} for s in services}
         self._cache = {}
-        for mq in queries(self.cfg.namespace):
+
+        def _one(mq):
+            t0 = time.time()
             try:
-                series = self.range(mq.promql, start, end, step)
+                return mq, self.range(mq.promql, start, end, step), time.time() - t0
             except MimirError:
+                return mq, None, time.time() - t0
+
+        qs = queries(self.cfg.namespace)
+        results = []
+        if workers and workers > 1:
+            # Bounded parallelism: a cycle's families are independent queries.
+            # The deadline in the control loop is the real bound; this only
+            # stops serial latency from consuming the whole interval.
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=int(workers)) as pool:
+                results = list(pool.map(_one, qs))
+        else:
+            results = [_one(q) for q in qs]
+
+        for mq, series, dt in results:
+            self._family_s = getattr(self, "_family_s", {})
+            self._family_s[mq.name] = dt
+            if series is None:
                 if mq.required:
-                    raise
+                    raise MimirError(f"required query failed: {mq.name}")
                 continue
             key = mq.name
             for s in series:
                 labels = s.get("metric", {})
-                svc = labels.get(mq.label_key) or labels.get("container") \
-                    or labels.get("destination_workload")
+                svc = labels.get(mq.label_key)
+                if svc is None:
+                    # Fall back to the other identity labels this query may
+                    # carry (destination_workload for Istio, deployment for
+                    # kube-state-metrics, container for legacy series).
+                    svc = (labels.get("destination_workload")
+                           or labels.get("deployment")
+                           or labels.get("container"))
                 if svc not in out:
                     svc = _resolve_pod(svc, out)
                 if svc not in out:
@@ -122,14 +154,15 @@ class MimirClient:
                     pts.append((int(ts), v))
                 if not pts:
                     continue
-                # A pod-grouped query returns one series per pod. Several pods
+                # A pod-scoped query returns one series per pod. Several pods
                 # belong to one service, so collapse them per timestamp instead
                 # of letting the last series overwrite the others (which
-                # under-counted network throughput and made pod_start_time
-                # arbitrary).
-                if key in ("net_rx", "net_tx", "fs_read", "fs_write", "io_time"):
+                # under-counted throughput and made pod_start_time arbitrary).
+                if mq.label_key == "pod" and key != "pod_start_time":
                     _merge_sum(out[svc], key, pts)
                 elif key == "pod_start_time":
+                    # max(): the newest start time is the current process; the
+                    # pod identity is not what this feature is about.
                     _merge_max(out[svc], key, pts)
                 else:
                     out[svc][key] = pts
@@ -194,6 +227,9 @@ class EdgeClient:
                 dst = m.get("destination_workload")
                 if not dst:
                     continue
+                # Edge identity includes BOTH namespaces: a workload name can
+                # exist in more than one namespace, and merging those would
+                # create a dependency edge that does not exist.
                 key = (src, dst)
                 d = out.setdefault(key, {})
                 pts = []
@@ -205,6 +241,12 @@ class EdgeClient:
                     if v != v:
                         continue
                     pts.append((int(ts), v))
-                if pts:
+                if not pts:
+                    continue
+                # Several series can share a (src, dst) pair when more than one
+                # namespace is involved; merge them per timestamp.
+                if name in d:
+                    _merge_sum(d, name, pts)
+                else:
                     d[name] = pts
         return out

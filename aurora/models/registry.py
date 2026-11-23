@@ -1,18 +1,23 @@
-"""Model registry: versioned artifacts, atomic writes, rollback.
+"""Model registry for the two-model AURORA bundle.
 
 Layout under ``registry_dir``::
 
     registry/
       index.json                 # {current: <version>, versions: [...]}
       <version>/
-        model.pt                 # state_dict + metadata
-        feature_schema.json
+        bundle.pt                # diagnosis + replica + schemas + OOD calibration
         validation.json
         README.md
 
-A write goes to a temp directory then is renamed, so a half-written version can
-never become ``current``. ``rollback`` just repoints ``current`` at the previous
+A write goes to a temp directory and is renamed, so a half-written version can
+never become ``current``. ``rollback`` repoints ``current`` at the previous
 version; nothing is deleted.
+
+The bundle stores both models plus the *exact* feature schema (order, units,
+edge order, label taxonomy, normalization) and the OOD calibration, so a
+checkpoint cannot load against a semantically different transform. The previous
+registry assumed a single ``model.bottleneck`` / ``model.encoder`` object; that
+interface no longer exists.
 """
 
 import hashlib
@@ -25,7 +30,13 @@ import time
 import torch
 
 
-class ModelRegistry:
+def feature_schema_hash(feature_order, edge_order):
+    blob = json.dumps({"node": list(feature_order), "edge": list(edge_order)},
+                      sort_keys=True).encode()
+    return hashlib.sha256(blob).hexdigest()[:16]
+
+
+class BundleRegistry:
     def __init__(self, root):
         self.root = root
         self.index_path = os.path.join(root, "index.json")
@@ -46,34 +57,29 @@ class ModelRegistry:
         os.replace(tmp, self.index_path)
 
     # ------------------------------------------------------------------
-    def publish_candidate(self, model, version, feature_schema, validation,
-                          notes="", norm=None):
+    def publish_candidate(self, bundle, version, validation, notes=""):
+        """Write ``bundle`` as ``version`` without promoting it.
+
+        ``bundle`` is the dict produced by ``train/train_models.py``. It must
+        already carry the schema and OOD fields.
+        """
         idx = self._read_index()
         if version in idx["versions"]:
             raise ValueError(f"version {version} already published")
         parent = os.path.join(self.root, version)
         os.makedirs(parent, exist_ok=False)
-        payload = {
-            "state_dict": model.state_dict(),
-            "classes": list(model.bottleneck.classes),
-            "temperature": float(model.bottleneck.temperature),
-            "dist_threshold": model.bottleneck._dist_threshold,
-            "n_features": int(model.encoder.proj.in_features),
-            "d_model": int(model.encoder.d_model),
-            "norm": norm,
-        }
         tmp = parent + ".tmp"
         os.makedirs(tmp, exist_ok=True)
         try:
-            torch.save(payload, os.path.join(tmp, "model.pt"))
-            with open(os.path.join(tmp, "feature_schema.json"), "w") as fh:
-                json.dump(feature_schema, fh, indent=2)
+            torch.save(bundle, os.path.join(tmp, "bundle.pt"))
             with open(os.path.join(tmp, "validation.json"), "w") as fh:
                 json.dump(validation, fh, indent=2)
             with open(os.path.join(tmp, "README.md"), "w") as fh:
-                fh.write(f"# AURORA-HPA model `{version}`\n\n")
+                fh.write(f"# AURORA bundle `{version}`\n\n")
                 fh.write(f"published: {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}\n\n")
                 fh.write(f"notes: {notes}\n\n")
+                fh.write(f"feature_schema_hash: "
+                         f"{bundle.get('feature_schema_hash')}\n\n")
                 fh.write("## validation\n\n```json\n")
                 fh.write(json.dumps(validation, indent=2))
                 fh.write("\n```\n")
@@ -81,22 +87,18 @@ class ModelRegistry:
         except Exception:
             shutil.rmtree(tmp, ignore_errors=True)
             raise
-
         idx["versions"].append(version)
         # Publication does NOT promote. Promotion is a separate, explicit step
-        # (promote) so a candidate can be validated or shadowed first.
+        # so a candidate can be validated or shadowed first.
         self._write_index(idx)
         return version
 
-    def publish(self, model, version, feature_schema, validation, notes="",
-                norm=None):
-        """Publish and promote in one step (kept for the training CLI)."""
-        self.publish_candidate(model, version, feature_schema, validation,
-                               notes=notes, norm=norm)
+    def publish(self, bundle, version, validation, notes=""):
+        """Publish and promote in one step (used by the training CLI)."""
+        self.publish_candidate(bundle, version, validation, notes=notes)
         return self.promote(version)
 
     def promote(self, version):
-        """Atomically point ``current`` at an already-published version."""
         idx = self._read_index()
         if version not in idx["versions"]:
             raise KeyError(f"version {version} is not published")
@@ -105,29 +107,21 @@ class ModelRegistry:
         return version
 
     # ------------------------------------------------------------------
-    def load(self, version=None, registry_cls=None):
+    def load(self, version=None):
+        """Load the published bundle and its metadata."""
         idx = self._read_index()
         version = version or idx.get("current")
         if not version:
             raise FileNotFoundError("no published model")
-        path = os.path.join(self.root, version, "model.pt")
-        payload = torch.load(path, map_location="cpu", weights_only=False)
-        # A reordered feature vector with the same dimensionality would
-        # silently produce invalid inference, so verify the schema hash too.
-        schema_path = os.path.join(os.path.dirname(path), "feature_schema.json")
-        schema_hash = None
-        if os.path.exists(schema_path):
-            with open(schema_path, "rb") as fh:
-                schema_hash = hashlib.sha256(fh.read()).hexdigest()[:16]
+        path = os.path.join(self.root, version, "bundle.pt")
+        bundle = torch.load(path, map_location="cpu", weights_only=False)
         meta = {"version": version,
-                "feature_schema_hash": schema_hash,
-                "classes": payload.get("classes"),
-                "temperature": payload.get("temperature"),
-                "dist_threshold": payload.get("dist_threshold"),
-                "n_features": payload.get("n_features"),
-                "d_model": payload.get("d_model"),
-                "norm": payload.get("norm")}
-        return payload, meta
+                "feature_schema_hash": bundle.get("feature_schema_hash"),
+                "n_node_features": bundle.get("n_node_features"),
+                "d_model": bundle.get("d_model"),
+                "n_degradation": bundle.get("n_degradation"),
+                "n_edge_features": bundle.get("n_edge_features")}
+        return bundle, meta
 
     # ------------------------------------------------------------------
     def rollback(self):
