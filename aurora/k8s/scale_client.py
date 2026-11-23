@@ -158,6 +158,71 @@ class ScaleClient:
                 pending.append({"age_s": age, "reason": reason})
         return ready, pending, starts, ready_ages, ready_uids
 
+    def snapshot(self, services):
+        """One-shot per-cycle state for every managed service.
+
+        Returns ``(counts, specs)`` where ``counts[svc]`` is the same tuple
+        ``pod_counts`` returns and ``specs[svc]`` is the Deployment's spec
+        replica count.
+
+        Calling ``pod_counts`` + ``spec_replicas`` per service costs three API
+        calls each -- 126 calls per cycle for 42 services, which dominated the
+        decision path. This does the whole namespace in three calls (pods,
+        ReplicaSets, Deployments) and groups pods by their owning Deployment
+        through the ReplicaSet owner reference, which is more robust than
+        matching on a label selector.
+        """
+        now = time.time()
+        pods = self.core.list_namespaced_pod(self.cfg.namespace).items
+        rs_items = self.apps.list_namespaced_replica_set(
+            self.cfg.namespace).items
+        deps = self.apps.list_namespaced_deployment(self.cfg.namespace).items
+
+        rs_to_dep = {}
+        for rs in rs_items:
+            for o in (rs.metadata.owner_references or []):
+                if o.kind == "Deployment":
+                    rs_to_dep[rs.metadata.name] = o.name
+
+        spec = {}
+        for d in deps:
+            name = d.metadata.name
+            if name in services:
+                spec[name] = int(d.spec.replicas or 0)
+
+        counts = {s: (0, [], [], [], []) for s in services}
+        for p in pods:
+            if p.metadata.deletion_timestamp:
+                continue
+            dep = None
+            for o in (p.metadata.owner_references or []):
+                if o.kind == "ReplicaSet":
+                    dep = rs_to_dep.get(o.name)
+                    break
+            if dep is None or dep not in counts:
+                continue
+            age = (now - p.metadata.creation_timestamp.timestamp()
+                   if p.metadata.creation_timestamp else None)
+            ready, pending, starts, ages, uids = counts[dep]
+            if p.status.phase == "Running":
+                cs = p.status.container_statuses or []
+                if cs and all(c.ready for c in cs):
+                    counts[dep] = (ready + 1, pending,
+                                   starts + [_ready_duration(p)],
+                                   ages + [age],
+                                   uids + [p.metadata.uid])
+                    continue
+            reason = None
+            for cs in (p.status.container_statuses or []):
+                st = cs.state
+                if st and st.waiting:
+                    reason = st.waiting.reason
+                    break
+            counts[dep] = (ready, pending + [{"age_s": age, "reason": reason}],
+                           starts, ages, uids)
+
+        return counts, spec
+
     def spec_replicas(self, service):
         d = self.apps.read_namespaced_deployment(service, self.cfg.namespace)
         return d.spec.replicas or 0

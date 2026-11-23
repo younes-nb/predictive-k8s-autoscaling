@@ -372,7 +372,8 @@ class AuroraLoop:
         return per, 0.0
 
     # ------------------------------------------------------------------
-    def _decide_one(self, svc, diag, raw, now, slo_state, slo_value, slo_count):
+    def _decide_one(self, svc, diag, raw, now, slo_state, slo_value, slo_count,
+                    snap=None):
         import torch
         # Telemetry tri-state. ``req_rate`` absent means the signal is UNKNOWN,
         # not zero: the service may be idle, or the series may be missing, or
@@ -384,8 +385,13 @@ class AuroraLoop:
             return None, None
         req = float(req)
 
-        ready, pending, starts, ages, uids = self.scale.pod_counts(svc)
-        spec = self.scale.spec_replicas(svc)
+        if snap is not None:
+            ready, pending, starts, ages, uids = snap[0].get(
+                svc, (0, [], [], [], []))
+            spec = snap[1].get(svc, 0)
+        else:
+            ready, pending, starts, ages, uids = self.scale.pod_counts(svc)
+            spec = self.scale.spec_replicas(svc)
         for a, uid in zip(starts, uids):
             # Pass the Pod UID: the reconciler deduplicates per UID, so a Ready
             # Pod seen on every cycle contributes exactly one startup sample.
@@ -454,7 +460,7 @@ class AuroraLoop:
         return d, acc
 
     # ------------------------------------------------------------------
-    def _settle_pending(self, now):
+    def _settle_pending(self, now, snap=None):
         """Settle actions that have converged, with real settlement metadata.
 
         A scale-out is settled only when the new pods are Ready AND a
@@ -469,8 +475,12 @@ class AuroraLoop:
             if now - pts < window_s:
                 continue
             try:
-                ready, pending, starts, ages, _ = self.scale.pod_counts(psvc)
-                spec = self.scale.spec_replicas(psvc)
+                if snap is not None:
+                    ready, pending, starts, ages, _ = snap[0].get(psvc, (0, [], [], [], []))
+                    spec = snap[1].get(psvc, 0)
+                else:
+                    ready, pending, starts, ages, _ = self.scale.pod_counts(psvc)
+                    spec = self.scale.spec_replicas(psvc)
             except Exception as exc:                        # noqa: BLE001
                 print(f"[aurora] settle: {psvc}: {type(exc).__name__}: {exc}",
                       flush=True)
@@ -536,11 +546,15 @@ class AuroraLoop:
             diags, s2 = self._diagnose(raws, now); spans.append(s2)
             # Query the frontend SLO ONCE per cycle, not once per service.
             slo_state, slo_value, slo_count = self._frontend_slo()
+            # One namespace snapshot per cycle: three API calls instead of
+            # three per service (126 calls for 42 services).
+            snap = self.scale.snapshot(self.services)
             for svc in self.services:
                 t_decide = time.perf_counter()
                 try:
                     d, acc = self._decide_one(svc, diags[svc], raws.get(svc, {}),
-                                              now, slo_state, slo_value, slo_count)
+                                              now, slo_state, slo_value,
+                                              slo_count, snap=snap)
                     if d is None:
                         continue
                     if d["target"] != d["committed"] and not self.cfg.dry_run:
@@ -589,7 +603,7 @@ class AuroraLoop:
         # Settlement also costs pod-count and telemetry queries. It is measured
         # separately so it can never hide inside the decision-path number.
         t_settle = time.perf_counter()
-        self._settle_pending(now)
+        self._settle_pending(now, snap)
         settle_ms = (time.perf_counter() - t_settle) * 1000.0
         self.stage_ms["settle"] += settle_ms
         self.stage_n["settle"] += 1
