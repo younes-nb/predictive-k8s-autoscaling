@@ -23,7 +23,7 @@ from config import Config                                        # noqa: E402
 from features.groups import queries                              # noqa: E402
 from telemetry.mimir import MimirClient, MimirError              # noqa: E402
 
-DEFAULT_RUNS_GLOB = "../stage7_28/exp13jul/*/params.json"
+DEFAULT_RUNS_GLOB = "../benchmark/runs/*/params.json"
 
 
 def discover_windows(pattern):
