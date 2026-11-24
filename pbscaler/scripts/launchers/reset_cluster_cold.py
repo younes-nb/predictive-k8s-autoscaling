@@ -71,6 +71,21 @@ def pod_owner(pod):
     return None
 
 
+def aurora_manages(apps, ns):
+    """True when the AURORA controller is deployed and owns the namespace.
+
+    While AURORA is running it suspends the native HPAs, so "HPAs must be
+    present" and "every deployment sits at 1" are both false by design. A
+    development loop that keeps AURORA in the cluster must be able to reset the
+    workload without fighting it.
+    """
+    try:
+        d = apps.read_namespaced_deployment("aurora", ns)
+        return (d.spec.replicas or 0) > 0
+    except Exception:
+        return False
+
+
 def snapshot_state(v1, apps, autos, ns, hpa_count_expected=43):
     deps = stateless_deployments(apps, ns)
     hist = collections.Counter(d["spec"] for d in deps.values())

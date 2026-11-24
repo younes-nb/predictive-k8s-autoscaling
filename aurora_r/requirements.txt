@@ -1,0 +1,4 @@
+torch
+kubernetes
+requests
+numpy

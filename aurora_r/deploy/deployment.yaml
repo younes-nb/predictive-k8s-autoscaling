@@ -1,0 +1,62 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: aurora-r-state
+  namespace: train-ticket
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aurora-r
+  namespace: train-ticket
+  labels:
+    app: aurora-r
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: aurora-r
+  template:
+    metadata:
+      labels:
+        app: aurora-r
+    spec:
+      serviceAccountName: aurora-r
+      containers:
+        - name: aurora-r
+          image: __AURORA_R_IMAGE__
+          imagePullPolicy: IfNotPresent
+          args: ["run", "--config", "/etc/aurora-r/config.json"]
+          env:
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            - name: AURORA_R_HPA_STATE
+              value: /var/lib/aurora-r/hpa_state.json
+          resources:
+            # Identical to PBScaler's controller so the comparison is not
+            # confounded by the autoscaler's own footprint.
+            requests: {cpu: "100m", memory: "256Mi"}
+            limits: {cpu: "500m", memory: "512Mi"}
+          volumeMounts:
+            - {name: state, mountPath: /var/lib/aurora-r}
+            - {name: config, mountPath: /etc/aurora-r}
+          readinessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "test -f /opt/aurora-r/registry/bundle.pt"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: state
+          persistentVolumeClaim:
+            claimName: aurora-r-state
+        - name: config
+          configMap:
+            name: aurora-r-config

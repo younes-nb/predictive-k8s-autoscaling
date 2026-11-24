@@ -1,8 +1,8 @@
 {
- "created_utc": "2026-11-21T20:55:09.715249+00:00",
+ "created_utc": "2026-11-24T04:00:26.020665+00:00",
  "trainer_version": "rf-train-2.0-stage726",
- "data_path": "stage7_28/exp13jul/step1_hpa_30k_jul13_1h_20261121T193652Z/dataset_step1_hpa_30k_jul13_1h_20261121T193652Z/train_data.csv",
- "data_sha256": "97817e80ac8ece85defcec42d0b2677148c1c1e906bc5ea6f2627becd01ffb4f",
+ "data_path": "stage7_28/exp13jul/step8_hpa_10k_jul14_1h_20261124T023039Z/dataset_step8_hpa_10k_jul14_1h_20261124T023039Z/train_data.csv",
+ "data_sha256": "9b7a18770c2a8bfea6091ad8e94960b9b3ef021fb5a1d8dafe13153cfb43bcbe",
  "svcs": [
   "ts-admin-basic-info-service",
   "ts-admin-order-service",
@@ -48,45 +48,45 @@
   "ts-voucher-service"
  ],
  "n_features": 126,
- "n_train": 457,
- "n_test": 190,
+ "n_train": 567,
+ "n_test": 142,
  "test_frac": 0.2,
  "embargo_seconds": 60,
  "split": {
-  "last_train_ts_epoch_s": 1795292159.0,
-  "embargo_end_epoch_s": 1795292219.0,
-  "test_rows_dropped_by_embargo": 0,
-  "requested_split_index": 517,
-  "used_split_index": 457,
-  "test_violations": 34,
+  "last_train_ts_epoch_s": 1795490299.0,
+  "embargo_end_epoch_s": 1795490359.0,
+  "test_rows_dropped_by_embargo": 11,
+  "requested_split_index": 576,
+  "used_split_index": 567,
+  "test_violations": 30,
   "min_test_violations": 30,
   "ts_train_utc": [
-   "2026-11-21T19:37:24+00:00",
-   "2026-11-21T20:15:59+00:00"
+   "2026-11-24T02:31:09+00:00",
+   "2026-11-24T03:18:19+00:00"
   ],
   "ts_test_utc": [
-   "2026-11-21T20:18:19+00:00",
-   "2026-11-21T20:37:19+00:00"
+   "2026-11-24T03:19:19+00:00",
+   "2026-11-24T03:31:04+00:00"
   ],
   "test_frac": 0.2,
   "embargo_seconds": 60,
-  "n_train": 457,
-  "n_test": 190
+  "n_train": 567,
+  "n_test": 142
  },
  "rejects": {
-  "invalid_label": 73,
+  "invalid_label": 0,
   "nonfinite_feature": 0
  },
  "n_rows_total": 720,
- "n_rejected": 73,
+ "n_rejected": 0,
  "class_balance": {
   "train": {
-   "0": 369,
-   "1": 88
+   "0": 2,
+   "1": 565
   },
   "test": {
-   "0": 34,
-   "1": 156
+   "0": 30,
+   "1": 112
   }
  },
  "feature_bounds": [
@@ -102,14 +102,14 @@
    "slot": "qps",
    "col": 1,
    "min": 0.0,
-   "max": 22.493217437870648
+   "max": 7.618439697553783
   },
   {
    "feature": "ts-admin-basic-info-service&count",
    "slot": "count",
    "col": 2,
-   "min": 1.0,
-   "max": 9.0
+   "min": 3.0,
+   "max": 3.0
   },
   {
    "feature": "ts-admin-order-service#index",
@@ -123,14 +123,14 @@
    "slot": "qps",
    "col": 4,
    "min": 0.0,
-   "max": 10.371953353843889
+   "max": 3.691063150510055
   },
   {
    "feature": "ts-admin-order-service&count",
    "slot": "count",
    "col": 5,
-   "min": 1.0,
-   "max": 8.0
+   "min": 3.0,
+   "max": 3.0
   },
   {
    "feature": "ts-admin-route-service#index",
@@ -144,7 +144,7 @@
    "slot": "qps",
    "col": 7,
    "min": 0.0,
-   "max": 9.910892889616294
+   "max": 3.509090909090909
   },
   {
    "feature": "ts-admin-route-service&count",
@@ -165,14 +165,14 @@
    "slot": "qps",
    "col": 10,
    "min": 0.0,
-   "max": 9.873265814498971
+   "max": 3.5645842423206218
   },
   {
    "feature": "ts-admin-travel-service&count",
    "slot": "count",
    "col": 11,
-   "min": 1.0,
-   "max": 1.0
+   "min": 4.0,
+   "max": 4.0
   },
   {
    "feature": "ts-admin-user-service#index",
@@ -186,14 +186,14 @@
    "slot": "qps",
    "col": 13,
    "min": 0.0,
-   "max": 9.821525277559967
+   "max": 3.527272727272727
   },
   {
    "feature": "ts-admin-user-service&count",
    "slot": "count",
    "col": 14,
    "min": 1.0,
-   "max": 6.0
+   "max": 2.0
   },
   {
    "feature": "ts-assurance-service#index",
@@ -206,15 +206,15 @@
    "feature": "ts-assurance-service&qps",
    "slot": "qps",
    "col": 16,
-   "min": 0.2072999999999999,
-   "max": 52.054545454545455
+   "min": 0.0488966666666666,
+   "max": 16.635438498493635
   },
   {
    "feature": "ts-assurance-service&count",
    "slot": "count",
    "col": 17,
-   "min": 1.0,
-   "max": 2.0
+   "min": 3.0,
+   "max": 3.0
   },
   {
    "feature": "ts-auth-service#index",
@@ -228,14 +228,14 @@
    "slot": "qps",
    "col": 19,
    "min": 0.0,
-   "max": 3.0727272727272728
+   "max": 1.2182016539745142
   },
   {
    "feature": "ts-auth-service&count",
    "slot": "count",
    "col": 20,
-   "min": 1.0,
-   "max": 2.0
+   "min": 3.0,
+   "max": 3.0
   },
   {
    "feature": "ts-avatar-service#index",
@@ -269,15 +269,15 @@
    "feature": "ts-basic-service&qps",
    "slot": "qps",
    "col": 25,
-   "min": 1.945454545454545,
-   "max": 77.17263037639873
+   "min": 1.272907837537969,
+   "max": 22.25454545454545
   },
   {
    "feature": "ts-basic-service&count",
    "slot": "count",
    "col": 26,
-   "min": 1.0,
-   "max": 8.0
+   "min": 3.0,
+   "max": 3.0
   },
   {
    "feature": "ts-cancel-service#index",
@@ -311,15 +311,15 @@
    "feature": "ts-config-service&qps",
    "slot": "qps",
    "col": 31,
-   "min": 0.0,
-   "max": 36.84851569743133
+   "min": 1.19993984236717,
+   "max": 15.927551420160109
   },
   {
    "feature": "ts-config-service&count",
    "slot": "count",
    "col": 32,
-   "min": 1.0,
-   "max": 2.0
+   "min": 3.0,
+   "max": 3.0
   },
   {
    "feature": "ts-consign-price-service#index",
@@ -332,15 +332,15 @@
    "feature": "ts-consign-price-service&qps",
    "slot": "qps",
    "col": 34,
-   "min": 0.0,
-   "max": 25.966490171901064
+   "min": 0.0972183216315613,
+   "max": 8.381818181818181
   },
   {
    "feature": "ts-consign-price-service&count",
    "slot": "count",
    "col": 35,
    "min": 1.0,
-   "max": 3.0
+   "max": 2.0
   },
   {
    "feature": "ts-consign-service#index",
@@ -353,15 +353,15 @@
    "feature": "ts-consign-service&qps",
    "slot": "qps",
    "col": 37,
-   "min": 0.0,
-   "max": 25.93245921911655
+   "min": 0.0785599999999999,
+   "max": 8.381818181818181
   },
   {
    "feature": "ts-consign-service&count",
    "slot": "count",
    "col": 38,
    "min": 1.0,
-   "max": 2.0
+   "max": 1.0
   },
   {
    "feature": "ts-contacts-service#index",
@@ -375,13 +375,13 @@
    "slot": "qps",
    "col": 40,
    "min": 0.0,
-   "max": 56.30551082284457
+   "max": 15.418975446657353
   },
   {
    "feature": "ts-contacts-service&count",
    "slot": "count",
    "col": 41,
-   "min": 1.0,
+   "min": 4.0,
    "max": 10.0
   },
   {
@@ -395,8 +395,8 @@
    "feature": "ts-execute-service&qps",
    "slot": "qps",
    "col": 43,
-   "min": 0.0,
-   "max": 19.652758840105445
+   "min": 0.0843366666666666,
+   "max": 6.817809937639766
   },
   {
    "feature": "ts-execute-service&count",
@@ -416,15 +416,15 @@
    "feature": "ts-food-map-service&qps",
    "slot": "qps",
    "col": 46,
-   "min": 0.0,
-   "max": 51.878832160888535
+   "min": 0.09115,
+   "max": 16.745454545454546
   },
   {
    "feature": "ts-food-map-service&count",
    "slot": "count",
    "col": 47,
-   "min": 1.0,
-   "max": 2.0
+   "min": 3.0,
+   "max": 4.0
   },
   {
    "feature": "ts-food-service#index",
@@ -437,15 +437,15 @@
    "feature": "ts-food-service&qps",
    "slot": "qps",
    "col": 49,
-   "min": 0.0,
-   "max": 77.66301778375824
+   "min": 0.16032,
+   "max": 24.987944700267413
   },
   {
    "feature": "ts-food-service&count",
    "slot": "count",
    "col": 50,
-   "min": 1.0,
-   "max": 2.0
+   "min": 3.0,
+   "max": 3.0
   },
   {
    "feature": "ts-inside-payment-service#index",
@@ -479,15 +479,15 @@
    "feature": "ts-news-service&qps",
    "slot": "qps",
    "col": 55,
-   "min": 0.0,
-   "max": 19.835281711906624
+   "min": 0.0251266666666666,
+   "max": 6.836363636363636
   },
   {
    "feature": "ts-news-service&count",
    "slot": "count",
    "col": 56,
-   "min": 1.0,
-   "max": 1.0
+   "min": 3.0,
+   "max": 3.0
   },
   {
    "feature": "ts-notification-service#index",
@@ -501,7 +501,7 @@
    "slot": "qps",
    "col": 58,
    "min": 0.0,
-   "max": 2.9636363636363634
+   "max": 0.4363636363636363
   },
   {
    "feature": "ts-notification-service&count",
@@ -521,15 +521,15 @@
    "feature": "ts-order-other-service&qps",
    "slot": "qps",
    "col": 61,
-   "min": 0.0,
-   "max": 61.24509117275288
+   "min": 0.1112040718901992,
+   "max": 15.60046450503765
   },
   {
    "feature": "ts-order-other-service&count",
    "slot": "count",
    "col": 62,
-   "min": 1.0,
-   "max": 2.0
+   "min": 3.0,
+   "max": 6.0
   },
   {
    "feature": "ts-order-service#index",
@@ -543,13 +543,13 @@
    "slot": "qps",
    "col": 64,
    "min": 0.0,
-   "max": 92.50418975266022
+   "max": 16.054545454545455
   },
   {
    "feature": "ts-order-service&count",
    "slot": "count",
    "col": 65,
-   "min": 1.0,
+   "min": 4.0,
    "max": 10.0
   },
   {
@@ -563,15 +563,15 @@
    "feature": "ts-payment-service&qps",
    "slot": "qps",
    "col": 67,
-   "min": 0.0,
-   "max": 59.13792790008545
+   "min": 0.108455,
+   "max": 20.544833428535306
   },
   {
    "feature": "ts-payment-service&count",
    "slot": "count",
    "col": 68,
-   "min": 1.0,
-   "max": 1.0
+   "min": 4.0,
+   "max": 4.0
   },
   {
    "feature": "ts-preserve-other-service#index",
@@ -585,14 +585,14 @@
    "slot": "qps",
    "col": 70,
    "min": 0.0,
-   "max": 9.981273748704618
+   "max": 3.690909090909091
   },
   {
    "feature": "ts-preserve-other-service&count",
    "slot": "count",
    "col": 71,
    "min": 1.0,
-   "max": 2.0
+   "max": 1.0
   },
   {
    "feature": "ts-preserve-service#index",
@@ -606,14 +606,14 @@
    "slot": "qps",
    "col": 73,
    "min": 0.0,
-   "max": 13.696725018289047
+   "max": 5.745454545454545
   },
   {
    "feature": "ts-preserve-service&count",
    "slot": "count",
    "col": 74,
-   "min": 1.0,
-   "max": 2.0
+   "min": 3.0,
+   "max": 5.0
   },
   {
    "feature": "ts-price-service#index",
@@ -626,15 +626,15 @@
    "feature": "ts-price-service&qps",
    "slot": "qps",
    "col": 76,
-   "min": 0.0,
-   "max": 40.31422181004855
+   "min": 1.181818181818182,
+   "max": 15.800000000000002
   },
   {
    "feature": "ts-price-service&count",
    "slot": "count",
    "col": 77,
    "min": 1.0,
-   "max": 2.0
+   "max": 1.0
   },
   {
    "feature": "ts-rebook-service#index",
@@ -647,15 +647,15 @@
    "feature": "ts-rebook-service&qps",
    "slot": "qps",
    "col": 79,
-   "min": 0.0,
-   "max": 19.94255381035486
+   "min": 0.0726538512882125,
+   "max": 6.8
   },
   {
    "feature": "ts-rebook-service&count",
    "slot": "count",
    "col": 80,
    "min": 1.0,
-   "max": 1.0
+   "max": 3.0
   },
   {
    "feature": "ts-route-plan-service#index",
@@ -668,15 +668,15 @@
    "feature": "ts-route-plan-service&qps",
    "slot": "qps",
    "col": 82,
-   "min": 0.0,
-   "max": 30.69314131936868
+   "min": 1.1454545454545455,
+   "max": 14.309090909090909
   },
   {
    "feature": "ts-route-plan-service&count",
    "slot": "count",
    "col": 83,
    "min": 1.0,
-   "max": 1.0
+   "max": 2.0
   },
   {
    "feature": "ts-route-service#index",
@@ -689,14 +689,14 @@
    "feature": "ts-route-service&qps",
    "slot": "qps",
    "col": 85,
-   "min": 0.0,
-   "max": 194.8675226832316
+   "min": 4.705825,
+   "max": 56.944432121884255
   },
   {
    "feature": "ts-route-service&count",
    "slot": "count",
    "col": 86,
-   "min": 1.0,
+   "min": 3.0,
    "max": 3.0
   },
   {
@@ -710,15 +710,15 @@
    "feature": "ts-seat-service&qps",
    "slot": "qps",
    "col": 88,
-   "min": 0.0,
-   "max": 30.45371640885704
+   "min": 0.0449833333333333,
+   "max": 6.818181818181818
   },
   {
    "feature": "ts-seat-service&count",
    "slot": "count",
    "col": 89,
-   "min": 1.0,
-   "max": 4.0
+   "min": 3.0,
+   "max": 3.0
   },
   {
    "feature": "ts-security-service#index",
@@ -731,15 +731,15 @@
    "feature": "ts-security-service&qps",
    "slot": "qps",
    "col": 91,
-   "min": 0.0,
-   "max": 53.17601716176417
+   "min": 0.0360866666666666,
+   "max": 46.27129103965755
   },
   {
    "feature": "ts-security-service&count",
    "slot": "count",
    "col": 92,
-   "min": 1.0,
-   "max": 4.0
+   "min": 3.0,
+   "max": 7.0
   },
   {
    "feature": "ts-station-service#index",
@@ -752,14 +752,14 @@
    "feature": "ts-station-service&qps",
    "slot": "qps",
    "col": 94,
-   "min": 0.0,
-   "max": 165.5252300511481
+   "min": 3.8182439714623873,
+   "max": 33.345454545454544
   },
   {
    "feature": "ts-station-service&count",
    "slot": "count",
    "col": 95,
-   "min": 1.0,
+   "min": 4.0,
    "max": 4.0
   },
   {
@@ -773,15 +773,15 @@
    "feature": "ts-ticket-office-service&qps",
    "slot": "qps",
    "col": 97,
-   "min": 0.0,
-   "max": 39.345454545454544
+   "min": 0.1072733333333333,
+   "max": 13.709604684147362
   },
   {
    "feature": "ts-ticket-office-service&count",
    "slot": "count",
    "col": 98,
-   "min": 1.0,
-   "max": 1.0
+   "min": 3.0,
+   "max": 3.0
   },
   {
    "feature": "ts-ticketinfo-service#index",
@@ -795,13 +795,13 @@
    "slot": "qps",
    "col": 100,
    "min": 0.0,
-   "max": 47.15016976824917
+   "max": 8.348861087045316
   },
   {
    "feature": "ts-ticketinfo-service&count",
    "slot": "count",
    "col": 101,
-   "min": 1.0,
+   "min": 4.0,
    "max": 4.0
   },
   {
@@ -815,8 +815,8 @@
    "feature": "ts-train-service&qps",
    "slot": "qps",
    "col": 103,
-   "min": 0.0,
-   "max": 148.38276400333973
+   "min": 4.218181818181819,
+   "max": 44.89090909090908
   },
   {
    "feature": "ts-train-service&count",
@@ -836,8 +836,8 @@
    "feature": "ts-travel-plan-service&qps",
    "slot": "qps",
    "col": 106,
-   "min": 0.0,
-   "max": 30.166184971098268
+   "min": 1.181732237655443,
+   "max": 14.25610066552715
   },
   {
    "feature": "ts-travel-plan-service&count",
@@ -857,15 +857,15 @@
    "feature": "ts-travel-service&qps",
    "slot": "qps",
    "col": 109,
-   "min": 3.2816015157558835,
-   "max": 164.26236032150902
+   "min": 5.327272727272727,
+   "max": 73.74545454545454
   },
   {
    "feature": "ts-travel-service&count",
    "slot": "count",
    "col": 110,
-   "min": 1.0,
-   "max": 8.0
+   "min": 3.0,
+   "max": 5.0
   },
   {
    "feature": "ts-travel2-service#index",
@@ -878,14 +878,14 @@
    "feature": "ts-travel2-service&qps",
    "slot": "qps",
    "col": 112,
-   "min": 0.0,
-   "max": 67.54030425852888
+   "min": 2.5090826549961758,
+   "max": 34.508287676326944
   },
   {
    "feature": "ts-travel2-service&count",
    "slot": "count",
    "col": 113,
-   "min": 1.0,
+   "min": 4.0,
    "max": 4.0
   },
   {
@@ -899,15 +899,15 @@
    "feature": "ts-ui-dashboard&qps",
    "slot": "qps",
    "col": 115,
-   "min": 5.892977359246644,
-   "max": 1286.069894107272
+   "min": 57.4,
+   "max": 447.7454545454545
   },
   {
    "feature": "ts-ui-dashboard&count",
    "slot": "count",
    "col": 116,
-   "min": 1.0,
-   "max": 8.0
+   "min": 3.0,
+   "max": 4.0
   },
   {
    "feature": "ts-user-service#index",
@@ -921,7 +921,7 @@
    "slot": "qps",
    "col": 118,
    "min": 0.0,
-   "max": 32.17515957048584
+   "max": 10.600486730221478
   },
   {
    "feature": "ts-user-service&count",
@@ -941,8 +941,8 @@
    "feature": "ts-verification-code-service&qps",
    "slot": "qps",
    "col": 121,
-   "min": 0.177176220806794,
-   "max": 30.471065214624662
+   "min": 1.2184919797766702,
+   "max": 9.945454545454544
   },
   {
    "feature": "ts-verification-code-service&count",

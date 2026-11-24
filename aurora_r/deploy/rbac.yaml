@@ -1,0 +1,57 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: aurora-r
+  namespace: train-ticket
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: aurora-r
+  namespace: train-ticket
+rules:
+  # read the Deployments it manages and their pods
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch"]
+  # the only replica write: the Scale subresource
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale"]
+    verbs: ["get", "patch", "update"]
+  # Pod -> ReplicaSet -> Deployment owner resolution for read_states
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  # EndpointSlices are the serving evidence for settlement
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list", "watch"]
+  # suspend / restore the native HPAs; AURORA-R refuses to act alongside them
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  # durable HPA state + the action journal location
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
+  # single-writer Lease
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: aurora-r
+  namespace: train-ticket
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: aurora-r
+subjects:
+  - kind: ServiceAccount
+    name: aurora-r
+    namespace: train-ticket

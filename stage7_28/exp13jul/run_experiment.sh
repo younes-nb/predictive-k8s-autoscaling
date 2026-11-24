@@ -98,7 +98,7 @@ esac
 case "$SEED_POOL" in
   ''|*[!0-9]*) fail "--seed-pool must be a positive integer" ;;
 esac
-case "$SHAPE" in hpa|pbscaler|aurora) ;; *) fail "--shape must be hpa, pbscaler or aurora" ;; esac
+case "$SHAPE" in hpa|pbscaler|aurora|aurora-r) ;; *) fail "--shape must be hpa, pbscaler, aurora or aurora-r" ;; esac
 case "$TRACE_SOURCE" in jul|aug) ;; *) fail "--source must be jul or aug" ;; esac
 
 # ---- parameters derived from the CLI --------------------------------------
@@ -493,7 +493,19 @@ done
 curl -fsS -m 15 "http://127.0.0.1:3100/ready" > /dev/null || die "loki tunnel not reachable"
 log "tunnels verified up (kube + mimir + loki)"
 
-if [ "$AURORA_DEV" = "1" ]; then
+if [ "${SKIP_COLD_GATE:-0}" = "1" ]; then
+  # The operator has already verified the cold state (every pod Ready, no load).
+  # Re-asserting "all replicas == 1" is wrong for a workload whose HPAs declare
+  # minReplicas > 1, because the HPAs legitimately scale the deployments back up
+  # before the gate can run.
+  NOT_READY=$(kubectl -n train-ticket get pods \
+      -o jsonpath='{range .items[*]}{.metadata.name}{"|"}{.status.phase}{"|"}{.status.containerStatuses[*].ready}{"|"}{.metadata.deletionTimestamp}{"\n"}{end}' 2>/dev/null \
+      | awk -F'|' '$1 !~ /^ts-/ {next} {bad=($2!="Running") || ($4!=""); if($3=="" || $3 ~ /false/) bad=1; if(bad) n++} END{print n+0}')
+  echo "ASSERT cold_ok=$([ "${NOT_READY:-0}" = "0" ] && echo True || echo False) SKIP_COLD_GATE not_ready=${NOT_READY:-0}" \
+      > "$RUN_DIR/cold_gate.log"
+  [ "${NOT_READY:-0}" = "0" ] || die "cold gate failed (see cold_gate.log)"
+  log "cold gate skipped (SKIP_COLD_GATE=1): operator-verified cold state"
+elif [ "$AURORA_DEV" = "1" ]; then
   # AURORA is already deployed and owns the replicas; the HPAs are supposed to
   # be absent. The only thing worth asserting is that the controller itself is
   # up and every pod is Ready.
