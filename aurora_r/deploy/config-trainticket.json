@@ -17,7 +17,7 @@
   "top_k_in": 5,
   "slo_window_s": 120,
   "min_slo_eligible": 20,
-  "max_slo_age_s": 20,
+  "max_slo_age_s": 75,
   "max_metric_age_s": 20,
   "max_scale_out_step": 3,
   "max_scale_in_step": 2,

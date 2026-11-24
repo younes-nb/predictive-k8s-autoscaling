@@ -145,27 +145,31 @@ def red_queries(ns, front, gateway, source):
     SECONDS, so every latency is scaled by 1000.
     """
     if source == "beyla":
+        # Beyla exports on a 60 s cadence, so a [1m] rate window usually holds a
+        # single sample and rate() returns nothing at all. Every range window
+        # here is therefore 5m; the SLO cohort keeps its own 120s window.
+        rw = "5m"
         cnt = f'http_server_request_duration_seconds_count{{service_namespace="{ns}"}}'
         buc = f'http_server_request_duration_seconds_bucket{{service_namespace="{ns}"}}'
         sm = f'http_server_request_duration_seconds_sum{{service_namespace="{ns}"}}'
         fsel = f'service_name="{front}",service_namespace="{ns}"'
         return {
             "label": "service_name", "scale": 1000.0,
-            "qps": f"sum(rate({cnt}[1m])) by (service_name)",
+            "qps": f"sum(rate({cnt}[{rw}])) by (service_name)",
             "success": (f'(sum(rate(http_server_request_duration_seconds_count{{service_namespace="{ns}",'
-                        f'http_response_status_code!~"5.."}}[1m])) by (service_name)'
-                        f" / sum(rate({cnt}[1m])) by (service_name))"),
-            "lat": lambda q: (f"histogram_quantile({q:.2f}, sum(rate({buc}[1m]))"
+                        f'http_response_status_code!~"5.."}}[{rw}])) by (service_name)'
+                        f" / sum(rate({cnt}[{rw}])) by (service_name))"),
+            "lat": lambda q: (f"histogram_quantile({q:.2f}, sum(rate({buc}[{rw}]))"
                               f" by (service_name, le))"),
             "front_p90": (f"histogram_quantile(0.90, sum(rate("
-                          f"http_server_request_duration_seconds_bucket{{{fsel}}}[1m]))"
+                          f"http_server_request_duration_seconds_bucket{{{fsel}}}[{rw}]))"
                           f" by (service_name, le))"),
-            "front_avg": (f"sum(rate(http_server_request_duration_seconds_sum{{{fsel}}}[1m]))"
+            "front_avg": (f"sum(rate(http_server_request_duration_seconds_sum{{{fsel}}}[{rw}]))"
                           f" by (service_name) / sum(rate("
-                          f"http_server_request_duration_seconds_count{{{fsel}}}[1m]))"
+                          f"http_server_request_duration_seconds_count{{{fsel}}}[{rw}]))"
                           f" by (service_name)"),
-            "svc_avg": (f"sum(rate({sm}[1m])) by (service_name)"
-                        f" / sum(rate({cnt}[1m])) by (service_name)"),
+            "svc_avg": (f"sum(rate({sm}[{rw}])) by (service_name)"
+                        f" / sum(rate({cnt}[{rw}])) by (service_name)"),
             "edge_key": (("service_name", front),),
             "svc_key": (("service_name", front),),
         }
@@ -264,7 +268,7 @@ def collect_window(args, svcs, t0, duration, interval, slo, front, gateway):
             svc = dict(key).get(LBL)
             if svc:
                 lat_by_svc.setdefault(svc, {})[kind] = {
-                    ts: v * R["scale"] for ts, v in tm}
+                    ts: v * R["scale"] for ts, v in tm.items()}
 
     # 6) front p90 + avg (gateway_edge, service fallback)
     fp90_edge = run(R["front_p90"])
@@ -277,7 +281,7 @@ def collect_window(args, svcs, t0, duration, interval, slo, front, gateway):
     for key, tm in run(R["svc_avg"]).items():
         svc = dict(key).get(LBL)
         if svc:
-            savg_by_svc[svc] = {ts: v * R["scale"] for ts, v in tm}
+            savg_by_svc[svc] = {ts: v * R["scale"] for ts, v in tm.items()}
 
     edge_key = R["edge_key"]
     svc_key = R["svc_key"]
