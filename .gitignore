@@ -15,7 +15,6 @@ pbscaler/data/
 # PBScaler log artifacts (moved to /proj/k8sautoscaledl-PG0/reports)
 pbscaler/simulation/train_ticket/*.log
 pbscaler/simulation/train_ticket/*.txt
-AGENTS.md
 # Experiment run directories: logs, dumps and datasets are large local
 # artifacts, not source. Without this every snapshot (opencode and git) copies
 # gigabytes of run data — one 4 h run reached 18 GB of snapshots and filled the
