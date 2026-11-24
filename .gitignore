@@ -25,7 +25,7 @@ stage7_28/exp13jul/smoke_*/
 stage7_28/exp13jul/dryruns/
 # Every run directory is <name>_<UTC timestamp> (e.g. step1_hpa_30k_jul13_20261117T221258Z).
 stage7_28/exp13jul/step*/
-stage7_28/exp13jul/*_20[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z/
+stage7_28/exp13jul/*_20[0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z/
 # Same rule for the prefixes that are not step*: cal_*, probe_*, gwsmoke_*,
 # dryrun_* all produce <prefix>_<UTCstamp> run dirs with the same layout.
 stage7_28/exp13jul/cal_*/
@@ -49,3 +49,15 @@ aurora/build_model/
 #   aurora_r/deploy/build_and_push.sh
 .venv-aurorar/
 build_ctx/
+
+# Data and model artifacts are NEVER pushed: run directories, trace slices,
+# Mimir/Loki dumps, trained model weights and run logs. Everything here is
+# regenerable (training scripts, the orchestrator, dump_mimir.sh/dump_loki.sh).
+stage7_28/exp13jul/dryrun_*/
+stage7_28/exp13jul/mcr_*_slice_local.csv
+stage7_28/exp13jul/train_rf_step2/*.log
+stage7_28/exp13jul/train_rf_step2/frozen/*.model
+deploy/model.pt
+aurora_r/data/*.pt
+pbscaler/simulation/train_ticket/*.model
+paper_metrics_comprehensive.log
