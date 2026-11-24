@@ -87,3 +87,13 @@ def test_gateway_eligibility_policy_is_route_based_not_http_status():
     assert not eligible_path('/api/health',('/api/',),('/api/health',))
     assert not eligible_path('/static/file',('/api/',),())
     assert eligible_path('/api/checkout',(),('/static',))
+
+def test_inconclusive_action_is_terminal_and_does_not_block_the_controller(tmp_path):
+    # One ambiguous Scale API call used to wedge the controller forever: every
+    # later cycle saw an unresolved action and held.
+    f=str(tmp_path/'j.db');j=ActionJournal(f)
+    aid=j.create('frontend',3,5,{'before':3},now=100)
+    j.update(aid,'inconclusive',detail='api uncertain')
+    assert [a['id'] for a in j.unresolved()]==[aid]   # kept for the audit trail
+    assert j.blocking()==[]                          # but it must not block
+    j.close()

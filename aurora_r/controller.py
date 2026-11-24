@@ -103,7 +103,7 @@ class AuroraController:
         t=time.perf_counter();self._settle(states,snap,time.time())
         unresolved=self.journal.unresolved();ms['reconcile_ms']=(time.perf_counter()-t)*1000
         t=time.perf_counter()
-        decision,why,diag=self.policy.choose(snap,now=time.time(),blocked=bool(unresolved))
+        decision,why,diag=self.policy.choose(snap,now=time.time(),blocked=bool(self.journal.blocking()))
         ms['inference_and_policy_ms']=(time.perf_counter()-t)*1000
         ms['graph_inference_ms']=self.policy.last_diag_ms
         ms['action_inference_ms']=self.policy.last_action_ms

@@ -7,6 +7,11 @@ requires actual Ready/serving state AND post-convergence SLO observations.
 import json,os,sqlite3,time,uuid
 
 UNRESOLVED=('created','applied','ready','inconclusive')
+# Statuses that actually block a new decision. ``inconclusive`` is a terminal
+# state that needs an operator (see ``cli.py resolve``); it used to block too,
+# so ONE ambiguous Scale API call wedged the controller forever -- every later
+# cycle reported "unresolved action" and never proposed anything again.
+BLOCKING=('created','applied','ready')
 class ActionJournal:
     def __init__(self,path):
         os.makedirs(os.path.dirname(path) or '.',exist_ok=True)
@@ -56,6 +61,11 @@ class ActionJournal:
         placeholders=','.join('?' for _ in UNRESOLVED)
         rows=self.db.execute(f'''SELECT id,service,created,expected,target,status,ready_at,settled_at,before_json,after_json,detail
             FROM actions WHERE status IN ({placeholders}) ORDER BY created''',UNRESOLVED)
+        return [self._dict(r) for r in rows]
+    def blocking(self):
+        placeholders=','.join('?' for _ in BLOCKING)
+        rows=self.db.execute(f'''SELECT id,service,created,expected,target,status,ready_at,settled_at,before_json,after_json,detail
+            FROM actions WHERE status IN ({placeholders}) ORDER BY created''',BLOCKING)
         return [self._dict(r) for r in rows]
     def reconcile_created(self,states):
         for a in self.unresolved():

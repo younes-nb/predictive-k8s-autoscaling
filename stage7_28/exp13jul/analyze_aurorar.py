@@ -67,8 +67,9 @@ def analyse_dataset(rows):
                 continue
             s = svc.setdefault(name, {"count": [], "p99": [], "p90": [], "cpu": []})
             s["count"].append(fnum(r, k))
-            for kind in ("p99", "p90", "cpu_usage"):
-                kk = f"{name}&{kind}"
+            for field, kind in (("p99", "p99"), ("p90", "p90"),
+                                ("cpu_usage", "cpu")):
+                kk = f"{name}&{field}"
                 if kk in r:
                     s[kind].append(fnum(r, kk))
 
