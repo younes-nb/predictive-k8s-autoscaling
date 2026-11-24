@@ -1,0 +1,323 @@
+{
+  "paused": null,
+  "vus": null,
+  "duration": null,
+  "iterations": null,
+  "stages": null,
+  "scenarios": {
+    "load": {
+      "executor": "ramping-arrival-rate",
+      "startTime": null,
+      "gracefulStop": "30s",
+      "env": null,
+      "exec": null,
+      "tags": {
+        "exec_mode": "open"
+      },
+      "startRate": 27556,
+      "timeUnit": "1m0s",
+      "stages": [
+        {
+          "duration": "0s",
+          "target": 27556
+        },
+        {
+          "duration": "1m0s",
+          "target": 27556
+        },
+        {
+          "duration": "0s",
+          "target": 66667
+        },
+        {
+          "duration": "1m0s",
+          "target": 66667
+        },
+        {
+          "duration": "0s",
+          "target": 20444
+        },
+        {
+          "duration": "1m0s",
+          "target": 20444
+        },
+        {
+          "duration": "0s",
+          "target": 26667
+        },
+        {
+          "duration": "1m0s",
+          "target": 26667
+        },
+        {
+          "duration": "0s",
+          "target": 8000
+        },
+        {
+          "duration": "1m0s",
+          "target": 8000
+        },
+        {
+          "duration": "0s",
+          "target": 48000
+        },
+        {
+          "duration": "1m0s",
+          "target": 48000
+        },
+        {
+          "duration": "0s",
+          "target": 8000
+        },
+        {
+          "duration": "1m0s",
+          "target": 8000
+        },
+        {
+          "duration": "0s",
+          "target": 142222
+        },
+        {
+          "duration": "1m0s",
+          "target": 142222
+        },
+        {
+          "duration": "0s",
+          "target": 120000
+        },
+        {
+          "duration": "1m0s",
+          "target": 120000
+        },
+        {
+          "duration": "0s",
+          "target": 169778
+        },
+        {
+          "duration": "1m0s",
+          "target": 169778
+        },
+        {
+          "duration": "0s",
+          "target": 113778
+        },
+        {
+          "duration": "1m0s",
+          "target": 113778
+        },
+        {
+          "duration": "0s",
+          "target": 128000
+        },
+        {
+          "duration": "1m0s",
+          "target": 128000
+        },
+        {
+          "duration": "0s",
+          "target": 132444
+        },
+        {
+          "duration": "1m0s",
+          "target": 132444
+        },
+        {
+          "duration": "0s",
+          "target": 124444
+        },
+        {
+          "duration": "1m0s",
+          "target": 124444
+        },
+        {
+          "duration": "0s",
+          "target": 138667
+        },
+        {
+          "duration": "1m0s",
+          "target": 138667
+        },
+        {
+          "duration": "0s",
+          "target": 108444
+        },
+        {
+          "duration": "1m0s",
+          "target": 108444
+        },
+        {
+          "duration": "0s",
+          "target": 180444
+        },
+        {
+          "duration": "1m0s",
+          "target": 180444
+        },
+        {
+          "duration": "0s",
+          "target": 60444
+        },
+        {
+          "duration": "1m0s",
+          "target": 60444
+        },
+        {
+          "duration": "0s",
+          "target": 54222
+        },
+        {
+          "duration": "1m0s",
+          "target": 54222
+        },
+        {
+          "duration": "0s",
+          "target": 179556
+        },
+        {
+          "duration": "1m0s",
+          "target": 179556
+        },
+        {
+          "duration": "0s",
+          "target": 168889
+        },
+        {
+          "duration": "1m0s",
+          "target": 168889
+        },
+        {
+          "duration": "0s",
+          "target": 136889
+        },
+        {
+          "duration": "1m0s",
+          "target": 136889
+        },
+        {
+          "duration": "0s",
+          "target": 200000
+        },
+        {
+          "duration": "1m0s",
+          "target": 200000
+        },
+        {
+          "duration": "0s",
+          "target": 155556
+        },
+        {
+          "duration": "1m0s",
+          "target": 155556
+        },
+        {
+          "duration": "0s",
+          "target": 184889
+        },
+        {
+          "duration": "1m0s",
+          "target": 184889
+        },
+        {
+          "duration": "0s",
+          "target": 184000
+        },
+        {
+          "duration": "1m0s",
+          "target": 184000
+        },
+        {
+          "duration": "0s",
+          "target": 198222
+        },
+        {
+          "duration": "1m0s",
+          "target": 198222
+        },
+        {
+          "duration": "0s",
+          "target": 168889
+        },
+        {
+          "duration": "1m0s",
+          "target": 168889
+        },
+        {
+          "duration": "0s",
+          "target": 191111
+        },
+        {
+          "duration": "1m0s",
+          "target": 191111
+        },
+        {
+          "duration": "0s",
+          "target": 184889
+        },
+        {
+          "duration": "1m0s",
+          "target": 184889
+        }
+      ],
+      "preAllocatedVUs": 3334,
+      "maxVUs": 3334
+    }
+  },
+  "executionSegment": null,
+  "executionSegmentSequence": null,
+  "noSetup": null,
+  "setupTimeout": null,
+  "noTeardown": null,
+  "teardownTimeout": null,
+  "handleSummaryTimeout": null,
+  "rps": null,
+  "dns": {
+    "ttl": null,
+    "select": null,
+    "policy": null
+  },
+  "maxRedirects": null,
+  "userAgent": null,
+  "batch": null,
+  "batchPerHost": null,
+  "httpDebug": null,
+  "httpDebugRedact": null,
+  "insecureSkipTLSVerify": null,
+  "tlsCipherSuites": null,
+  "tlsVersion": null,
+  "tlsAuth": null,
+  "tlsAIAFetch": null,
+  "throw": null,
+  "thresholds": {
+    "http_req_duration": [
+      "p(95)\u003c8000"
+    ],
+    "http_req_failed": [
+      "rate\u003c0.35"
+    ]
+  },
+  "blacklistIPs": null,
+  "blockHostnames": null,
+  "hosts": null,
+  "noConnectionReuse": null,
+  "noVUConnectionReuse": null,
+  "minIterationDuration": null,
+  "ext": null,
+  "summaryTrendStats": null,
+  "summaryTimeUnit": null,
+  "systemTags": [
+    "check",
+    "error",
+    "error_code",
+    "group",
+    "method",
+    "name",
+    "proto",
+    "status",
+    "tls_version"
+  ],
+  "tags": null,
+  "metricSamplesBufferSize": null,
+  "noCookiesReset": null,
+  "discardResponseBodies": null,
+  "features": null
+}

@@ -53,3 +53,32 @@ def test_metric_cache_fetches_only_recent_bins_and_run_boundary_resets(configura
     assert second.node_mask[0,-1,NODE_FEATURES.index('req_rate')]==1
     third,info3=collector.collect('runB',state,now=1030.)
     assert info3['incremental'] is False
+
+def test_slo_fallback_uses_a_real_bucket_boundary():
+    # Istio's histogram has no le="200" series; a naive query would return an
+    # empty series and every request would look missed.
+    from aurora_r.metrics import _largest_bucket_at_most
+    assert _largest_bucket_at_most(200) == 100
+    assert _largest_bucket_at_most(100) == 100
+    assert _largest_bucket_at_most(250) == 250
+    assert _largest_bucket_at_most(0.2) == 0.5
+
+def test_istio_slo_counts_fast_requests_below_the_deadline(configuration):
+    class FakeSloClient:
+        def instant(self, query, at=None):
+            # count, fast (le=100 bucket), capacity
+            if '_count{' in query:
+                return [{'value': [at, '1000']}]
+            if '_bucket{' in query:
+                assert 'le="100"' in query, query
+                return [{'value': [at, '940']}]
+            if 'response_flags' in query:
+                return [{'value': [at, '0']}]
+            return []
+    configuration.slo_source = 'istio'
+    configuration.front_workload = 'frontend'
+    configuration.slo_budget_ms = 200.0
+    c = TelemetryCollector(configuration, client=FakeSloClient())
+    slo = c.read_slo(1000.0)
+    assert slo.eligible == 1000.0
+    assert abs(slo.miss_rate - 0.06) < 1e-9

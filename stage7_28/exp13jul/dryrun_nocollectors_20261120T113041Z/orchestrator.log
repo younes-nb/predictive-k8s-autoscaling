@@ -1,0 +1,22 @@
+2026-11-20T11:30:44Z === run_experiment START runid=dryrun_nocollectors_20261120T113041Z mode=local dry=--dry ===
+2026-11-20T11:30:44Z transport: loadgen=localhost (this node; ssh disabled)
+2026-11-20T11:30:44Z collectors: none (all capture is post-hoc from Mimir/Loki)
+2026-11-20T11:30:44Z periodic dumps: every 0s (0 = end of run only)
+2026-11-20T11:30:44Z params: MAX_REQUESTS=200000 USER_POOL=11995 PRE_ALLOCATED_VUS=11995 MAX_VUS=11995 START_MIN=0 TEST_MIN=30 COMPRESS=1 WARMUP_S=0 TARGET_URL=<default>
+2026-11-20T11:30:44Z thresholds: 5XX_RATE_MIN=0.01 4XX_RATE_MIN=0.05 COOLDOWN=45
+2026-11-20T11:30:44Z trace slice used in place (local mode) -> /proj/k8sautoscaledl-PG0/src/predictive-k8s-autoscaling/stage7_28/exp13jul/dryrun_nocollectors_20261120T113041Z/trace_slice.csv
+2026-11-20T11:30:44Z phase -1: preflight
+2026-11-20T11:30:44Z preflight OK: slice md5, k6 sha256=c98f844e37c763e1bd5f8488a39a41337b587271832448ab16069fcf86ebc53f, launcher sha256=d01c21087d1150cd975daa575a79a08ec81ed419cf2a93bd36eda0bbacf2cfd7
+2026-11-20T11:30:44Z seed pool: 11995 unique accounts (>= USER_POOL=11995, >= PRE_ALLOCATED_VUS=3334)
+2026-11-20T11:30:44Z VU sizing: mode=auto d_max=0.5s safety=2 -> PRE_ALLOCATED_VUS=3334 MAX_VUS=3334 for MAX_REQUESTS=200000
+inspect OK: 60 stages, startRate=27556, timeUnit=1m0s, pre=3334, max=3334
+2026-11-20T11:30:44Z k6 inspect config validated
+2026-11-20T11:30:44Z phase 0: tunnels + cold reset assert gate
+2026-11-20T11:31:59Z mimir not answering yet (attempt 1/6), retrying
+2026-11-20T11:32:49Z mimir not answering yet (attempt 2/6), retrying
+2026-11-20T11:33:38Z tunnels verified up (kube + mimir + loki)
+2026-11-20T11:33:41Z cold gate passed: ASSERT cold_ok=True (histogram={'1': 43} hpas=43 not_running=0 not_ready=0)
+2026-11-20T11:33:41Z resolved TARGET_URL=http://10.10.1.3:30080 (gateway externalIP/nodeIP + NodePort from the live Service)
+2026-11-20T11:33:42Z mongo-path probe OK (ts-auth-service -> ts-auth-mongo)
+2026-11-20T11:33:44Z FATAL: mimir up@now=0 (ingester not serving current data)
+2026-11-20T11:33:44Z STATUS: incomplete -- fatal: mimir up@now=0 (ingester not serving current data)

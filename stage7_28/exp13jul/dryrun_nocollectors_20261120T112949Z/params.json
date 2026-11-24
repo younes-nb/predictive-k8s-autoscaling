@@ -1,0 +1,13 @@
+{"runid": "dryrun_nocollectors_20261120T112949Z", "bench": "train_ticket", "autoscaler": "hpa",
+ "max_requests": 200000, "user_pool": 11995, "pre_allocated_vus": 3334, "max_vus": 3334,
+ "start_min": 0, "test_min": 30, "warmup_s": 0, "k6_run_s": 1800,
+ "target_url": "<launch_k6.sh default>", "transport": "local",
+ "trace_day": "1995-07-13", "trace_source": "jul", "trace_select": "transitions", "trace_duration_min": 30,
+ "trace_window_start_utc": "1995-07-13T11:55:00Z", "trace_window_end_utc": "1995-07-13T12:25:00Z", "trace_window_std": 69.7983,
+ "trace_window_peak_per_min": 225, "trace_slice_sha256": "dc7410d81a6787917debd7971fad35c8f00465f171a7496c491db985fbe413a9",
+ "trace_slice_rows": 30, "shape": "hpa", "seed_pool": 11995,
+ "collect_dur": 1800, "tools_end_offset": 2400, "exec_mode": "open",
+ "time_unit": "1m", "preflight": false, "seed_count": 11995,
+ "mcr_csv": "/proj/k8sautoscaledl-PG0/src/predictive-k8s-autoscaling/stage7_28/exp13jul/dryrun_nocollectors_20261120T112949Z/trace_slice.csv", "mcr_sha256": "dc7410d81a6787917debd7971fad35c8f00465f171a7496c491db985fbe413a9",
+ "k6_script_sha256": "c98f844e37c763e1bd5f8488a39a41337b587271832448ab16069fcf86ebc53f", "launch_k6_sha256": "d01c21087d1150cd975daa575a79a08ec81ed419cf2a93bd36eda0bbacf2cfd7",
+ "five_xx_rate_min": 0.01, "four_xx_rate_min": 0.05, "event_cooldown_s": 45}

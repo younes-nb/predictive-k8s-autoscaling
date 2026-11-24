@@ -1,0 +1,2 @@
+PRE : {"ts": "2026-11-20T11:33:41.028057+00:00Z", "deployments_stateless": 43, "replica_histogram": {"1": 43}, "pbscaler_replicas": null, "hpa_count": 43, "pods_total": 66, "pods_not_running": [], "pods_not_ready": [], "oomkilled": 0, "container_restarts": 0}
+ASSERT cold_ok=True (histogram={'1': 43} hpas=43 not_running=0 not_ready=0)

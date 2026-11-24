@@ -1,0 +1,11 @@
+2026-11-20T11:29:30Z === run_experiment START runid=dryrun_nocollectors_20261120T112928Z mode=local dry=--dry ===
+2026-11-20T11:29:30Z transport: loadgen=localhost (this node; ssh disabled)
+2026-11-20T11:29:30Z collectors: none (all capture is post-hoc from Mimir/Loki)
+2026-11-20T11:29:30Z periodic dumps: every 0s (0 = end of run only)
+2026-11-20T11:29:30Z params: MAX_REQUESTS=200000 USER_POOL=11995 PRE_ALLOCATED_VUS=11995 MAX_VUS=11995 START_MIN=0 TEST_MIN=30 COMPRESS=1 WARMUP_S=0 TARGET_URL=<default>
+2026-11-20T11:29:30Z thresholds: 5XX_RATE_MIN=0.01 4XX_RATE_MIN=0.05 COOLDOWN=45
+2026-11-20T11:29:30Z trace slice used in place (local mode) -> /proj/k8sautoscaledl-PG0/src/predictive-k8s-autoscaling/stage7_28/exp13jul/dryrun_nocollectors_20261120T112928Z/trace_slice.csv
+2026-11-20T11:29:30Z phase -1: preflight
+2026-11-20T11:29:30Z preflight OK: slice md5, k6 sha256=c98f844e37c763e1bd5f8488a39a41337b587271832448ab16069fcf86ebc53f, launcher sha256=d01c21087d1150cd975daa575a79a08ec81ed419cf2a93bd36eda0bbacf2cfd7
+2026-11-20T11:29:30Z FATAL: VU sizing needs MAX_VUS=3334 accounts but the seed pool has 2999. Generate more seeds (load_testing/seed_tt_users.py --count 3334 --out <file>), or set ALLOW_SEED_REUSE=1 to share accounts.
+2026-11-20T11:29:30Z STATUS: incomplete -- fatal: VU sizing needs MAX_VUS=3334 accounts but the seed pool has 2999. Generate more seeds (load_testing/seed_tt_users.py --count 3334 --out <file>), or set ALLOW_SEED_REUSE=1 to share accounts.

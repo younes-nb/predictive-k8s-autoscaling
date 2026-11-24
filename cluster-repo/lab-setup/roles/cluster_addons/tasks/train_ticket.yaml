@@ -1,0 +1,126 @@
+---
+# Deploy the pinned upstream TrainTicket 0.0.4 workload with its OWN resource
+# requests/limits/JVM settings preserved (via templates/inject_selectors.py and
+# templates/restore_upstream.py). No Istio, no NodePorts, no in-namespace
+# Gateway API proxy: the application path is the Envoy Gateway VIP.
+#
+# The playbook that applies this refuses to run if any HPA already owns the
+# benchmark Deployments -- a second replica writer is never allowed.
+
+- name: Ensure the Train-Ticket namespace exists
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ tt_ns }}"
+
+- name: Ensure git is installed
+  ansible.builtin.apt:
+    name: git
+    state: present
+    update_cache: yes
+  become: true
+
+- name: Clone/Update the Train-Ticket repo (shallow, pinned tag)
+  ansible.builtin.git:
+    repo: "{{ tt_repo_url }}"
+    dest: "{{ tt_clone_dir }}"
+    version: "{{ tt_repo_version }}"
+    depth: 1
+    force: true
+  register: _tt_git
+
+- name: Stage the upstream manifest renderer
+  ansible.builtin.copy:
+    src: "{{ role_path }}/templates/inject_selectors.py"
+    dest: "{{ tt_clone_dir }}/inject_selectors.py"
+    mode: "0755"
+
+- name: Render apply-ready manifests (selectors, worker placement, probes)
+  ansible.builtin.command: >
+    python3 "{{ tt_clone_dir }}/inject_selectors.py"
+    "{{ tt_clone_dir }}/deployment/k8s-deployment/ts-deployment-part1.yml"
+    "{{ tt_clone_dir }}/deployment/k8s-deployment/ts-deployment-part2.yml"
+    "{{ tt_clone_dir }}/deployment/k8s-deployment/ts-deployment-part3.yml"
+  environment:
+    TT_PROBES: "{{ tt_probe_overrides | to_json }}"
+  changed_when: false
+
+- name: Refuse to act if a native HPA already owns the benchmark
+  ansible.builtin.command: >-
+    kubectl --kubeconfig={{ kubeconfig_path }} -n {{ tt_ns }} get hpa -o json
+  register: _hpa
+  changed_when: false
+
+- name: Require a quiescent benchmark before applying replica declarations
+  ansible.builtin.assert:
+    that: (_hpa.stdout | from_json)['items'] | length == 0
+    fail_msg: >-
+      Native HPAs are present. Stop external autoscalers and remove them before
+      benchmark setup: never run two replica writers against one Deployment.
+
+- name: Apply the upstream manifests (resources unchanged)
+  ansible.builtin.command: >-
+    kubectl --kubeconfig={{ kubeconfig_path }} -n {{ tt_ns }}
+    apply -f "{{ tt_clone_dir }}/deployment/k8s-deployment.ready/{{ item }}"
+  loop: [ts-deployment-part1.yml, ts-deployment-part2.yml, ts-deployment-part3.yml]
+  register: _tt_apply
+  changed_when: "'created' in _tt_apply.stdout or 'configured' in _tt_apply.stdout"
+
+- name: Stage the live upstream resource restoration helper
+  ansible.builtin.copy:
+    src: "{{ role_path }}/templates/restore_upstream.py"
+    dest: /tmp/restore-upstream.py
+    mode: "0700"
+  when: allow_live_migration | bool
+
+- name: Restore the exact upstream resources and drop the legacy JVM override
+  ansible.builtin.command: >-
+    python3 /tmp/restore-upstream.py {{ tt_ns }} {{ kubeconfig_path }}
+    "{{ tt_clone_dir }}/deployment/k8s-deployment.ready"
+  when: allow_live_migration | bool
+  register: _restore
+  changed_when: "'patched' in _restore.stdout"
+
+- name: Configure the frontend proxy for the benchmark API paths
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata: {name: ts-ui-dashboard-nginx, namespace: "{{ tt_ns }}"}
+      data:
+        nginx.conf: "{{ lookup('template', 'dashboard-nginx.conf.j2') }}"
+
+- name: Mount the frontend proxy configuration
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    merge_type: strategic-merge
+    definition:
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata: {name: ts-ui-dashboard, namespace: "{{ tt_ns }}"}
+      spec:
+        template:
+          metadata:
+            annotations:
+              lab.example.com/proxy-config: "{{ lookup('template', 'dashboard-nginx.conf.j2') | hash('sha256') }}"
+          spec:
+            containers:
+              - name: ts-ui-dashboard
+                volumeMounts:
+                  - {name: nginx-override, mountPath: /usr/local/openresty/nginx/conf/nginx.conf, subPath: nginx.conf}
+            volumes:
+              - name: nginx-override
+                configMap: {name: ts-ui-dashboard-nginx}
+
+- name: Wait for every benchmark Deployment to finish rolling out
+  ansible.builtin.command: >-
+    kubectl --kubeconfig={{ kubeconfig_path }} -n {{ tt_ns }}
+    rollout status deployment --timeout=900s
+  changed_when: false

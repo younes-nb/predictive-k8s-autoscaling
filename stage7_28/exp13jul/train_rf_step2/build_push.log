@@ -1,0 +1,126 @@
+[0;32mBuilding docker.io/younesnb/pbscaler:v2.4.0-step1-1h-20261121T205521Z ...[0m
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 1.48kB done
+#1 DONE 0.1s
+
+#2 [internal] load metadata for docker.io/library/python:3.9-slim
+#2 ...
+
+#3 [auth] library/python:pull token for registry-1.docker.io
+#3 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/python:3.9-slim
+#2 DONE 0.8s
+
+#4 [internal] load .dockerignore
+#4 transferring context: 2B done
+#4 DONE 0.2s
+
+#5 [internal] load build context
+#5 DONE 0.0s
+
+#6 [ 1/13] FROM docker.io/library/python:3.9-slim@sha256:2d97f6910b16bd338d3060f261f53f144965f755599aab1acda1e13cf1731b1b
+#6 resolve docker.io/library/python:3.9-slim@sha256:2d97f6910b16bd338d3060f261f53f144965f755599aab1acda1e13cf1731b1b
+#6 resolve docker.io/library/python:3.9-slim@sha256:2d97f6910b16bd338d3060f261f53f144965f755599aab1acda1e13cf1731b1b 0.2s done
+#6 DONE 0.2s
+
+#5 [internal] load build context
+#5 transferring context: 321.38kB 0.0s done
+#5 DONE 0.1s
+
+#7 [ 2/13] WORKDIR /app
+#7 CACHED
+
+#8 [ 3/13] RUN apt-get update && apt-get install -y --no-install-recommends libgomp1     && rm -rf /var/lib/apt/lists/*
+#8 CACHED
+
+#9 [ 4/13] COPY requirements.txt /app/requirements.txt
+#9 CACHED
+
+#10 [ 5/13] RUN pip install --no-cache-dir -r /app/requirements.txt
+#10 CACHED
+
+#11 [ 6/13] COPY PBScaler.py main.py /app/
+#11 CACHED
+
+#12 [ 7/13] COPY config /app/config
+#12 DONE 0.8s
+
+#13 [ 8/13] COPY util /app/util
+#13 DONE 0.7s
+
+#14 [ 9/13] COPY monitor /app/monitor
+#14 DONE 0.7s
+
+#15 [10/13] COPY scripts /app/scripts
+#15 DONE 0.8s
+
+#16 [11/13] COPY simulation/train_ticket/RandomForestClassify.model /app/simulation/train_ticket/
+#16 DONE 0.7s
+
+#17 [12/13] COPY simulation/train_ticket/RandomForestClassify.svcs /app/simulation/train_ticket/
+#17 DONE 0.7s
+
+#18 [13/13] RUN mkdir -p /app/simulation/train_ticket /app/data
+#18 DONE 1.9s
+
+#19 exporting to image
+#19 exporting layers
+#19 exporting layers 4.0s done
+#19 exporting manifest sha256:a67868e04d84f364b3b7c33b670cc9324866c7d82e853b6db0afbc3c4bbe309a 0.1s done
+#19 exporting config sha256:9dee276d3ada0d6838663984536f8fae4c310a8d1e63fa1705a281d850175123
+#19 exporting config sha256:9dee276d3ada0d6838663984536f8fae4c310a8d1e63fa1705a281d850175123 0.1s done
+#19 exporting attestation manifest sha256:5b7eaf79b3b681c0f68f85fb764d8b748204dceaa546eca81959f08696cd1052
+#19 exporting attestation manifest sha256:5b7eaf79b3b681c0f68f85fb764d8b748204dceaa546eca81959f08696cd1052 0.2s done
+#19 exporting manifest list sha256:28c9d14a2c66e1b072970063cb3fbce7d9652066947907b9a0bddc59d745d258
+#19 exporting manifest list sha256:28c9d14a2c66e1b072970063cb3fbce7d9652066947907b9a0bddc59d745d258 0.1s done
+#19 naming to docker.io/younesnb/pbscaler:v2.4.0-step1-1h-20261121T205521Z
+#19 naming to docker.io/younesnb/pbscaler:v2.4.0-step1-1h-20261121T205521Z 0.0s done
+#19 unpacking to docker.io/younesnb/pbscaler:v2.4.0-step1-1h-20261121T205521Z
+#19 unpacking to docker.io/younesnb/pbscaler:v2.4.0-step1-1h-20261121T205521Z 1.7s done
+#19 DONE 6.4s
+[0;32mPushing docker.io/younesnb/pbscaler:v2.4.0-step1-1h-20261121T205521Z ...[0m
+The push refers to repository [docker.io/younesnb/pbscaler]
+3dc988d6de43: Waiting
+44136fa355b3: Waiting
+38513bd72563: Waiting
+b3ec39b36ae8: Waiting
+3dc988d6de43: Waiting
+44136fa355b3: Waiting
+38513bd72563: Layer already exists
+fc7443084902: Waiting
+ea56f685404a: Waiting
+b3ec39b36ae8: Layer already exists
+b6dad9f43d0c: Waiting
+3dc988d6de43: Waiting
+44136fa355b3: Already exists
+23cc3b3cdd6a: Layer already exists
+ea56f685404a: Layer already exists
+d0e8f205112a: Layer already exists
+60a27ac8f0c2: Waiting
+137853f39993: Waiting
+34c60587640a: Layer already exists
+fc7443084902: Layer already exists
+266a80ec742f: Layer already exists
+a719d431e443: Layer already exists
+b6dad9f43d0c: Waiting
+60a27ac8f0c2: Waiting
+137853f39993: Waiting
+e881dc282583: Waiting
+3dc988d6de43: Pushed
+b4c8d4950dcf: Waiting
+60a27ac8f0c2: Pushed
+137853f39993: Pushed
+e881dc282583: Waiting
+b8a1d21c9247: Waiting
+b5da2bf620a6: Waiting
+b6dad9f43d0c: Pushed
+b4c8d4950dcf: Waiting
+e881dc282583: Pushed
+b8a1d21c9247: Pushed
+b4c8d4950dcf: Pushed
+b5da2bf620a6: Pushed
+v2.4.0-step1-1h-20261121T205521Z: digest: sha256:28c9d14a2c66e1b072970063cb3fbce7d9652066947907b9a0bddc59d745d258 size: 856
+[0;32mPushed docker.io/younesnb/pbscaler:v2.4.0-step1-1h-20261121T205521Z — deployment.yaml pulls it via imagePullPolicy: IfNotPresent[0m

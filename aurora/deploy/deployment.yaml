@@ -42,6 +42,15 @@ spec:
         app: aurora
     spec:
       serviceAccountName: aurora
+      # The autoscaler belongs with the control plane, not with the workload it
+      # measures. The benchmark is pinned to lab.example.com/worker=true and
+      # the masters carry NoSchedule, so this is also what keeps them apart.
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: ""
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
       containers:
         - name: aurora
           image: __AURORA_IMAGE__

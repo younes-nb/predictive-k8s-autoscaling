@@ -101,6 +101,20 @@ def queries(ns):
         Query('edge_latency_p90_ms',f'histogram_quantile(0.90,sum by (source_workload,destination_workload,le) (rate({erh}[1m])))','edge'),
     ]
 
+# Istio's default histogram buckets, in milliseconds. Used to pick a bucket
+# boundary at or below the SLO deadline: the deadline itself is usually not a
+# boundary, and querying a non-existent ``le`` returns an empty series, which
+# would otherwise make every request look missed.
+ISTIO_BUCKETS_MS = (0.5, 1, 5, 10, 25, 50, 100, 250, 500, 1000,
+                    2500, 5000, 10000, 20000, 30000, 60000)
+
+
+def _largest_bucket_at_most(budget_ms):
+    """Largest Istio bucket boundary <= ``budget_ms`` (0.5 if none)."""
+    ok = [b for b in ISTIO_BUCKETS_MS if b <= float(budget_ms)]
+    return max(ok) if ok else ISTIO_BUCKETS_MS[0]
+
+
 def _samples(item):
     out=[]
     for ts,x in item.get('values',[]):
@@ -171,10 +185,16 @@ class TelemetryCollector:
         budget = self.cfg.slo_budget_ms
         common = (f'reporter="destination",destination_workload_namespace="{ns}",'
                   f'destination_workload="{front}"')
+        # Istio's histogram has fixed bucket boundaries (0.5,1,5,10,25,50,100,
+        # 250,500,...). A deadline of 200 ms is not a boundary, so querying
+        # le="200" returns nothing and every request looks missed. Use the
+        # largest boundary at or below the deadline: conservative (it can only
+        # understate the share of requests inside the budget), never optimistic.
+        boundary = _largest_bucket_at_most(budget)
         expr = {
             'count': f'sum(increase(istio_request_duration_milliseconds_count{{{common}}}[{w}s]))',
             'fast': (f'sum(increase(istio_request_duration_milliseconds_bucket'
-                     f'{{{common},le="{budget}"}}[{w}s]))'),
+                     f'{{{common},le="{boundary}"}}[{w}s]))'),
             'capacity': (f'sum(increase(istio_requests_total{{{common},'
                       f'response_flags=~".*(UO|OM).*"}}[{w}s]))'),
         }
