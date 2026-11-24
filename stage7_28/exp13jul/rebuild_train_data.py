@@ -136,6 +136,66 @@ def stateless_svcs_from_cluster(namespace=NS):
     return svcs
 
 
+def red_queries(ns, front, gateway, source):
+    """Per-service RED query set for the configured telemetry source.
+
+    ``istio`` is the retired mesh's destination-side histogram (kept so an old
+    cluster still rebuilds). ``beyla`` is the eBPF server-side histogram that
+    replaced it: same cohort (requests that reached the service), but in
+    SECONDS, so every latency is scaled by 1000.
+    """
+    if source == "beyla":
+        cnt = f'http_server_request_duration_seconds_count{{service_namespace="{ns}"}}'
+        buc = f'http_server_request_duration_seconds_bucket{{service_namespace="{ns}"}}'
+        sm = f'http_server_request_duration_seconds_sum{{service_namespace="{ns}"}}'
+        fsel = f'service_name="{front}",service_namespace="{ns}"'
+        return {
+            "label": "service_name", "scale": 1000.0,
+            "qps": f"sum(rate({cnt}[1m])) by (service_name)",
+            "success": (f'(sum(rate(http_server_request_duration_seconds_count{{service_namespace="{ns}",'
+                        f'http_response_status_code!~"5.."}}[1m])) by (service_name)'
+                        f" / sum(rate({cnt}[1m])) by (service_name))"),
+            "lat": lambda q: (f"histogram_quantile({q:.2f}, sum(rate({buc}[1m]))"
+                              f" by (service_name, le))"),
+            "front_p90": (f"histogram_quantile(0.90, sum(rate("
+                          f"http_server_request_duration_seconds_bucket{{{fsel}}}[1m]))"
+                          f" by (service_name, le))"),
+            "front_avg": (f"sum(rate(http_server_request_duration_seconds_sum{{{fsel}}}[1m]))"
+                          f" by (service_name) / sum(rate("
+                          f"http_server_request_duration_seconds_count{{{fsel}}}[1m]))"
+                          f" by (service_name)"),
+            "svc_avg": (f"sum(rate({sm}[1m])) by (service_name)"
+                        f" / sum(rate({cnt}[1m])) by (service_name)"),
+            "edge_key": (("service_name", front),),
+            "svc_key": (("service_name", front),),
+        }
+    rq = f'istio_requests_total{{reporter="destination",destination_workload_namespace="{ns}"}}'
+    rh = f'istio_request_duration_milliseconds_bucket{{reporter="destination",destination_workload_namespace="{ns}"}}'
+    f = f'destination_workload="{front}"'
+    return {
+        "label": "destination_workload", "scale": 1.0,
+        "qps": f"sum(rate({rq}[1m])) by (destination_workload)",
+        "success": (f'(sum(rate(istio_requests_total{{reporter="destination",'
+                    f'response_code!~"5.*",destination_workload_namespace="{ns}"}}[1m]))'
+                    f" by (destination_workload) / sum(rate({rq}[1m])) by (destination_workload))"),
+        "lat": lambda q: (f"histogram_quantile({q:.2f}, sum(irate({rh}[1m]))"
+                          f" by (destination_workload, le))"),
+        "front_p90": (f'histogram_quantile(0.90, sum(rate(istio_request_duration_milliseconds_bucket'
+                      f'{{reporter="destination", destination_workload="{front}", source_workload="{gateway}"}}[1m]))'
+                      f' by (destination_workload, source_workload, le))'),
+        "front_avg": (f'sum(rate(istio_request_duration_milliseconds_sum{{reporter="destination", '
+                      f'destination_workload="{front}", source_workload="{gateway}"}}[1m])) by (destination_workload) / '
+                      f'sum(rate(istio_request_duration_milliseconds_count{{reporter="destination", '
+                      f'destination_workload="{front}", source_workload="{gateway}"}}[1m])) by (destination_workload)'),
+        "svc_avg": (f'sum(rate(istio_request_duration_milliseconds_sum{{reporter="destination", '
+                    f'destination_workload_namespace="{ns}"}}[1m])) by (destination_workload) / '
+                    f'sum(rate(istio_request_duration_milliseconds_count{{reporter="destination", '
+                    f'destination_workload_namespace="{ns}"}}[1m])) by (destination_workload)'),
+        "edge_key": (("destination_workload", front), ("source_workload", gateway)),
+        "svc_key": (("destination_workload", front),),
+    }
+
+
 def collect_window(args, svcs, t0, duration, interval, slo, front, gateway):
     ticks = [t0 + k * interval for k in range(duration // interval)]
     start, end = t0, t0 + duration - 1
@@ -150,13 +210,21 @@ def collect_window(args, svcs, t0, duration, interval, slo, front, gateway):
     def run(query):
         return series_map(q(args.mimir_url, dict(P, query=query)))
 
+    source = getattr(args, "source", "auto") or "auto"
+    if source == "auto":
+        probe = run('count(istio_requests_total{reporter="destination",'
+                    'destination_workload="%s"})' % front)
+        source = "istio" if any(v for tm in probe.values() for _, v in tm) else "beyla"
+    R = red_queries(NS, front, gateway, source)
+    LBL = R["label"]
+    print(f"RED source: {source} (label {LBL})")
+
     iso = lambda t: datetime.fromtimestamp(t, tz=timezone.utc).isoformat()
 
     # 1) per-svc qps
     qps_by_svc = {}
-    for key, tm in run('sum(rate(istio_requests_total{reporter="destination",namespace="%s"}[1m])) '
-                       'by (destination_workload)' % NS).items():
-        svc = dict(key).get("destination_workload")
+    for key, tm in run(R["qps"]).items():
+        svc = dict(key).get(LBL)
         if svc:
             qps_by_svc[svc] = tm
 
@@ -183,54 +251,36 @@ def collect_window(args, svcs, t0, duration, interval, slo, front, gateway):
 
     # 4) success rate
     sr_by_svc = {}
-    for key, tm in run('(sum(rate(istio_requests_total{reporter="destination", '
-                       'response_code!~"5.*",namespace="%s"}[1m])) by (destination_workload) / '
-                       'sum(rate(istio_requests_total{reporter="destination",namespace="%s"}[1m])) '
-                       'by (destination_workload))' % (NS, NS)).items():
-        svc = dict(key).get("destination_workload")
+    for key, tm in run(R["success"]).items():
+        svc = dict(key).get(LBL)
         if svc:
             sr_by_svc[svc] = tm
 
     # 5) per-svc latency quantiles (irate — mirrors get_svc_latency)
     lat_by_svc = {}
     for kind, qq in (("p50", 0.50), ("p90", 0.90), ("p99", 0.99)):
-        r = run('histogram_quantile(%.2f, sum(irate(istio_request_duration_milliseconds_bucket'
-                '{reporter="destination", destination_workload_namespace="%s"}[1m])) '
-                'by (destination_workload, le))' % (qq, NS))
+        r = run(R["lat"](qq))
         for key, tm in r.items():
-            svc = dict(key).get("destination_workload")
+            svc = dict(key).get(LBL)
             if svc:
-                lat_by_svc.setdefault(svc, {})[kind] = tm
+                lat_by_svc.setdefault(svc, {})[kind] = {
+                    ts: v * R["scale"] for ts, v in tm}
 
     # 6) front p90 + avg (gateway_edge, service fallback)
-    fp90_edge = run('histogram_quantile(0.90, sum(rate(istio_request_duration_milliseconds_bucket'
-                    '{reporter="destination", destination_workload="%s", source_workload="%s"}[1m])) '
-                    'by (destination_workload, source_workload, le))' % (front, gateway))
-    fp90_svc = run('histogram_quantile(0.90, sum(rate(istio_request_duration_milliseconds_bucket'
-                   '{reporter="destination", destination_workload="%s"}[1m])) '
-                   'by (destination_workload, le))' % front)
-    favg_edge = run('sum(rate(istio_request_duration_milliseconds_sum{reporter="destination", '
-                    'destination_workload="%s", source_workload="%s"}[1m])) by (destination_workload) / '
-                    'sum(rate(istio_request_duration_milliseconds_count{reporter="destination", '
-                    'destination_workload="%s", source_workload="%s"}[1m])) by (destination_workload)'
-                    % (front, gateway, front, gateway))
-    favg_svc = run('sum(rate(istio_request_duration_milliseconds_sum{reporter="destination", '
-                   'destination_workload="%s"}[1m])) by (destination_workload) / '
-                   'sum(rate(istio_request_duration_milliseconds_count{reporter="destination", '
-                   'destination_workload="%s"}[1m])) by (destination_workload)' % (front, front))
+    fp90_edge = run(R["front_p90"])
+    fp90_svc = fp90_edge
+    favg_edge = run(R["front_avg"])
+    favg_svc = favg_edge
 
     # 7) per-svc avg
     savg_by_svc = {}
-    for key, tm in run('sum(rate(istio_request_duration_milliseconds_sum{reporter="destination", '
-                       'destination_workload_namespace="%s"}[1m])) by (destination_workload) / '
-                       'sum(rate(istio_request_duration_milliseconds_count{reporter="destination", '
-                       'destination_workload_namespace="%s"}[1m])) by (destination_workload)'
-                       % (NS, NS)).items():
-        svc = dict(key).get("destination_workload")
+    for key, tm in run(R["svc_avg"]).items():
+        svc = dict(key).get(LBL)
         if svc:
-            savg_by_svc[svc] = tm
+            savg_by_svc[svc] = {ts: v * R["scale"] for ts, v in tm}
 
-    edge_key = (("destination_workload", front), ("source_workload", gateway))
+    edge_key = R["edge_key"]
+    svc_key = R["svc_key"]
 
     def first_val(maps, ts):
         for tm in maps:
@@ -272,11 +322,11 @@ def collect_window(args, svcs, t0, duration, interval, slo, front, gateway):
         if p90 == p90:
             src = "gateway_edge"
         else:
-            p90 = by(fp90_svc.get((("destination_workload", front),), {}), ts)
+            p90 = by(fp90_svc.get(svc_key, {}), ts)
             src = "service" if p90 == p90 else ""
-        favg = by(favg_edge.get((("destination_workload", front),), {}), ts)
+        favg = by(favg_edge.get(svc_key, {}), ts)
         if favg != favg:
-            favg = by(favg_svc.get((("destination_workload", front),), {}), ts)
+            favg = by(favg_svc.get(svc_key, {}), ts)
 
         rt["front_p90"] = rf["front_p90"] = p90
         rt["front_avg"] = rf["front_avg"] = favg
@@ -318,6 +368,9 @@ def main():
     ap.add_argument("--mimir-url", default=os.environ.get(
         "PBS_MIMIR_URL", "http://127.0.0.1:18080/prometheus"))
     ap.add_argument("--suffix", default="_rebuilt")
+    ap.add_argument("--source", default=os.environ.get("RED_SOURCE", "auto"),
+                    choices=("auto", "istio", "beyla"),
+                    help="RED telemetry source (auto = istio if it has series, else beyla)")
     args = ap.parse_args()
 
     if args.dataset:

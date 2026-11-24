@@ -24,8 +24,9 @@ class Config:
     checkpoint: str
     mode: str = 'shadow'  # shadow, live
     # Where the user-facing SLO comes from.
-    #   auto     prefer the independent gateway counters, fall back to Istio
+    #   auto     prefer the independent gateway counters, then Beyla, then Istio
     #   gateway  aurora_slo_* counters only (requires aurora_r.ingress_gateway)
+    #   beyla    derive the cohort from Beyla's eBPF server-side histogram
     #   istio    derive the cohort from Istio's own request histogram
     # The Istio fallback exists so the controller can run on a workload whose
     # ingress it does not own; it is a completion-side approximation and cannot
@@ -88,8 +89,8 @@ class Config:
     def __post_init__(self):
         if self.mode not in {'shadow', 'live'}:
             raise ValueError('mode must be shadow or live')
-        if self.slo_source not in {'auto', 'gateway', 'istio'}:
-            raise ValueError('slo_source must be auto, gateway or istio')
+        if self.slo_source not in {'auto', 'gateway', 'beyla', 'istio'}:
+            raise ValueError('slo_source must be auto, gateway, beyla or istio')
         if self.policy_source not in {'model', 'rule'}:
             raise ValueError('policy_source must be model or rule')
         if self.rule_cpu_util_scaleout < 0 or self.rule_cpu_util_scalein < 0:

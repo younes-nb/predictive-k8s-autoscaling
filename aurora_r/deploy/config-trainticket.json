@@ -2,7 +2,7 @@
   "namespace": "train-ticket",
   "front_workload": "ts-ui-dashboard",
   "slo_budget_ms": 200.0,
-  "slo_source": "istio",
+  "slo_source": "beyla",
   "prometheus_url": "http://10.10.1.2:18080/prometheus",
   "checkpoint": "/opt/aurora-r/registry/bundle.pt",
   "mode": "live",

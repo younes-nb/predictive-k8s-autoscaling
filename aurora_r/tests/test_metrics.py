@@ -82,3 +82,43 @@ def test_istio_slo_counts_fast_requests_below_the_deadline(configuration):
     slo = c.read_slo(1000.0)
     assert slo.eligible == 1000.0
     assert abs(slo.miss_rate - 0.06) < 1e-9
+
+
+def test_beyla_slo_rounds_the_deadline_down_to_a_real_bucket(configuration):
+    # Beyla's histogram is in seconds and has no le="0.2"; the deadline must be
+    # rounded down to 0.1, which can only overstate the miss rate.
+    class FakeBeylaClient:
+        def instant(self, query, at=None):
+            if 'timestamp(' in query:
+                return [{'value': [at, at]}]
+            if '_count{' in query and 'status_code' not in query:
+                return [{'value': [at, '1000']}]
+            if '_bucket{' in query:
+                assert 'le="0.1"' in query, query
+                return [{'value': [at, '940']}]
+            if 'status_code' in query:
+                return [{'value': [at, '0']}]
+            return []
+    configuration.slo_source = 'beyla'
+    configuration.front_workload = 'frontend'
+    configuration.slo_budget_ms = 200.0
+    c = TelemetryCollector(configuration, client=FakeBeylaClient())
+    slo = c.read_slo(1000.0)
+    assert slo.eligible == 1000.0
+    assert abs(slo.miss_rate - 0.06) < 1e-9
+    assert slo.capacity_fail == 0.0
+
+
+def test_beyla_slo_without_a_heartbeat_is_unknown(configuration):
+    class NoBeyla(FakeCollector):
+        def read_slo(self, now):
+            from aurora_r.metrics import TelemetryCollector
+            class C:
+                def instant(self, query, at=None):
+                    return []
+            configuration.slo_source = 'beyla'
+            return TelemetryCollector(configuration, client=C()).read_slo(now)
+    configuration.slo_source = 'beyla'
+    configuration.front_workload = 'frontend'
+    c = NoBeyla(configuration)
+    assert c.read_slo(1000.0).eligible is None

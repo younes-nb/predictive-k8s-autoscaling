@@ -108,11 +108,15 @@ def queries(ns):
 ISTIO_BUCKETS_MS = (0.5, 1, 5, 10, 25, 50, 100, 250, 500, 1000,
                     2500, 5000, 10000, 20000, 30000, 60000)
 
+# Beyla's eBPF histogram, in SECONDS (the series is named ``_seconds``).
+BEYLA_BUCKETS_S = (0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75,
+                   1.0, 2.5, 5.0, 7.5, 10.0)
 
-def _largest_bucket_at_most(budget_ms):
-    """Largest Istio bucket boundary <= ``budget_ms`` (0.5 if none)."""
-    ok = [b for b in ISTIO_BUCKETS_MS if b <= float(budget_ms)]
-    return max(ok) if ok else ISTIO_BUCKETS_MS[0]
+
+def _largest_bucket_at_most(budget_ms, buckets=ISTIO_BUCKETS_MS):
+    """Largest bucket boundary <= ``budget_ms`` (the smallest one if none)."""
+    ok = [b for b in buckets if b <= float(budget_ms)]
+    return max(ok) if ok else buckets[0]
 
 
 def _samples(item):
@@ -163,7 +167,12 @@ class TelemetryCollector:
             return self._read_slo_gateway(now)
         if self.cfg.slo_source == 'istio':
             return self._read_slo_istio(now)
+        if self.cfg.slo_source == 'beyla':
+            return self._read_slo_beyla(now)
         state = self._read_slo_gateway(now)
+        if state.valid(now, self.cfg.max_slo_age_s, self.cfg.min_slo_eligible):
+            return state
+        state = self._read_slo_beyla(now)
         if state.valid(now, self.cfg.max_slo_age_s, self.cfg.min_slo_eligible):
             return state
         return self._read_slo_istio(now)
@@ -214,6 +223,51 @@ class TelemetryCollector:
         fast = min(total, fast if fast is not None else 0.0)
         capacity = min(total, capacity or 0.0)
         return SLOState(total, total - fast, capacity, 0.0, now, w)
+
+    def _read_slo_beyla(self, now):
+        """Derive the SLO cohort from Beyla's eBPF server-side histogram.
+
+        Beyla observes the request at the server socket, so the cohort is the
+        one the Istio *destination* histogram used to provide: requests that
+        reached the frontend. Two documented approximations remain:
+
+        * it is completion-side -- a request that never completes is invisible;
+        * the buckets are coarse, so the deadline is rounded DOWN to the largest
+          boundary at or below it (200 ms -> 100 ms). That can only overstate
+          the miss rate, never understate it.
+        """
+        w = int(self.cfg.slo_window_s)
+        ns = self.cfg.namespace
+        front = self.cfg.front_workload
+        boundary = _largest_bucket_at_most(self.cfg.slo_budget_ms / 1000.0, BEYLA_BUCKETS_S)
+        base = f'service_name="{front}",service_namespace="{ns}"'
+        expr = {
+            'count': f'sum(increase(http_server_request_duration_seconds_count{{{base}}}[{w}s]))',
+            'fast': (f'sum(increase(http_server_request_duration_seconds_bucket'
+                     f'{{{base},le="{boundary:g}"}}[{w}s]))'),
+            'capacity': (f'sum(increase(http_server_request_duration_seconds_count'
+                         f'{{{base},http_response_status_code=~"5.."}}[{w}s]))'),
+            'heartbeat': f'max(timestamp(http_server_request_duration_seconds_count{{{base}}}))',
+        }
+
+        def one(key, query):
+            try:
+                data = self.client.instant(query, now)
+                val = float(data[0]['value'][1]) if data else None
+                return key, val if val is not None and math.isfinite(val) else None
+            except Exception:
+                return key, None
+        with ThreadPoolExecutor(max_workers=min(4, self.cfg.telemetry_workers)) as pool:
+            r = dict(pool.map(lambda kv: one(*kv), expr.items()))
+        total, fast, capacity, hb = (r.get('count'), r.get('fast'),
+                                     r.get('capacity'), r.get('heartbeat'))
+        if hb is None or now - hb > self.cfg.max_slo_age_s or hb > now + 5:
+            return SLOState(None, None, None, None, 0, w)
+        if total is None or total < self.cfg.min_slo_eligible:
+            return SLOState(None, None, None, None, 0, w)
+        fast = min(total, fast if fast is not None else 0.0)
+        capacity = min(total, capacity or 0.0)
+        return SLOState(total, total - fast, capacity, 0.0, hb, w)
 
     def _read_slo_gateway(self, now):
         """Independent gateway counters; missing samples fail closed."""

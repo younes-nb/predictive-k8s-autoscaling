@@ -120,7 +120,7 @@ COLLECT_DUR=${COLLECT_DUR:-$K6_RUN_S}
 TOOLS_END_OFFSET=${TOOLS_END_OFFSET:-$((K6_RUN_S + 600))}
 TARGET_URL=${TARGET_URL:-}
 SKIP_TRAFFIC_GATE=${SKIP_TRAFFIC_GATE:-0}
-# How long to keep retrying the traffic gate when the istio metric itself is
+# How long to keep retrying the traffic gate when the gateway metric itself is
 # unreachable (Prometheus/Mimir down) before anchoring the window at launch.
 TRAFFIC_GATE_FALLBACK_S=${TRAFFIC_GATE_FALLBACK_S:-180}
 SKIP_DATASET=${SKIP_DATASET:-0}
@@ -576,6 +576,33 @@ except Exception:
     fi
     unset _gw _ip _np
   fi
+  if [ -z "$TARGET_URL" ]; then
+    # Gateway API + Envoy Gateway (the retired in-namespace proxy is gone). The
+    # application Service is a LoadBalancer with the MetalLB VIP on port 80 and
+    # NO NodePort, so the address is <externalIP>:80.
+    _lb=$(kubectl -n envoy-gateway-system get svc -o json 2>/dev/null | python3 -c '
+import json,sys
+try:
+    d=json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+for s in d["items"]:
+    ports=[p.get("port") for p in s["spec"].get("ports",[])]
+    if 80 not in ports:
+        continue
+    ing=(s["status"].get("loadBalancer") or {}).get("ingress") or []
+    ip=next((i.get("ip") or i.get("hostname") for i in ing if i.get("ip") or i.get("hostname")), None)
+    if ip is None:
+        ip=next((e for e in (s["spec"].get("externalIPs") or []) if e), None)
+    if ip:
+        print(ip); break
+' 2>/dev/null)
+    if [ -n "$_lb" ]; then
+      TARGET_URL="http://${_lb}:80"
+      log "resolved TARGET_URL=$TARGET_URL (Envoy Gateway LoadBalancer VIP, no NodePort)"
+    fi
+    unset _lb
+  fi
   [ -z "$TARGET_URL" ] && log "WARN: could not resolve the gateway address; launch_k6.sh default will be used"
 fi
 
@@ -613,10 +640,14 @@ except Exception:
 [ "${UPNOW:-0}" -lt 1 ] && die "mimir up@now=$UPNOW (ingester not serving current data)"
 log "mimir up@now=$UPNOW — healthy"
 
-# The istio dataplane request rate is what the SLO analysis, the 5xx attribution
-# and the traffic gate all read.
+# The dataplane request rate is what the SLO analysis, the 5xx attribution and
+# the traffic gate all read. The mesh is retired: the request path is Envoy
+# Gateway, so the rate comes from the gateway proxy's own upstream counter, and
+# per-service RED metrics come from Beyla. The old istio_requests_total query
+# answered 0 forever after the migration and stalled the traffic gate for the
+# full 20 min, so every istio-based query here is gone.
 #
-# There is NO Prometheus in this stack: Alloy (in-cluster) scrapes the istio
+# There is NO Prometheus in this stack: Alloy (in-cluster) scrapes the
 # ServiceMonitors and remote-writes to Mimir, which runs on the monitoring host.
 # This block used to check for a Prometheus CR and log a WARN when it was absent
 # -- a leftover from a since-deleted Prometheus server. It fired on every single
@@ -717,8 +748,9 @@ if [ "$SKIP_TRAFFIC_GATE" = "1" ]; then
   echo "$t_traffic" > "$RUN_DIR/traffic_start_epoch"
   log "phase 4: SKIPPED (SKIP_TRAFFIC_GATE=1) -- measured window anchored at launch"
 else
-log "phase 4: waiting for traffic (ui rps > 0.2)"
-# The istio dataplane request rate is the primary signal. If that metric is
+log "phase 4: waiting for traffic (gateway rps > 0.2)"
+# The Envoy Gateway upstream request rate is the primary signal (Beyla's
+# frontend counter is the fallback). If that metric is
 # unreachable (Prometheus/Mimir down) the gate must not fail the run: an
 # infrastructure gap is not a no-traffic condition. So the query distinguishes
 # "no answer" (metric unavailable) from "answer 0" (no traffic), and only the
@@ -728,13 +760,18 @@ t_traffic=""
 metric_missing_since=""
 for i in $(seq 1 240); do   # up to 20 min of "metric answering zero"
   resp=$(curl -s -m 8 "http://127.0.0.1:18080/prometheus/api/v1/query" \
-          --data 'query=sum(rate(istio_requests_total{reporter="destination",destination_workload="ts-ui-dashboard"}[30s]))' 2>/dev/null)
+          --data 'query=sum(rate(envoy_cluster_upstream_rq_total[1m]))' 2>/dev/null)
+  if [ -n "$resp" ] && ! printf '%s' "$resp" | grep -q '"result":\[{' ; then
+    # no gateway series yet -- fall back to Beyla's frontend counter
+    resp=$(curl -s -m 8 "http://127.0.0.1:18080/prometheus/api/v1/query" \
+          --data 'query=sum(rate(http_server_request_duration_seconds_count{service_name="ts-ui-dashboard"}[1m]))' 2>/dev/null)
+  fi
   if [ -z "$resp" ]; then
     # no answer at all -> metric unavailable
     [ -z "$metric_missing_since" ] && metric_missing_since=$(date +%s)
     if [ $(( $(date +%s) - metric_missing_since )) -ge "$TRAFFIC_GATE_FALLBACK_S" ]; then
-      log "WARN: istio metric unavailable for ${TRAFFIC_GATE_FALLBACK_S}s -- anchoring the measured window at launch"
-      status_reason "traffic gate fell back to launch anchor: Mimir istio_requests_total unreachable"
+      log "WARN: gateway metric unavailable for ${TRAFFIC_GATE_FALLBACK_S}s -- anchoring the measured window at launch"
+      status_reason "traffic gate fell back to launch anchor: Mimir envoy_cluster_upstream_rq_total unreachable"
       t_traffic=$LAUNCH_EPOCH
       break
     fi
@@ -753,7 +790,7 @@ except Exception:
   fi
   sleep 5
 done
-[ -z "$t_traffic" ] && die "no traffic detected in 20 min (istio metric answering zero)"
+[ -z "$t_traffic" ] && die "no traffic detected in 20 min (gateway metric answering zero)"
 echo "$t_traffic" > "$RUN_DIR/traffic_start_epoch"
 log "traffic detected epoch=$t_traffic (+$((t_traffic - LAUNCH_EPOCH)) s after launch)"
 log "measured window starts at the first selected bucket (WARMUP_S=$WARMUP_S)"
