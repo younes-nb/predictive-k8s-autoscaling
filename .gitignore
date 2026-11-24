@@ -42,3 +42,10 @@ k6/
 # aurora/deploy/build_and_push.sh.
 aurora/data/
 aurora/build_model/
+
+# AURORA-R: the local virtualenv and the staged docker build context are
+# generated, not source (the venv alone is ~500 MB of binaries). Recreate with
+#   python3 -m venv .venv-aurorar && .venv-aurorar/bin/pip install -r aurora_r/requirements.txt
+#   aurora_r/deploy/build_and_push.sh
+.venv-aurorar/
+build_ctx/
