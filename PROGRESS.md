@@ -1,6 +1,14 @@
 # PROGRESS
 
 ## 2026-11-27 — Final telemetry patch (cluster-final-telemetry-c64c881)
+- Phase 0: patch SHA 3a8221e4… applied; static_validate/unittest(20)/pinned-quickstart PASS.
+- **Phase 1 PASS**: k6 native RW streams mid-run; JS counters renamed lab_* → k6_lab_*_total; native histograms; check_k6_stream PASS (attempted=120, http_reqs=325).
+- **Phase 2 PASS**: edge rules use actual Beyla labels (client/server_k8s_namespace_name); edge_latency 0 nonfinite; no-missing-latency only for HTTP edges.
+- **Phase 3 PASS**: standalone cadvisor DaemonSet (v0.49.1, 3s) + alloy-node scrape/relabel; 6 nodes, 6–12s source age.
+- **Phase 4 PASS**: check_live_metrics 64 PASS during active load (twice).
+- **Phase 5 PASS**: idempotency re-run changed=0; FINAL_READINESS.md; cluster-repo HEAD 9dc8c1a, predictive ea30b56 (pushed).
+
+## 2026-11-27 — Final telemetry patch (cluster-final-telemetry-c64c881)
 - Phase 0: patch SHA 3a8221e4… applied; static_validate/unittest(40)/pinned-quickstart PASS. HEAD 92471a1 (pushed).
 - **Phase 1 PASS**: k6 native remote-write streams mid-run (check_k6_stream PASS attempted=80); k6 aliases removed.
 - **Phase 3 PASS**: Alloy `prometheus.exporter.cadvisor` (store_container_labels) + containerd socket; source job `integrations/cadvisor`, **6 nodes, max age 4.9 s** (≤15 s). Validator updated.
