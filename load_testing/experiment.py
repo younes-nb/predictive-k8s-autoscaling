@@ -21,9 +21,22 @@ def run_k6(plan, phase, env, out, k6):
     p=out/(phase+'_plan.json'); p.write_text(json.dumps(plan,indent=2)+'\n')
     e=dict(env,RATE_PLAN=str(p),PHASE=phase)
     cmd=[k6,'run','--include-system-env-vars=true','--summary-export',str(out/(phase+'_summary.json')),'-o','json='+str(out/(phase+'_samples.json.gz'))]
-    if e.get('K6_RW_SERVER_URL'): cmd+=['-o','experimental-prometheus-rw']
+    if e.get('K6_PROMETHEUS_RW_SERVER_URL') or e.get('K6_RW_SERVER_URL'):
+        # k6's Prometheus RW output always prefixes metric names with "k6_" and
+        # appends "_total" to counters, so the JS counters are named "lab_*"
+        # (not "k6_lab_*_total") to land as k6_lab_*_total in Mimir. Trends are
+        # exported as native histograms so histogram_count(k6_http_req_duration_seconds)
+        # is available mid-run (K6_RW_ADD_NAME_PREFIX is not a real k6 option).
+        e['K6_PROMETHEUS_RW_TREND_AS_NATIVE_HISTOGRAM']='true'
+        cmd+=['-o','experimental-prometheus-rw','--tag','experiment='+str(e.get('RUNID',phase))]
     cmd+=[str(HERE/'k6/trainticket.js')]
-    return subprocess.run(cmd,env=e,check=False).returncode
+    collector=None
+    if e.get('K6_COLLECTOR') and phase=='measurement': collector=subprocess.Popen([sys.executable,e['K6_COLLECTOR'],str(out)],env=e)
+    rc=subprocess.run(cmd,env=e,check=False).returncode
+    if collector:
+        try: collector.wait(timeout=30)
+        except Exception: collector.kill()
+    return rc
 
 def probe(host,path,body=None,token=None):
     headers={'Content-Type':'application/json'}
@@ -88,7 +101,7 @@ def main():
             broker.prepare(); server=broker.server();
             if cfg.get('preflight',True): preflight(host,cfg['travel_date'],broker,profile,fixtures)
             elif not cfg.get('development_only',False): raise ValueError('preflight bypass requires development_only=true')
-            env=dict(os.environ,HOST=host,BROKER_URL='http://127.0.0.1:'+str(server.server_port),BROKER_KEY=broker.secret,SEED_FILE=str(safe_seed),PRE_ALLOCATED_VUS=str(vus),MAX_VUS=str(vus),TRAVEL_DATE=cfg['travel_date'],TRAVEL_FIXTURES=str(fixture_path),WORKLOAD_SEED=str(cfg.get('workload_seed',42)),WORKLOAD_PROFILE=profile,BUSINESS_SLO_MS=str(cfg.get('business_slo_ms',2000)),DRAIN=cfg.get('drain','120s'),RUNID=out.name,TRACE_COMPRESS='1')
+            env=dict(os.environ,HOST=host,BROKER_URL='http://127.0.0.1:'+str(server.server_port),BROKER_KEY=broker.secret,SEED_FILE=str(safe_seed),PRE_ALLOCATED_VUS=str(vus),MAX_VUS=str(vus),TRAVEL_DATE=cfg['travel_date'],TRAVEL_FIXTURES=str(fixture_path),WORKLOAD_SEED=str(cfg.get('workload_seed',42)),WORKLOAD_PROFILE=profile,BUSINESS_SLO_MS=str(cfg.get('business_slo_ms',2000)),DRAIN=cfg.get('drain','120s'),RUNID=out.name,TRACE_COMPRESS='0')
             env.pop('TT_USER_PASSWORD',None); env.pop('TT_ADMIN_PASSWORD',None)
             warm=cfg.get('warmup',{'ips':5,'seconds':120}); k6=cfg.get('k6_bin','k6')
             if warm['seconds']>0 and run_k6(constant(warm['ips'],warm['seconds']),'warmup',env,out,k6): raise RuntimeError('warmup k6 failed')
